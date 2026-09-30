@@ -1,0 +1,4 @@
+{
+  "note": "Packages baked into the starter image. The coder cannot install anything else.",
+  "packages": []
+}

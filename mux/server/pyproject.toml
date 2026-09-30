@@ -1,0 +1,23 @@
+[project]
+name = "mux-server"
+version = "0.1.0"
+description = "MUX backend: room actors, coordinator, coder loop, and API."
+requires-python = ">=3.11"
+# Pin versions during week 1 setup.
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic",
+  "pydantic-settings",
+  "openai",
+  "tavily-python",
+  "sqlalchemy[asyncio]",
+  "asyncpg",
+  "alembic",
+  "pyjwt",
+  "httpx",
+  "cryptography",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
