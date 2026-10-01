@@ -126,7 +126,7 @@ function BlankProject({ title, description, plan, fileCount }: { title: string; 
             ? `${done} of ${plan.length} plan items built · the preview appears after the first build`
             : 'Describe what you want in the feed — the preview appears after the first build'}
         </div>
-        <p className="mono relative text-[11px] text-[var(--faint)]">{fileCount} starter files · edit them in the Code tab</p>
+        <p className="mono relative text-[11px] text-[var(--faint)]">{fileCount} {fileCount === 1 ? 'file' : 'files'} · edit them in the Code tab</p>
       </div>
     </div>
   );

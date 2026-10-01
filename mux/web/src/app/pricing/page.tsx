@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Zap, Code2, Users, ShieldCheck, CheckCircle2, Minus, Check, ChevronDown, Calculator, PlayCircle, Mail } from 'lucide-react';
 import { BTN_GHOST, BTN_PRIMARY, CARD, CtaCard, IconTile, PageHero, Reveal, ShaderBackground, SiteHeader, SiteFooter, Spotlight } from '@/components/shell';
@@ -140,18 +140,23 @@ export default function PricingPage() {
   const monthlyRef = useRef<HTMLButtonElement>(null);
   const annualRef = useRef<HTMLButtonElement>(null);
   const [pill, setPill] = useState({ left: 0, width: 0 });
-  const measurePill = () => {
+  const measurePill = useCallback(() => {
     const el = annual ? annualRef.current : monthlyRef.current;
     if (!el) return;
     const next = { left: el.offsetLeft, width: el.offsetWidth };
     setPill(prev => (prev.left === next.left && prev.width === next.width ? prev : next));
-  };
-  useLayoutEffect(measurePill);
+  }, [annual]);
+  useLayoutEffect(measurePill, [measurePill]);
+  // Re-measure when the window resizes or the web fonts finish loading (both change the buttons' widths)
   useEffect(() => {
+    let active = true;
     window.addEventListener('resize', measurePill);
-    document.fonts?.ready.then(measurePill);
-    return () => window.removeEventListener('resize', measurePill);
-  });
+    document.fonts?.ready.then(() => { if (active) measurePill(); });
+    return () => {
+      active = false;
+      window.removeEventListener('resize', measurePill);
+    };
+  }, [measurePill]);
 
   const toggleClass = (on: boolean) =>
     `relative z-10 flex items-center gap-space-xs rounded-full px-space-lg py-space-sm text-label-md transition-colors duration-300 ${

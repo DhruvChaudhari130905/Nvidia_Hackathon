@@ -13,10 +13,13 @@ import { ShaderBackground, SiteFooter, SiteHeader } from '@/components/shell';
 export default function LoginPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
+  // Set by /auth/callback when the sign-in didn't complete
+  const [authError, setAuthError] = useState<string | null>(null);
   // Where to go after signing in (e.g. the room or template the user was opening)
   const nextPath = () => safeNext(new URLSearchParams(window.location.search).get('next'));
 
   useEffect(() => {
+    setAuthError(new URLSearchParams(window.location.search).get('error'));
     const { data: { subscription } } = onAuthStateChange((event, session) => {
       if (session) {
         router.push(nextPath());
@@ -82,6 +85,12 @@ export default function LoginPage() {
               </h1>
               <p className="text-body-md text-on-surface-variant">Eight people steering, one agent building</p>
             </div>
+
+            {authError && (
+              <div role="alert" className="relative mb-space-md rounded-lg border border-error/40 bg-error/10 p-space-md text-body-sm text-on-surface">
+                Sign-in didn&apos;t complete: {authError}
+              </div>
+            )}
 
             {!isSupabaseConfigured && (
               <div className="relative mb-space-md rounded-lg border border-outline-variant/40 bg-surface-container-lowest p-space-md text-body-sm text-on-surface-variant">

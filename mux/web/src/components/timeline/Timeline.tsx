@@ -55,7 +55,7 @@ export function Timeline({
               >
                 <span className="pt">{index}</span>
                 <span className="lb">
-                  {checkpoint.plan[checkpoint.plan.length - 1]?.title || `Checkpoint ${index}`}
+                  {checkpointLabel(checkpoint) || `Checkpoint ${index}`}
                   <small>
                     {format(new Date(checkpoint.created_at), 'HH:mm')}
                     {checkpoint.sandbox_snapshot_uuid && ' · Nebius'}
@@ -68,4 +68,11 @@ export function Timeline({
       </div>
     </footer>
   );
+}
+
+// The task that produced the checkpoint; older checkpoints without task_id fall back to the last finished task
+function checkpointLabel(checkpoint: Checkpoint): string | undefined {
+  const plan = checkpoint.plan ?? [];
+  if (checkpoint.task_id) return plan.find(p => p.id === checkpoint.task_id)?.title;
+  return [...plan].reverse().find(p => p.status === 'done')?.title;
 }

@@ -1,72 +1,61 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import type { Question, User } from '@/types';
-import { api } from '@/lib/api';
-import { format } from 'date-fns';
+import React, { useState } from 'react';
+import type { Question } from '@/types';
+import { formatCountdown, useSecondsUntil } from '@/lib/countdown';
 
 interface QuestionCardProps {
   question: Question;
-  currentUser: User;
   currentUserRole: 'owner' | 'editor' | 'viewer';
   onAnswer: (questionId: string, answer: string) => void;
 }
 
-export function QuestionCard({ question, currentUser, currentUserRole, onAnswer }: QuestionCardProps) {
-  const [timeLeft, setTimeLeft] = useState(300); // 5 minutes
-  const [answered, setAnswered] = useState(false);
+export function QuestionCard({ question, currentUserRole, onAnswer }: QuestionCardProps) {
+  const isOpen = question.status === 'open';
+  const timeLeft = useSecondsUntil(question.expires_at, isOpen);
+  // The answer we sent, until the server's question.answered event closes the card
+  const [sentAnswer, setSentAnswer] = useState<string | null>(null);
 
-  useEffect(() => {
-    const expiresAt = new Date(question.expires_at).getTime();
-    const now = Date.now();
-    setTimeLeft(Math.max(0, Math.floor((expiresAt - now) / 1000)));
-
-    const interval = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) {
-          setAnswered(true);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [question.expires_at]);
+  const canAnswer = isOpen && !sentAnswer && timeLeft > 0 && currentUserRole !== 'viewer';
 
   const handleAnswer = (answer: string) => {
-    if (answered || currentUserRole === 'viewer') return;
+    if (!canAnswer) return;
     onAnswer(question.id, answer);
-    setAnswered(true);
+    setSentAnswer(answer);
   };
+
+  let resolved: string | null = null;
+  if (question.status === 'answered') resolved = `Answered: ${question.answer}. Sent to the coder as a merge.`;
+  else if (question.status === 'defaulted') resolved = `No answer in time, so the default was used: ${question.answer ?? question.default_option}.`;
+  else if (sentAnswer) resolved = `Answer sent: ${sentAnswer}.`;
+  else if (timeLeft === 0) resolved = `Time's up. The coder will use the default (${question.default_option}).`;
 
   return (
     <div className="card ask">
       <div className="card-head">
         <span className="card-kind">Agent question · task {question.task_id}</span>
-        <span className="timer mono">{format(new Date(0).setSeconds(timeLeft), 'm:ss')}</span>
+        {isOpen && <span className="timer mono">{formatCountdown(timeLeft)}</span>}
       </div>
       <h4>{question.text}</h4>
       <p className="why">{question.default_option ? `Default: ${question.default_option}` : ''}</p>
 
-      {!answered ? (
+      {resolved ? (
+        <div className="resolved">{resolved}</div>
+      ) : (
         <div className="opts">
-          {question.options.map((option, index) => (
+          {question.options.map(option => (
             <button
               key={option}
               className="opt"
               onClick={() => handleAnswer(option)}
-              aria-pressed={false}
-              disabled={answered || currentUserRole === 'viewer'}
+              disabled={!canAnswer}
               data-ans={option}
+              type="button"
             >
               <span className="lbl">{option}</span>
               {option === question.default_option && <span className="n mono">default</span>}
             </button>
           ))}
-        </div>
-      ) : (
-        <div className="resolved">
-          Answer sent to the coder as a merge.
         </div>
       )}
     </div>

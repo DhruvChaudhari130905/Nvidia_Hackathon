@@ -12,7 +12,7 @@ import { CodeEditor, languageFor, type EditorSettings, type EditorShortcut } fro
 import { Preview } from './Preview';
 import { BottomPanel, type Problem, type PanelView } from './BottomPanel';
 import type { RunState } from './RunOutput';
-import { canRun, remoteFallback, runRemote, runnerFor, type Runner } from '@/lib/codeRunner';
+import { canRun, remoteFallback, remoteRunAllowed, runRemote, runnerFor, type Runner } from '@/lib/codeRunner';
 import { notify } from '@/lib/notifications';
 import { QuickOpen, type PaletteCommand } from './QuickOpen';
 import { OpenInVsCode } from './OpenInVsCode';
@@ -283,6 +283,8 @@ export function CenterTabs({
   };
 
   const runRemotely = async (path: string, runner: Runner) => {
+    // The file's source goes to a third-party service, so ask once before the first remote run
+    if (!remoteRunAllowed()) return;
     runAbort.current?.abort();
     const abort = new AbortController();
     runAbort.current = abort;

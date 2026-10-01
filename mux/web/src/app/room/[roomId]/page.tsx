@@ -1,12 +1,9 @@
 'use client';
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
+import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import {
-  TopBar,
-  BudgetMeter,
-  Presence,
-} from '@/components/room';
+import { TopBar } from '@/components/room';
 import { Feed } from '@/components/feed';
 import { CenterTabs } from '@/components/center';
 import { SidePanel } from '@/components/side';
@@ -16,15 +13,16 @@ import { api } from '@/lib/api';
 import { getDemoFiles, isDemoMode, isSampleRoom } from '@/lib/demo';
 import { loadRoomFiles, saveRoomFiles } from '@/lib/roomFiles';
 import { takeStashedImport } from '@/lib/projectImport';
-import { setLastRoom } from '@/lib/preferences';
+import { colorForId, getDefaultRole, setLastRoom } from '@/lib/preferences';
 import { starterProjectFiles } from '@/lib/starterProject';
-import { getSocket } from '@/lib/socket';
+import { getSocket, type SocketStatus } from '@/lib/socket';
+import { createEmptyState } from '@/lib/reducer';
 import { notifyForEvent } from '@/lib/roomNotifications';
+import { notify } from '@/lib/notifications';
+import { resolveUser } from '@/lib/users';
 import { NotificationToasts } from '@/components/room/Notifications';
-import { reduce } from '@/lib/reducer';
-import { supabase, getUser, loginHref } from '@/lib/supabase';
-import type { RoomState, Room, User, Message, PlanItem, Conflict, Question, Checkpoint, Membership } from '@/types';
-import { format } from 'date-fns';
+import { getUser, loginHref } from '@/lib/supabase';
+import type { RoomState, Room, User, PlanItem, Membership } from '@/types';
 
 export default function RoomPage() {
   const params = useParams();
@@ -46,11 +44,21 @@ export default function RoomPage() {
   const [isRewound, setIsRewound] = useState(false);
   const [currentCheckpoint, setCurrentCheckpoint] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Set when the room loaded but the user can't open it
+  const [accessError, setAccessError] = useState<string | null>(null);
+  const [socketStatus, setSocketStatus] = useState<SocketStatus>('connecting');
 
   const socketRef = useRef<ReturnType<typeof getSocket> | null>(null);
 
   // Initialize room data
   useEffect(() => {
+    // initRoom is async: anything it subscribes to is collected here so the cleanup can undo it
+    let cancelled = false;
+    const unsubscribers: (() => void)[] = [];
+    setLoading(true);
+    setAccessError(null);
+    setState(null);
+
     const initRoom = async () => {
       // Nothing from the previous room carries over
       filesRoom.current = null;
@@ -59,6 +67,7 @@ export default function RoomPage() {
       setActiveFile(null);
       try {
         const user = await getUser();
+        if (cancelled) return;
         if (!user) {
           router.replace(loginHref());
           return;
@@ -70,28 +79,35 @@ export default function RoomPage() {
           name: user.user_metadata.full_name || user.email?.split('@')[0] || 'User',
           avatar_url: user.user_metadata.avatar_url,
           initials: (user.user_metadata.full_name || user.email || 'U').slice(0, 2).toUpperCase(),
-          color: `hsl(${Math.random() * 360}, 70%, 60%)`,
+          color: colorForId(user.id),
         };
         setCurrentUser(userData);
 
         // Fetch room data
         const roomData = await api.getRoom(roomId);
+        if (cancelled) return;
         setRoom(roomData);
         setLastRoom(roomData);
 
-        const membership = roomData.members.find(m => m.user_id === user.id);
-        if (membership) {
-          setCurrentUserMembership(membership);
+        // Not a member yet: a room shared with "anyone with the link" lets them in with the link's permission
+        let membership = roomData.members.find(m => m.user_id === user.id);
+        if (!membership && roomData.link_access === 'anyone') {
+          membership = { user_id: user.id, room_id: roomId, permission: roomData.link_permission === 'owner' ? 'editor' : roomData.link_permission, domain_role: getDefaultRole(), user: userData };
         }
+        if (!membership) {
+          setAccessError('You don’t have access to this room. Ask the owner to invite you or share the link with “Anyone with the link”.');
+          setLoading(false);
+          return;
+        }
+        setCurrentUserMembership(membership);
 
-        // Connect to WebSocket
+        // Connect to WebSocket. Subscribing first means the history replayed on connect reaches us.
         const socket = getSocket(roomId);
         socketRef.current = socket;
-
-        await socket.connect();
+        unsubscribers.push(socket.onStatus(setSocketStatus));
 
         // Subscribe to state updates
-        const unsubState = socket.onState((newState) => {
+        unsubscribers.push(socket.onState((newState) => {
           setState(newState);
           // files may arrive as a Map or as a plain object after JSON transport
           const entries: [string, { hash: string; version: number }][] =
@@ -103,37 +119,46 @@ export default function RoomPage() {
             }
             return next;
           });
-          setFileVersions(new Map(entries.map(([path, v]) => [path, v.version])));
-        });
-
-        const unsubPresence = socket.onPresence((presence) => {
-          if (state) {
-            setState(prev => prev ? { ...prev, presence } : null);
+          if (entries.length) {
+            setFileVersions(prev => {
+              const next = new Map(prev);
+              entries.forEach(([path, v]) => next.set(path, v.version));
+              return next;
+            });
           }
-        });
+        }));
+
+        try {
+          await socket.connect();
+        } catch (error) {
+          // The socket keeps retrying in the background; the banner below shows that we're offline
+          console.error('Room socket failed to connect:', error);
+        }
+        if (cancelled) return;
+        // No events yet (new room, or offline): show an empty room rather than a spinner
+        setState(prev => prev ?? createEmptyState(roomId));
 
         // Load initial files (starter template)
         await loadInitialFiles();
+        if (cancelled) return;
 
         setLoading(false);
-
-        return () => {
-          unsubState();
-          unsubPresence();
-        };
       } catch (error) {
+        if (cancelled) return;
         console.error('Failed to load room:', error);
         router.push('/dashboard');
       }
     };
 
-    initRoom();
+    void initRoom();
 
     return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
+      cancelled = true;
+      unsubscribers.forEach(unsub => unsub());
+      socketRef.current?.disconnect();
     };
+    // loadInitialFiles only reads roomId, which is already a dependency
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, router]);
 
   // A room opens with the files it had last time in this browser. New rooms start empty (the Explorer offers
@@ -187,15 +212,32 @@ export default function RoomPage() {
     };
   }, [roomId]);
 
+  // Message will appear via WebSocket; a failure is thrown so the composer can put the text back
   const handleSendMessage = useCallback(async (text: string) => {
     if (!roomId || !currentUser) return;
-    try {
-      await api.sendMessage(roomId, text);
-      // Message will appear via WebSocket
-    } catch (error) {
-      console.error('Failed to send message:', error);
-    }
+    await api.sendMessage(roomId, text);
   }, [roomId, currentUser]);
+
+  // File changes are kept locally (and in IndexedDB) first; server sync failures are reported once, not per file
+  const syncErrorShown = useRef(false);
+  const reportSyncError = useCallback((action: string, error: unknown) => {
+    console.error(`Failed to ${action}:`, error);
+    if (syncErrorShown.current) return;
+    syncErrorShown.current = true;
+    notify({
+      category: 'terminal',
+      tone: 'err',
+      title: 'Files aren’t syncing to the room server',
+      body: 'Your changes are saved in this browser. Teammates won’t see them until the connection works again.',
+    });
+  }, []);
+  const syncOk = useCallback(() => { syncErrorShown.current = false; }, []);
+
+  // Other actions (votes, answers, plan) tell the user when they fail
+  const reportActionError = useCallback((title: string, error: unknown) => {
+    console.error(`${title}:`, error);
+    notify({ category: 'decisions', tone: 'err', title, body: error instanceof Error ? error.message : undefined });
+  }, []);
 
   // Latest files for callbacks that need to read them (rename/delete/upload)
   const filesRef = useRef(files);
@@ -232,38 +274,42 @@ export default function RoomPage() {
     });
   }, []);
 
+  // Saved locally first, like creating a file, so edits work offline too
   const handleFileSave = useCallback(async (path: string, content: string, baseVersion: number) => {
     if (!roomId) return;
+    writeLocal([{ path, content, version: baseVersion + 1 }]);
     try {
-      await api.saveFile(roomId, path, content, baseVersion);
-      writeLocal([{ path, content, version: baseVersion + 1 }]);
+      const res = await api.saveFile(roomId, path, content, baseVersion);
+      syncOk();
+      // The server's version wins over our guess
+      if (typeof res?.version === 'number' && res.version !== baseVersion + 1) {
+        setFileVersions(prev => new Map(prev).set(path, res.version));
+      }
     } catch (error) {
-      console.error('Failed to save file:', error);
-      alert('Failed to save file. Version may have changed.');
-      throw error; // keep the unsaved draft in the editor
+      reportSyncError('save file', error);
     }
-  }, [roomId, writeLocal]);
+  }, [roomId, writeLocal, reportSyncError, syncOk]);
 
   const handleCreateFile = useCallback((path: string, content = starterContent(path), open = true) => {
     writeLocal([{ path, content, version: 1 }]);
     if (open) setActiveFile(path);
-    api.saveFile(roomId, path, content, 0).catch(error => console.error('Failed to create file:', error));
-  }, [roomId, writeLocal]);
+    api.saveFile(roomId, path, content, 0).then(syncOk, error => reportSyncError('create file', error));
+  }, [roomId, writeLocal, reportSyncError, syncOk]);
 
   const handleUploadFiles = useCallback((uploaded: { path: string; content: string }[]) => {
     if (!uploaded.length) return;
     writeLocal(uploaded.map(f => ({ ...f, version: 1 })));
     setActiveFile(uploaded[uploaded.length - 1].path);
-    uploaded.forEach(f => api.saveFile(roomId, f.path, f.content, 0).catch(error => console.error('Failed to upload file:', error)));
-  }, [roomId, writeLocal]);
+    uploaded.forEach(f => api.saveFile(roomId, f.path, f.content, 0).then(syncOk, error => reportSyncError('upload file', error)));
+  }, [roomId, writeLocal, reportSyncError, syncOk]);
 
   const handleDeleteFile = useCallback((path: string, isDirectory: boolean) => {
     const targets = isDirectory
       ? Array.from(filesRef.current.keys()).filter(p => p.startsWith(path + '/'))
       : [path];
     removeLocal(targets);
-    targets.forEach(p => api.deleteFile(roomId, p).catch(error => console.error('Failed to delete file:', error)));
-  }, [roomId, removeLocal]);
+    targets.forEach(p => api.deleteFile(roomId, p).then(syncOk, error => reportSyncError('delete file', error)));
+  }, [roomId, removeLocal, reportSyncError, syncOk]);
 
   const handleRenameFile = useCallback((from: string, to: string, isDirectory: boolean) => {
     const moves = (isDirectory
@@ -276,54 +322,57 @@ export default function RoomPage() {
     moves.forEach(m =>
       api.saveFile(roomId, m.newPath, m.content, 0)
         .then(() => api.deleteFile(roomId, m.oldPath))
-        .catch(error => console.error('Failed to rename file:', error)),
+        .then(syncOk, error => reportSyncError('rename file', error)),
     );
-  }, [roomId, writeLocal, removeLocal]);
+  }, [roomId, writeLocal, removeLocal, reportSyncError, syncOk]);
 
   const handleVote = useCallback(async (conflictId: string, option: string) => {
     if (!roomId) return;
     try {
       await api.voteConflict(roomId, conflictId, option);
     } catch (error) {
-      console.error('Failed to vote:', error);
+      reportActionError('Your vote wasn’t recorded', error);
     }
-  }, [roomId]);
+  }, [roomId, reportActionError]);
 
   const handleOverride = useCallback(async (conflictId: string, option: string) => {
     if (!roomId) return;
     try {
       await api.overrideConflict(roomId, conflictId, option);
     } catch (error) {
-      console.error('Failed to override:', error);
+      reportActionError('Override failed', error);
     }
-  }, [roomId]);
+  }, [roomId, reportActionError]);
 
   const handleAnswer = useCallback(async (questionId: string, answer: string) => {
     if (!roomId) return;
     try {
       await api.answerQuestion(roomId, questionId, answer);
     } catch (error) {
-      console.error('Failed to answer:', error);
+      reportActionError('Your answer wasn’t sent', error);
     }
-  }, [roomId]);
+  }, [roomId, reportActionError]);
 
+  // These rethrow so the plan editor keeps unsaved edits when the request fails
   const handlePlanUpdate = useCallback(async (items: PlanItem[]) => {
     if (!roomId) return;
     try {
       await api.updatePlan(roomId, items);
     } catch (error) {
-      console.error('Failed to update plan:', error);
+      reportActionError('Plan wasn’t saved', error);
+      throw error;
     }
-  }, [roomId]);
+  }, [roomId, reportActionError]);
 
   const handlePlanApprove = useCallback(async () => {
     if (!roomId) return;
     try {
       await api.approvePlan(roomId);
     } catch (error) {
-      console.error('Failed to approve plan:', error);
+      reportActionError('Plan wasn’t approved', error);
+      throw error;
     }
-  }, [roomId]);
+  }, [roomId, reportActionError]);
 
   const handleRewind = useCallback(async (checkpointId: string) => {
     if (!roomId) return;
@@ -332,9 +381,9 @@ export default function RoomPage() {
       setIsRewound(true);
       setCurrentCheckpoint(checkpointId);
     } catch (error) {
-      console.error('Failed to rewind:', error);
+      reportActionError('Rewind failed', error);
     }
-  }, [roomId]);
+  }, [roomId, reportActionError]);
 
   // Live events (not the history replayed on connect) become notifications
   const stateRef = useRef(state);
@@ -346,17 +395,49 @@ export default function RoomPage() {
       notifyForEvent(event, {
         roomTitle: room.title,
         currentUser,
-        nameOf: id => room.members.find(m => m.user_id === id)?.user?.name ?? (id ? id.charAt(0).toUpperCase() + id.slice(1) : 'Someone'),
+        nameOf: id => resolveUser(id, room.members).name,
         planItem: id => stateRef.current?.plan.find(p => p.id === id),
       });
     });
     return () => { unsubscribe(); };
   }, [room, currentUser]);
 
+  // Who is editing which file (the coder locks files while it writes them)
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket || !room) return;
+    return socket.onEvent(event => {
+      if (event.type !== 'file.locked' && event.type !== 'file.unlocked') return;
+      const { path, user_id } = event.payload as { path: string; user_id?: string };
+      const locked = event.type === 'file.locked';
+      setLockedFiles(prev => {
+        const next = new Set(prev);
+        if (locked) next.add(path);
+        else next.delete(path);
+        return next;
+      });
+      setLockingUser(prev => {
+        const next = new Map(prev);
+        if (locked) next.set(path, resolveUser(user_id ?? 'agent', room.members).name);
+        else next.delete(path);
+        return next;
+      });
+    });
+  }, [room]);
+
   const handleReturnToLatest = useCallback(() => {
     setIsRewound(false);
     setCurrentCheckpoint(null);
   }, []);
+
+  if (accessError) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 bg-[var(--bg)] p-6 text-center">
+        <p className="max-w-md text-[var(--ink)]">{accessError}</p>
+        <Link href="/dashboard" className="btn primary">Back to rooms</Link>
+      </div>
+    );
+  }
 
   if (loading || !room || !state || !currentUser || !currentUserMembership) {
     return (
@@ -367,15 +448,12 @@ export default function RoomPage() {
   }
 
   const openConflicts = state.conflicts.filter(c => c.status === 'open' || c.status === 'voting');
-  const openQuestions = state.questions.filter(q => q.status === 'open');
 
   const presenceData = state.presence.map(p => ({
-    user: p.user,
+    user: resolveUser(p.user_id, room.members, p.user),
     active: p.active,
     typing: !!p.typing,
   }));
-
-  const typingUser = state.presence.find(p => p.typing)?.user.id;
 
   return (
     <>
@@ -383,7 +461,6 @@ export default function RoomPage() {
       <div className="app h-screen">
         <TopBar
           room={room}
-          currentUser={currentUser}
           currentUserMembership={currentUserMembership}
           budget={state.budget}
           presence={presenceData}
@@ -393,10 +470,9 @@ export default function RoomPage() {
           {/* Left: Agent Feed */}
           <Feed
             messages={state.messages}
-            currentUser={currentUser}
+            members={room.members}
             onSendMessage={handleSendMessage}
             activeConflict={openConflicts[0] ? { id: openConflicts[0].id, taskId: openConflicts[0].task_id, options: openConflicts[0].options } : undefined}
-            activeQuestion={openQuestions[0] ? { id: openQuestions[0].id, taskId: openQuestions[0].task_id } : undefined}
           />
 
           {/* Center: Preview / Code */}
@@ -425,6 +501,8 @@ export default function RoomPage() {
           {/* Right: Cards + Plan */}
           <SidePanel
             state={state}
+            currentUser={currentUser}
+            members={room.members}
             currentUserRole={currentUserMembership.permission}
             currentUserDomainRole={currentUserMembership.domain_role}
             onVote={handleVote}
@@ -435,6 +513,19 @@ export default function RoomPage() {
           />
         </main>
         <NotificationToasts />
+
+        {(socketStatus === 'reconnecting' || socketStatus === 'offline') && (
+          <div role="status" className="fixed bottom-16 left-1/2 z-50 -translate-x-1/2 flex items-center gap-3 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-2 text-sm shadow-lg">
+            {socketStatus === 'reconnecting'
+              ? 'Connection lost. Reconnecting…'
+              : 'You’re offline from the room. Live updates are paused.'}
+            {socketStatus === 'offline' && (
+              <button className="btn primary" type="button" onClick={() => socketRef.current?.reconnect()}>
+                Reconnect
+              </button>
+            )}
+          </div>
+        )}
 
         <Timeline
           checkpoints={state.checkpoints}

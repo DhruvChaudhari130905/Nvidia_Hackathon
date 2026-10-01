@@ -47,7 +47,6 @@ export function ImportProjectDialog({ existingPaths, lockedFiles, initial, onImp
     if (!initial || startedInitial.current) return;
     startedInitial.current = true;
     void load(initial);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initial]);
 
   const chooseFolder = () => load(importFolder());

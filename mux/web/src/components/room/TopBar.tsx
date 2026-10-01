@@ -12,7 +12,6 @@ import { NotificationBell } from './Notifications';
 
 interface TopBarProps {
   room: Room;
-  currentUser: User;
   currentUserMembership: Membership;
   budget: { tokens_used: number; tokens_cap: number; runs_used: number; runs_cap: number };
   presence: Array<{ user: User; active: boolean; typing: boolean }>;
@@ -20,7 +19,6 @@ interface TopBarProps {
 
 export function TopBar({
   room,
-  currentUser,
   currentUserMembership,
   budget,
   presence,
@@ -43,7 +41,7 @@ export function TopBar({
       <div className="room">
         <span className="name">{room.title}</span>
         <span className="sub mono">
-          room · {room.members.length} members · 8 steering seats
+          room · {room.members.length} {room.members.length === 1 ? 'member' : 'members'}
         </span>
       </div>
       <div className="spacer" />
@@ -58,10 +56,13 @@ export function TopBar({
       />
       <div className="flex items-center gap-2">
         <NotificationBell />
-        <button className="btn flex items-center gap-1.5" onClick={() => setShowShare(true)} type="button">
-          <Share2 className="w-4 h-4" />
-          <span className="hidden sm:inline">Share</span>
-        </button>
+        {/* Changing sharing is owner-only */}
+        {isOwner && (
+          <button className="btn flex items-center gap-1.5" onClick={() => setShowShare(true)} type="button">
+            <Share2 className="w-4 h-4" />
+            <span className="hidden sm:inline">Share</span>
+          </button>
+        )}
         {isOwner && (
           <button className="btn primary flex items-center gap-1.5" onClick={() => setShowExport(true)} type="button">
             <Github className="w-4 h-4" />
@@ -69,7 +70,7 @@ export function TopBar({
           </button>
         )}
       </div>
-      <ShareDialog isOpen={showShare} onClose={() => setShowShare(false)} room={room} />
+      {isOwner && <ShareDialog isOpen={showShare} onClose={() => setShowShare(false)} room={room} />}
       <ExportDialog isOpen={showExport} onClose={() => setShowExport(false)} room={room} />
     </header>
   );

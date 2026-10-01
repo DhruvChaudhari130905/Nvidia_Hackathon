@@ -122,7 +122,8 @@ export function Terminal({ fs, active, onExit }: TerminalProps) {
     }
   }, [fs.files, running]);
 
-  const readPkg = (): { pkg: Record<string, any> | null; error?: string } => {
+  type PackageJson = { dependencies?: Record<string, string>; devDependencies?: Record<string, string>; scripts?: Record<string, string>; [key: string]: unknown };
+  const readPkg = (): { pkg: PackageJson | null; error?: string } => {
     const raw = fsRef.current.files.get('package.json')?.content;
     if (raw === undefined) return { pkg: null, error: 'npm ERR! enoent Could not read package.json' };
     try {

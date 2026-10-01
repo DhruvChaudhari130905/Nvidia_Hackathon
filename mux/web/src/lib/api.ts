@@ -1,8 +1,9 @@
 // API client for REST commands
-import type { Room, Message, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
+import type { Room, PlanItem, Budget } from '@/types';
 
 import { createDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
 import { getSocket } from './socket';
+import { getAccessToken } from './supabase';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -25,7 +26,7 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
 
 async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (isDemoMode()) return demoFetch<T>(path, options);
-  const token = localStorage.getItem('supabase_token');
+  const token = await getAccessToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
@@ -53,7 +54,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ description, domain_role }),
     }),
-  updateSharing: (id: string, data: { link_access: 'restricted' | 'anyone'; link_permission: 'editor' | 'viewer'; invites?: string[] }) =>
+  updateSharing: (id: string, data: { link_access: 'restricted' | 'anyone'; link_permission: 'editor' | 'viewer'; invites?: string[]; invite_permission?: 'editor' | 'viewer' }) =>
     fetchWithAuth<Room>(`/rooms/${id}/sharing`, { method: 'PATCH', body: JSON.stringify(data) }),
 
   // Messages

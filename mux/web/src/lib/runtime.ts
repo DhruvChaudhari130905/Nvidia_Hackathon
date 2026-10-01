@@ -41,7 +41,7 @@ const serverListeners = new Set<(port: number, url: string) => void>();
 const openServers = new Map<number, string>();
 
 async function container(): Promise<WebContainer> {
-  const wc = (await initWebContainer()) as WebContainer | null;
+  const wc = await initWebContainer();
   if (!wc) throw new Error('WebContainers only run in the browser');
   return wc;
 }
@@ -117,7 +117,7 @@ function queue(wc: WebContainer, path: string) {
   if (!path || ignored(path)) return;
   pending.add(path);
   if (flushTimer) clearTimeout(flushTimer);
-  flushTimer = setTimeout(() => void flush(wc), 150);
+  flushTimer = setTimeout(() => flush(wc).catch(err => console.warn('Shell sync failed:', err)), 150);
 }
 
 const decode = (name: string | Uint8Array) => (typeof name === 'string' ? name : new TextDecoder().decode(name)).replace(/^\.?\//, '');
@@ -190,8 +190,9 @@ async function flush(wc: WebContainer) {
       // package-lock.json is big and noisy; only sync it if the room already tracks one
       if (path === 'package-lock.json' && !synced.has(path)) return;
       if (synced.get(path) === r.content) return;
-      synced.set(path, r.content);
+      // Only mark it synced once the room has it, so a failed write is retried on the next change
       await fs.write(path, r.content);
+      synced.set(path, r.content);
     } else if (r.kind === 'dir') {
       // A folder appeared (mkdir, mv, git clone…): sync whatever files it holds
       for (const f of await listFiles(wc, path)) await check(f);
@@ -205,7 +206,14 @@ async function flush(wc: WebContainer) {
       }
     }
   };
-  for (const p of paths) await check(p);
+  // One failing file mustn't stop the rest of the batch
+  for (const p of paths) {
+    try {
+      await check(p);
+    } catch (err) {
+      console.warn(`Couldn't sync ${p} back to the room:`, err);
+    }
+  }
   if (removed.length) fs.remove(removed);
 }
 

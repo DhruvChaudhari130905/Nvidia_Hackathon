@@ -53,8 +53,23 @@ function stripCommonRoot(paths: string[]): { root: string | null; strip: (p: str
 
 type Source = { path: string; size: number; read: () => Promise<Uint8Array> };
 
+// Thrown by a reader when a file turns out bigger than allowed (e.g. a zip entry that inflates past its declared size)
+class TooLargeError extends Error {}
+
+// Archive entry names are untrusted: no absolute paths, drive letters, or ../ segments that climb out of the project
+function safePath(path: string): string | null {
+  const parts = path.replace(/\\/g, '/').replace(/^[a-zA-Z]:/, '').split('/').filter(p => p && p !== '.');
+  if (parts.some(p => p === '..')) return null;
+  return parts.join('/');
+}
+
 async function collect(sources: Source[], fallbackName: string): Promise<ImportResult> {
   const skipped = emptySkipped();
+  sources = sources.flatMap(s => {
+    const path = safePath(s.path);
+    if (path === null) skipped.ignored++;
+    return path ? [{ ...s, path }] : [];
+  });
   const { root, strip } = stripCommonRoot(sources.map(s => s.path));
   const files: ImportedFile[] = [];
   let total = 0;
@@ -75,19 +90,26 @@ async function collect(sources: Source[], fallbackName: string): Promise<ImportR
     total += s.size;
   }
 
-  const contents = new Array<string | null>(keep.length);
+  // null: binary; undefined: bigger than it claimed
+  const contents = new Array<string | null | undefined>(keep.length);
   let next = 0;
   const worker = async () => {
     while (next < keep.length) {
       const i = next++;
-      const bytes = await keep[i].source.read();
-      contents[i] = looksBinary(bytes) ? null : decoder.decode(bytes);
+      try {
+        const bytes = await keep[i].source.read();
+        contents[i] = bytes.length > MAX_FILE_BYTES ? undefined : looksBinary(bytes) ? null : decoder.decode(bytes);
+      } catch (err) {
+        if (!(err instanceof TooLargeError)) throw err;
+        contents[i] = undefined;
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(16, keep.length) }, worker));
   keep.forEach(({ path }, i) => {
     const content = contents[i];
     if (content === null) skipped.binary++;
+    else if (content === undefined) skipped.tooLarge++;
     else files.push({ path, content });
   });
   return { name: root ?? fallbackName, files, skipped };
@@ -223,9 +245,28 @@ export async function importFromDrop(items: DataTransferItemList): Promise<Impor
 
 // ───────────── Zip ─────────────
 
-async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([data as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+// Stops as soon as the output passes `limit` bytes, so a zip bomb can't exhaust the tab's memory
+async function inflateRaw(data: Uint8Array, limit: number): Promise<Uint8Array> {
+  const reader = new Blob([data as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > limit) {
+      await reader.cancel();
+      throw new TooLargeError();
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
 }
 
 export async function importFromZip(file: File): Promise<ImportResult> {
@@ -268,7 +309,8 @@ export async function importFromZip(file: File): Promise<ImportResult> {
         const start = localOffset + 30 + localNameLen + localExtraLen;
         const raw = buf.subarray(start, start + compressedSize);
         if (method === 0) return raw;
-        if (method === 8) return inflateRaw(raw);
+        // Never trust the declared size: cap the output at it (and at the per-file limit)
+        if (method === 8) return inflateRaw(raw, Math.min(size, MAX_FILE_BYTES));
         throw new Error(`${name}: unsupported compression`);
       },
     });

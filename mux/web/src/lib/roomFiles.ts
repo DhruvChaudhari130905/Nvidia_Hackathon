@@ -4,21 +4,42 @@
 const DB_NAME = 'mux';
 const STORE = 'room-files';
 
+// One connection for the page, opened on first use
+let dbPromise: Promise<IDBDatabase> | null = null;
+
 function open(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  if (!dbPromise) {
+    dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      req.onsuccess = () => {
+        const db = req.result;
+        // Another tab upgrading the database needs this one closed; reopen on next use
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        db.onclose = () => { dbPromise = null; };
+        resolve(db);
+      };
+      req.onerror = () => reject(req.error);
+    }).catch(err => {
+      dbPromise = null;
+      throw err;
+    });
+  }
+  return dbPromise;
 }
 
+// Resolves once the transaction commits (not just when the request succeeds), so a write is really stored
 async function tx<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   const db = await open();
   return new Promise((resolve, reject) => {
-    const req = fn(db.transaction(STORE, mode).objectStore(STORE));
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    const transaction = db.transaction(STORE, mode);
+    const req = fn(transaction.objectStore(STORE));
+    transaction.oncomplete = () => resolve(req.result);
+    transaction.onerror = () => reject(transaction.error ?? req.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
   });
 }
 

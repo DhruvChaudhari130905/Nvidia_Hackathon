@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useState } from 'react';
-import { X, Copy, Mail, Link, UserPlus, UserCheck, UserX } from 'lucide-react';
+import { X, Copy, UserPlus, UserCheck } from 'lucide-react';
 import type { Room } from '@/types';
 import { api } from '@/lib/api';
+import { resolveUser } from '@/lib/users';
 
 interface ShareDialogProps {
   isOpen: boolean;
@@ -15,15 +16,23 @@ export function ShareDialog({ isOpen, onClose, room }: ShareDialogProps) {
   const [linkAccess, setLinkAccess] = useState(room.link_access);
   const [linkPermission, setLinkPermission] = useState<'editor' | 'viewer'>(room.link_permission === 'viewer' ? 'viewer' : 'editor');
   const [inviteEmail, setInviteEmail] = useState('');
+  // Role for the person being invited; separate from the link permission
+  const [invitePermission, setInvitePermission] = useState<'editor' | 'viewer'>('editor');
+  const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const shareUrl = `${window.location.origin}/room/${room.id}`;
 
   const handleCopyLink = async () => {
-    await navigator.clipboard.writeText(shareUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard blocked (permissions, insecure context): let the user copy it by hand
+      setNotice('Couldn’t copy automatically. Select the link and copy it.');
+    }
   };
 
   const handleSaveSharing = async () => {
@@ -44,11 +53,14 @@ export function ShareDialog({ isOpen, onClose, room }: ShareDialogProps) {
     if (!inviteEmail.trim()) return;
     setSaving(true);
     try {
+      // Keep the saved link settings; only Save changes those
       await api.updateSharing(room.id, {
-        link_access: linkAccess,
-        link_permission: linkPermission,
-        invites: [inviteEmail],
+        link_access: room.link_access,
+        link_permission: room.link_permission === 'viewer' ? 'viewer' : 'editor',
+        invites: [inviteEmail.trim()],
+        invite_permission: invitePermission,
       });
+      setNotice(`Invited ${inviteEmail.trim()} as ${invitePermission}.`);
       setInviteEmail('');
     } catch (error) {
       console.error('Failed to invite:', error);
@@ -64,7 +76,7 @@ export function ShareDialog({ isOpen, onClose, room }: ShareDialogProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div className="bg-[var(--panel)] rounded-xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-semibold">Share "{room.title}"</h2>
+          <h2 className="text-lg font-semibold">Share &ldquo;{room.title}&rdquo;</h2>
           <button className="btn p-2" onClick={onClose} type="button">
             <X className="w-5 h-5" />
           </button>
@@ -173,8 +185,9 @@ export function ShareDialog({ isOpen, onClose, room }: ShareDialogProps) {
               className="flex-1 bg-[var(--bg)] border border-[var(--line)] rounded px-3 py-2"
             />
             <select
-              value={linkPermission}
-              onChange={e => setLinkPermission(e.target.value as 'editor' | 'viewer')}
+              value={invitePermission}
+              onChange={e => setInvitePermission(e.target.value as 'editor' | 'viewer')}
+              aria-label="Role for the invited person"
               className="bg-[var(--bg)] border border-[var(--line)] rounded px-3 py-2"
             >
               <option value="editor">Editor</option>
@@ -186,11 +199,13 @@ export function ShareDialog({ isOpen, onClose, room }: ShareDialogProps) {
           </div>
         </form>
 
+        {notice && <p role="status" className="mt-3 text-sm text-[var(--muted)]">{notice}</p>}
+
         {/* Current members */}
         <div className="mt-6 pt-4 border-t border-[var(--line)]">
           <h3 className="font-medium mb-3">Current members</h3>
           <div className="space-y-2 max-h-40 overflow-y-auto">
-            {room.members.map(member => (
+            {room.members.map(member => ({ ...member, user: resolveUser(member.user_id, [], member.user) })).map(member => (
               <div key={member.user_id} className="flex items-center justify-between p-2 bg-[var(--raised)] rounded">
                 <div className="flex items-center gap-3">
                   <span className="av" style={{ background: member.user.color }}>
