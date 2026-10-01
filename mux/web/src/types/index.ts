@@ -1,0 +1,385 @@
+// MUX Frontend Types - matches the event catalog from architecture.md
+
+export type UserRole = 'owner' | 'editor' | 'viewer';
+export type DomainRole = 'pm' | 'design' | 'eng';
+export type MessageLabel = 'merge' | 'queue' | 'interrupt' | 'conflict' | 'chat';
+export type PlanItemStatus = 'draft' | 'todo' | 'doing' | 'done' | 'skipped_conflict' | 'skipped_question';
+export type ConflictStatus = 'open' | 'voting' | 'closed';
+export type QuestionStatus = 'open' | 'answered' | 'defaulted';
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  avatar_url?: string;
+  initials: string;
+  color: string;
+}
+
+export interface Membership {
+  user_id: string;
+  room_id: string;
+  permission: UserRole;
+  domain_role: DomainRole;
+  user: User;
+}
+
+export interface Room {
+  id: string;
+  title: string;
+  description: string;
+  owner_id: string;
+  link_access: 'restricted' | 'anyone';
+  link_permission: UserRole;
+  budget_tokens_cap: number;
+  budget_runs_cap: number;
+  head_checkpoint_id: string | null;
+  created_at: string;
+  updated_at?: string;
+  members: Membership[];
+}
+
+export interface PlanItem {
+  id: string;
+  title: string;
+  status: PlanItemStatus;
+  owner_role?: DomainRole;
+  notes?: string;
+  merged_notes?: string[];
+}
+
+export interface Message {
+  id: string;
+  room_id: string;
+  user_id: string;
+  text: string;
+  label: MessageLabel;
+  rationale?: string;
+  domain?: 'ui' | 'architecture' | 'scope' | null;
+  add_plan_item?: { title: string; after_task_id?: string };
+  open_conflict?: {
+    with_message_ids: string[];
+    summary: string;
+    options: string[];
+    research_queries: string[];
+  };
+  reply?: string;
+  created_at: string;
+  user: User;
+}
+
+export interface Conflict {
+  id: string;
+  room_id: string;
+  task_id: string;
+  options: string[];
+  evidence: { query: string; summary: string; citations: string[] }[];
+  domain: 'ui' | 'architecture' | 'scope';
+  status: ConflictStatus;
+  result?: string;
+  resolved_by?: string;
+  created_at: string;
+  expires_at: string;
+  votes: Vote[];
+}
+
+export interface Vote {
+  conflict_id: string;
+  user_id: string;
+  option: string;
+  weight: number;
+}
+
+export interface Question {
+  id: string;
+  room_id: string;
+  task_id: string;
+  text: string;
+  options: string[];
+  default_option: string;
+  answer?: string;
+  status: QuestionStatus;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface FileChange {
+  path: string;
+  hash: string;
+  version: number;
+  diff_summary?: string;
+  author_id: string;
+  is_manual: boolean;
+  created_at: string;
+}
+
+export interface Checkpoint {
+  id: string;
+  room_id: string;
+  seq: number;
+  manifest_id: string;
+  sandbox_snapshot_uuid: string | null;
+  plan: PlanItem[];
+  task_log_id: string;
+  parent_id: string | null;
+  created_at: string;
+}
+
+export interface Budget {
+  tokens_used: number;
+  runs_used: number;
+  tokens_cap: number;
+  runs_cap: number;
+}
+
+export interface Presence {
+  user_id: string;
+  user: User;
+  tab: 'feed' | 'preview' | 'code' | 'cards';
+  typing?: boolean;
+  active: boolean;
+  last_seen: string;
+}
+
+export interface RoomState {
+  room: Room;
+  plan: PlanItem[];
+  messages: Message[];
+  conflicts: Conflict[];
+  questions: Question[];
+  files: Map<string, { hash: string; version: number }>;
+  checkpoints: Checkpoint[];
+  budget: Budget;
+  presence: Presence[];
+  current_user: User;
+  current_user_membership: Membership;
+}
+
+// Event types for WebSocket
+export type EventType =
+  | 'room.created'
+  | 'member.joined'
+  | 'member.role_changed'
+  | 'sharing.changed'
+  | 'message.posted'
+  | 'message.labeled'
+  | 'plan.drafted'
+  | 'plan.edited'
+  | 'plan.approved'
+  | 'plan.item_added'
+  | 'plan.item_updated'
+  | 'coordinator.reply'
+  | 'conflict.opened'
+  | 'conflict.evidence'
+  | 'conflict.vote'
+  | 'conflict.closed'
+  | 'question.opened'
+  | 'question.answered'
+  | 'question.defaulted'
+  | 'task.started'
+  | 'agent.text'
+  | 'tool.called'
+  | 'tool.result'
+  | 'build.result'
+  | 'test.result'
+  | 'task.escalated'
+  | 'task.finished'
+  | 'turn.interrupted'
+  | 'file.changed'
+  | 'file.locked'
+  | 'file.unlocked'
+  | 'checkpoint.created'
+  | 'room.rewound'
+  | 'log.task_written'
+  | 'log.day_written'
+  | 'budget.updated'
+  | 'room.paused'
+  | 'room.resumed'
+  | 'export.started'
+  | 'export.finished'
+  | 'presence.join'
+  | 'presence.leave'
+  | 'presence.typing'
+  | 'presence.tab'
+  | 'agent.text.delta';
+
+export interface BaseEvent {
+  seq: number;
+  room_id: string;
+  type: EventType;
+  actor_id: string;
+  ts: string;
+}
+
+export interface MessagePostedEvent extends BaseEvent {
+  type: 'message.posted';
+  payload: Message;
+}
+
+export interface MessageLabeledEvent extends BaseEvent {
+  type: 'message.labeled';
+  payload: { message_id: string; label: MessageLabel; rationale: string; domain?: string };
+}
+
+export interface PlanItemAddedEvent extends BaseEvent {
+  type: 'plan.item_added';
+  payload: PlanItem;
+}
+
+export interface PlanItemUpdatedEvent extends BaseEvent {
+  type: 'plan.item_updated';
+  payload: { id: string; changes: Partial<PlanItem> };
+}
+
+export interface ConflictOpenedEvent extends BaseEvent {
+  type: 'conflict.opened';
+  payload: Conflict;
+}
+
+export interface ConflictVoteEvent extends BaseEvent {
+  type: 'conflict.vote';
+  payload: { conflict_id: string; user_id: string; option: string; weight: number };
+}
+
+export interface ConflictClosedEvent extends BaseEvent {
+  type: 'conflict.closed';
+  payload: { conflict_id: string; result: string; resolved_by: string };
+}
+
+export interface QuestionOpenedEvent extends BaseEvent {
+  type: 'question.opened';
+  payload: Question;
+}
+
+export interface QuestionAnsweredEvent extends BaseEvent {
+  type: 'question.answered';
+  payload: { question_id: string; answer: string; by_user_id: string };
+}
+
+export interface TaskStartedEvent extends BaseEvent {
+  type: 'task.started';
+  payload: { task_id: string };
+}
+
+export interface AgentTextEvent extends BaseEvent {
+  type: 'agent.text';
+  payload: { task_id: string; text: string };
+}
+
+export interface ToolCalledEvent extends BaseEvent {
+  type: 'tool.called';
+  payload: { tool: string; args: Record<string, unknown> };
+}
+
+export interface ToolResultEvent extends BaseEvent {
+  type: 'tool.result';
+  payload: { tool: string; summary: string; ok: boolean };
+}
+
+export interface BuildResultEvent extends BaseEvent {
+  type: 'build.result';
+  payload: { passed: boolean; duration: number; errors: string[]; sandbox_snapshot_uuid?: string };
+}
+
+export interface FileChangedEvent extends BaseEvent {
+  type: 'file.changed';
+  payload: FileChange;
+}
+
+export interface CheckpointCreatedEvent extends BaseEvent {
+  type: 'checkpoint.created';
+  payload: Checkpoint;
+}
+
+export interface RoomRewoundEvent extends BaseEvent {
+  type: 'room.rewound';
+  payload: { checkpoint_id: string; seq: number };
+}
+
+export interface BudgetUpdatedEvent extends BaseEvent {
+  type: 'budget.updated';
+  payload: Budget;
+}
+
+export interface PresenceJoinEvent extends BaseEvent {
+  type: 'presence.join';
+  payload: Presence;
+}
+
+export interface PresenceLeaveEvent extends BaseEvent {
+  type: 'presence.leave';
+  payload: { user_id: string };
+}
+
+export interface PresenceTypingEvent extends BaseEvent {
+  type: 'presence.typing';
+  payload: { user_id: string; typing: boolean };
+}
+
+export interface PresenceTabEvent extends BaseEvent {
+  type: 'presence.tab';
+  payload: { user_id: string; tab: Presence['tab'] };
+}
+
+export interface AgentTextDeltaEvent extends BaseEvent {
+  type: 'agent.text.delta';
+  payload: { task_id: string; delta: string };
+}
+
+type TypedEventType =
+  | 'message.posted'
+  | 'message.labeled'
+  | 'plan.item_added'
+  | 'plan.item_updated'
+  | 'conflict.opened'
+  | 'conflict.vote'
+  | 'conflict.closed'
+  | 'question.opened'
+  | 'question.answered'
+  | 'task.started'
+  | 'agent.text'
+  | 'tool.called'
+  | 'tool.result'
+  | 'build.result'
+  | 'file.changed'
+  | 'checkpoint.created'
+  | 'room.rewound'
+  | 'budget.updated'
+  | 'presence.join'
+  | 'presence.leave'
+  | 'presence.typing'
+  | 'presence.tab'
+  | 'agent.text.delta';
+
+// Events without a dedicated payload type yet
+export interface GenericEvent extends BaseEvent {
+  type: Exclude<EventType, TypedEventType>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  payload: any;
+}
+
+export type AppEvent =
+  | GenericEvent
+  | MessagePostedEvent
+  | MessageLabeledEvent
+  | PlanItemAddedEvent
+  | PlanItemUpdatedEvent
+  | ConflictOpenedEvent
+  | ConflictVoteEvent
+  | ConflictClosedEvent
+  | QuestionOpenedEvent
+  | QuestionAnsweredEvent
+  | TaskStartedEvent
+  | AgentTextEvent
+  | ToolCalledEvent
+  | ToolResultEvent
+  | BuildResultEvent
+  | FileChangedEvent
+  | CheckpointCreatedEvent
+  | RoomRewoundEvent
+  | BudgetUpdatedEvent
+  | PresenceJoinEvent
+  | PresenceLeaveEvent
+  | PresenceTypingEvent
+  | PresenceTabEvent
+  | AgentTextDeltaEvent;

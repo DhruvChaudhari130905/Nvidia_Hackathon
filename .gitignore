@@ -1,2 +1,6 @@
 .DS_Store
 .remember/
+
+# Python build artifacts
+*.egg-info/
+__pycache__/
