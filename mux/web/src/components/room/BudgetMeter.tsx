@@ -10,7 +10,8 @@ interface BudgetMeterProps {
 }
 
 export function BudgetMeter({ tokensUsed, tokensCap, runsUsed, runsCap }: BudgetMeterProps) {
-  const tokenPercent = Math.min(100, (tokensUsed / tokensCap) * 100);
+  // A zero or missing cap would divide by zero; treat it as fully used if anything was spent
+  const tokenPercent = tokensCap > 0 ? Math.min(100, (tokensUsed / tokensCap) * 100) : tokensUsed > 0 ? 100 : 0;
   const tokenColor = tokenPercent > 90 ? 'var(--conflict)' : tokenPercent > 70 ? 'var(--ask)' : 'var(--coord)';
 
   const formatNumber = (num: number) => {

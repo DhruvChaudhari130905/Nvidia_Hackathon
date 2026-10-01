@@ -1,6 +1,6 @@
 // Pure reducer function: events -> room state
-// This makes replay and rewind free on the client
-import type { AppEvent, RoomState, Room, PlanItem, Message, Conflict, Question, FileChange, Checkpoint, Budget, Presence, User, Membership } from '@/types';
+// Never changes the state it's given, so replay and rewind are free on the client
+import type { AppEvent, RoomState, PlanItem, Membership, Message, User } from '@/types';
 
 export function reduce(events: AppEvent[], initialState?: RoomState): RoomState {
   let state = initialState || createEmptyState();
@@ -12,9 +12,11 @@ export function reduce(events: AppEvent[], initialState?: RoomState): RoomState 
   return state;
 }
 
-function createEmptyState(): RoomState {
+const EMPTY_USER: User = { id: '', email: '', name: '', initials: '', color: '' };
+
+export function createEmptyState(roomId = ''): RoomState {
   return {
-    room: { id: '', title: '', description: '', owner_id: '', link_access: 'restricted', link_permission: 'editor', budget_tokens_cap: 2000000, budget_runs_cap: 100, head_checkpoint_id: null, created_at: '', members: [] },
+    room: { id: roomId, title: '', description: '', owner_id: '', link_access: 'restricted', link_permission: 'editor', budget_tokens_cap: 2000000, budget_runs_cap: 100, head_checkpoint_id: null, created_at: '', members: [] },
     plan: [],
     messages: [],
     conflicts: [],
@@ -23,51 +25,74 @@ function createEmptyState(): RoomState {
     checkpoints: [],
     budget: { tokens_used: 0, runs_used: 0, tokens_cap: 2000000, runs_cap: 100 },
     presence: [],
-    current_user: { id: '', email: '', name: '', initials: '', color: '' },
-    current_user_membership: { user_id: '', room_id: '', permission: 'viewer', domain_role: 'eng', user: { id: '', email: '', name: '', initials: '', color: '' } },
+    current_user: EMPTY_USER,
+    current_user_membership: { user_id: '', room_id: roomId, permission: 'viewer', domain_role: 'eng', user: EMPTY_USER },
   };
 }
 
-function applyEvent(state: RoomState, event: AppEvent): RoomState {
-  // Create new state object for immutability
+const setStatus = (plan: PlanItem[], taskId: string | undefined, changes: Partial<PlanItem>) =>
+  taskId === undefined ? plan : plan.map(p => (p.id === taskId ? { ...p, ...changes } : p));
+
+// The backend's coordinator messages carry `author` instead of `user_id`; normalize them
+function toMessage(payload: Partial<Message> & { author?: string; role?: string }, event: AppEvent): Message {
+  return {
+    ...payload,
+    id: payload.id ?? `evt-${event.seq}`,
+    room_id: payload.room_id ?? event.room_id,
+    user_id: payload.user_id ?? payload.author ?? event.actor_id ?? event.actor ?? 'agent',
+    text: payload.text ?? payload.reply ?? '',
+    label: payload.label ?? 'chat',
+    created_at: payload.created_at ?? event.ts,
+  } as Message;
+}
+
+export function applyEvent(state: RoomState, event: AppEvent): RoomState {
+  // Shallow copy; every field that changes below is replaced, never mutated
   const newState = { ...state };
 
   switch (event.type) {
     case 'room.created': {
-      newState.room = event.payload as any;
+      newState.room = { ...newState.room, ...event.payload, members: event.payload.members ?? newState.room.members };
       break;
     }
     case 'member.joined': {
-      newState.room.members.push(event.payload as any);
+      const member = event.payload as Membership;
+      newState.room = {
+        ...newState.room,
+        members: [...newState.room.members.filter(m => m.user_id !== member.user_id), member],
+      };
       break;
     }
     case 'member.role_changed': {
-      const member = newState.room.members.find(m => m.user_id === (event.payload as any).user_id);
-      if (member) member.permission = (event.payload as any).permission;
+      const { user_id, permission } = event.payload as { user_id: string; permission: Membership['permission'] };
+      newState.room = {
+        ...newState.room,
+        members: newState.room.members.map(m => (m.user_id === user_id ? { ...m, permission } : m)),
+      };
       break;
     }
     case 'sharing.changed': {
-      Object.assign(newState.room, event.payload);
+      newState.room = { ...newState.room, ...event.payload };
       break;
     }
     case 'message.posted': {
-      newState.messages = [...newState.messages, event.payload];
+      newState.messages = [...newState.messages, toMessage(event.payload, event)];
       break;
     }
     case 'message.labeled': {
       newState.messages = newState.messages.map(m =>
         m.id === event.payload.message_id
-          ? { ...m, label: event.payload.label, rationale: event.payload.rationale, domain: event.payload.domain as any }
+          ? { ...m, label: event.payload.label, rationale: event.payload.rationale, domain: event.payload.domain as Message['domain'] }
           : m
       );
       break;
     }
     case 'plan.drafted': {
-      newState.plan = (event.payload as any).items || [];
+      newState.plan = (event.payload as { items?: PlanItem[] }).items || [];
       break;
     }
     case 'plan.edited': {
-      newState.plan = (event.payload as any).items || newState.plan;
+      newState.plan = (event.payload as { items?: PlanItem[] }).items || newState.plan;
       break;
     }
     case 'plan.approved': {
@@ -79,22 +104,18 @@ function applyEvent(state: RoomState, event: AppEvent): RoomState {
       break;
     }
     case 'plan.item_updated': {
-      newState.plan = newState.plan.map(p =>
-        p.id === event.payload.id ? { ...p, ...event.payload.changes } : p
-      );
+      newState.plan = setStatus(newState.plan, event.payload.id, event.payload.changes);
       break;
     }
     case 'coordinator.reply': {
-      // Coordinator replies are added as messages
-      newState.messages = [...newState.messages, event.payload as any];
+      // Coordinator replies are shown as agent messages
+      const reply = toMessage({ user_id: 'agent', label: 'chat', ...event.payload }, event);
+      newState.messages = [...newState.messages, reply];
       break;
     }
     case 'conflict.opened': {
-      newState.conflicts = [...newState.conflicts, event.payload];
-      // Mark the task as skipped_conflict
-      newState.plan = newState.plan.map(p =>
-        p.id === event.payload.task_id ? { ...p, status: 'skipped_conflict' as const } : p
-      );
+      newState.conflicts = [...newState.conflicts, { ...event.payload, votes: event.payload.votes ?? [], evidence: event.payload.evidence ?? [] }];
+      newState.plan = setStatus(newState.plan, event.payload.task_id, { status: 'skipped_conflict' });
       break;
     }
     case 'conflict.evidence': {
@@ -104,80 +125,59 @@ function applyEvent(state: RoomState, event: AppEvent): RoomState {
       break;
     }
     case 'conflict.vote': {
+      const { conflict_id, user_id, option, weight } = event.payload;
       newState.conflicts = newState.conflicts.map(c => {
-        if (c.id !== event.payload.conflict_id) return c;
-        return {
-          ...c,
-          votes: [...c.votes, { conflict_id: event.payload.conflict_id, user_id: event.payload.user_id, option: event.payload.option, weight: event.payload.weight }],
-        };
+        if (c.id !== conflict_id) return c;
+        // A later vote from the same person replaces their earlier one
+        return { ...c, votes: [...c.votes.filter(v => v.user_id !== user_id), { conflict_id, user_id, option, weight }] };
       });
       break;
     }
     case 'conflict.closed': {
+      const conflict = newState.conflicts.find(c => c.id === event.payload.conflict_id);
       newState.conflicts = newState.conflicts.map(c =>
         c.id === event.payload.conflict_id
           ? { ...c, status: 'closed' as const, result: event.payload.result, resolved_by: event.payload.resolved_by }
           : c
       );
       // Unblock the task
-      newState.plan = newState.plan.map(p =>
-        p.id === newState.conflicts.find(c => c.id === event.payload.conflict_id)?.task_id
-          ? { ...p, status: 'todo' as const, notes: `unblocked · ${event.payload.result}` }
-          : p
-      );
+      newState.plan = setStatus(newState.plan, conflict?.task_id, { status: 'todo', notes: `unblocked · ${event.payload.result}` });
       break;
     }
     case 'question.opened': {
       newState.questions = [...newState.questions, event.payload];
-      newState.plan = newState.plan.map(p =>
-        p.id === event.payload.task_id ? { ...p, status: 'skipped_question' as const } : p
-      );
+      newState.plan = setStatus(newState.plan, event.payload.task_id, { status: 'skipped_question' });
       break;
     }
     case 'question.answered': {
-      newState.questions = newState.questions.map(q =>
-        q.id === event.payload.question_id
-          ? { ...q, status: 'answered' as const, answer: event.payload.answer }
-          : q
-      );
       const question = newState.questions.find(q => q.id === event.payload.question_id);
-      if (question) {
-        newState.plan = newState.plan.map(p =>
-          p.id === question.task_id
-            ? { ...p, status: 'todo' as const, notes: `unblocked · ${event.payload.answer.toLowerCase()}` }
-            : p
-        );
-      }
+      newState.questions = newState.questions.map(q =>
+        q.id === event.payload.question_id ? { ...q, status: 'answered' as const, answer: event.payload.answer } : q
+      );
+      newState.plan = setStatus(newState.plan, question?.task_id, { status: 'todo', notes: `unblocked · ${event.payload.answer.toLowerCase()}` });
       break;
     }
     case 'question.defaulted': {
+      const question = newState.questions.find(q => q.id === event.payload.question_id);
       newState.questions = newState.questions.map(q =>
-        q.id === event.payload.question_id
-          ? { ...q, status: 'defaulted' as const, answer: q.default_option }
-          : q
+        q.id === event.payload.question_id ? { ...q, status: 'defaulted' as const, answer: q.default_option } : q
       );
+      if (question) {
+        newState.plan = setStatus(newState.plan, question.task_id, { status: 'todo', notes: `unblocked · default: ${question.default_option.toLowerCase()}` });
+      }
       break;
     }
     case 'task.started': {
-      newState.plan = newState.plan.map(p =>
-        p.id === event.payload.task_id ? { ...p, status: 'doing' as const } : p
-      );
+      newState.plan = setStatus(newState.plan, event.payload.task_id, { status: 'doing' });
       break;
     }
     case 'task.finished': {
-      newState.plan = newState.plan.map(p =>
-        p.id === event.payload.task_id ? { ...p, status: 'done' as const } : p
-      );
+      newState.plan = setStatus(newState.plan, event.payload.task_id, { status: 'done' });
       break;
     }
-    case 'task.escalated': {
-      // Could track escalation status
+    case 'task.escalated':
+    case 'turn.interrupted':
       break;
-    }
-    case 'turn.interrupted': {
-      // The current task is interrupted, will be re-planned
-      break;
-    }
     case 'file.changed': {
       const newFiles = new Map(newState.files);
       newFiles.set(event.payload.path, { hash: event.payload.hash, version: event.payload.version });
@@ -186,28 +186,27 @@ function applyEvent(state: RoomState, event: AppEvent): RoomState {
     }
     case 'checkpoint.created': {
       newState.checkpoints = [...newState.checkpoints, event.payload];
-      newState.room.head_checkpoint_id = event.payload.id;
+      newState.room = { ...newState.room, head_checkpoint_id: event.payload.id };
       break;
     }
     case 'room.rewound': {
-      // After rewind, events after the checkpoint are greyed out (active = false)
-      // For client state, we can filter or mark them
-      newState.checkpoints = newState.checkpoints.filter(c => c.seq <= event.payload.seq);
+      // Drop checkpoints after the one we rewound to. The payload names the checkpoint; older servers sent its seq.
+      const { checkpoint_id, seq } = event.payload;
+      const target = checkpoint_id !== undefined ? newState.checkpoints.find(c => c.id === checkpoint_id) : undefined;
+      const cutoff = target?.seq ?? seq;
+      if (cutoff !== undefined) newState.checkpoints = newState.checkpoints.filter(c => c.seq <= cutoff);
+      if (target) newState.room = { ...newState.room, head_checkpoint_id: target.id };
       break;
     }
     case 'budget.updated': {
       newState.budget = event.payload;
       break;
     }
-    case 'room.paused': {
-      // Could add a paused flag
+    case 'room.paused':
+    case 'room.resumed':
       break;
-    }
-    case 'room.resumed': {
-      break;
-    }
     case 'presence.join': {
-      newState.presence = [...newState.presence, event.payload];
+      newState.presence = [...newState.presence.filter(p => p.user_id !== event.payload.user_id), event.payload];
       break;
     }
     case 'presence.leave': {
@@ -226,25 +225,10 @@ function applyEvent(state: RoomState, event: AppEvent): RoomState {
       );
       break;
     }
-    case 'agent.text':
-    case 'tool.called':
-    case 'tool.result':
-    case 'build.result':
-    case 'test.result':
-    case 'log.task_written':
-    case 'log.day_written':
-    case 'export.started':
-    case 'export.finished':
-      // These are feed events, already handled in messages or can be added to a separate feed
+    default:
+      // Feed-only events (agent.text, tool.*, build.result, log.*, export.*) don't change room state
       break;
   }
 
   return newState;
-}
-
-// Helper to get initial state from server
-export async function fetchInitialState(roomId: string): Promise<RoomState> {
-  const res = await fetch(`/api/rooms/${roomId}/initial-state`);
-  if (!res.ok) throw new Error('Failed to fetch initial state');
-  return res.json();
 }

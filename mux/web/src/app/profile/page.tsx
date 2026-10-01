@@ -92,6 +92,11 @@ export default function ProfilePage() {
   };
 
   const handleConnectGitHub = async () => {
+    // The demo has no backend to connect to; don't send the user off to github.com
+    if (isDemoMode()) {
+      alert('Connecting GitHub isn’t available in the demo. Sign in to connect your account.');
+      return;
+    }
     setConnecting(true);
     try {
       const { url } = await api.connectGitHub();

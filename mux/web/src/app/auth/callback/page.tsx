@@ -13,16 +13,25 @@ function AuthCallbackHandler() {
     const handleAuth = async () => {
       const code = searchParams.get('code');
       const next = safeNext(searchParams.get('next'));
+      const fail = (message: string) =>
+        router.replace(`/login?error=${encodeURIComponent(message)}&next=${encodeURIComponent(next)}`);
 
-      if (code) {
-        await supabase.auth.exchangeCodeForSession(code);
-      }
+      // The provider sends the user back with an error instead of a code when they cancel or it fails
+      const providerError = searchParams.get('error_description') || searchParams.get('error');
+      if (providerError) return fail(providerError);
+      if (!code) return fail('Sign-in link is missing its code. Please try again.');
 
-      router.push(next);
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      if (error) return fail(error.message || 'Sign-in failed. Please try again.');
+
+      router.replace(next);
       router.refresh();
     };
 
-    handleAuth();
+    handleAuth().catch(err => {
+      console.error('Auth callback failed:', err);
+      router.replace(`/login?error=${encodeURIComponent('Sign-in failed. Please try again.')}`);
+    });
   }, [router, searchParams]);
 
   return <Spinner />;

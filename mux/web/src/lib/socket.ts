@@ -1,73 +1,101 @@
 // WebSocket client for real-time events and presence
 import type { AppEvent, Presence, RoomState } from '@/types';
 import { demoRoomEvents, isDemoMode } from './demo';
+import { applyEvent, createEmptyState } from './reducer';
+import { getAccessToken } from './supabase';
+
+export type SocketStatus = 'connecting' | 'open' | 'reconnecting' | 'offline';
 
 type EventHandler = (event: AppEvent) => void;
 type PresenceHandler = (presence: Presence[]) => void;
 type StateHandler = (state: RoomState) => void;
+type StatusHandler = (status: SocketStatus) => void;
 
 export class SocketClient {
   private ws: WebSocket | null = null;
-  private url: string;
+  private apiHost: string;
   private roomId: string;
   private since: number;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set by disconnect() so the close it causes doesn't start a reconnect
+  private closedByClient = false;
   private eventHandlers: Set<EventHandler> = new Set();
   private presenceHandlers: Set<PresenceHandler> = new Set();
   private stateHandlers: Set<StateHandler> = new Set();
-  private pendingEvents: AppEvent[] = [];
+  private statusHandlers: Set<StatusHandler> = new Set();
   private currentState: RoomState | null = null;
-  private isConnected = false;
+  private status: SocketStatus = 'connecting';
 
   constructor(roomId: string, since: number = 0) {
     this.roomId = roomId;
     this.since = since;
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const apiHost = process.env.NEXT_PUBLIC_API_URL?.replace(/^http/, 'ws') || 'ws://localhost:8000';
-    this.url = `${apiHost}/rooms/${roomId}/ws?since=${since}`;
+    this.apiHost = process.env.NEXT_PUBLIC_API_URL?.replace(/^http/, 'ws') || 'ws://localhost:8000';
+  }
+
+  get id(): string {
+    return this.roomId;
   }
 
   connect(): Promise<void> {
+    this.closedByClient = false;
     if (isDemoMode()) {
       // Replay a canned room instead of opening a WebSocket
       if (!this.currentState) this.handleMessage(demoRoomEvents(this.roomId));
-      this.isConnected = true;
+      this.setStatus('open');
       return Promise.resolve();
     }
-    return new Promise((resolve, reject) => {
-      try {
-        this.ws = new WebSocket(this.url);
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return Promise.resolve();
+    }
+    return this.open();
+  }
 
-        this.ws.onopen = () => {
-          console.log('[WS] Connected');
-          this.isConnected = true;
+  private async open(): Promise<void> {
+    const token = await getAccessToken();
+    if (this.closedByClient) return;
+    // Built on every (re)connect so the server only replays what we haven't seen
+    const url = `${this.apiHost}/rooms/${this.roomId}/ws?since=${this.since}`;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      try {
+        const ws = new WebSocket(url);
+        this.ws = ws;
+
+        ws.onopen = () => {
+          // The first message authenticates the socket (the JWT isn't put in the URL, where it would be logged)
+          if (token) ws.send(JSON.stringify({ type: 'auth', payload: { token } }));
           this.reconnectAttempts = 0;
-          this.flushPendingEvents();
+          this.setStatus('open');
+          settled = true;
           resolve();
         };
 
-        this.ws.onmessage = (event) => {
+        ws.onmessage = (event) => {
           try {
-            const data = JSON.parse(event.data);
-            this.handleMessage(data);
+            this.handleMessage(JSON.parse(event.data));
           } catch (e) {
             console.error('[WS] Failed to parse message:', e);
           }
         };
 
-        this.ws.onclose = (event) => {
+        ws.onclose = (event) => {
+          if (this.ws !== ws) return; // an old socket we already replaced
+          this.ws = null;
+          if (this.closedByClient) return;
           console.log('[WS] Disconnected:', event.code, event.reason);
-          this.isConnected = false;
+          if (!settled) {
+            settled = true;
+            reject(new Error('WebSocket connection failed'));
+          }
           this.scheduleReconnect();
         };
 
-        this.ws.onerror = (error) => {
+        ws.onerror = (error) => {
           console.error('[WS] Error:', error);
-          if (!this.isConnected) {
-            reject(new Error('WebSocket connection failed'));
-          }
         };
       } catch (e) {
         reject(e);
@@ -78,168 +106,26 @@ export class SocketClient {
   private handleMessage(data: unknown) {
     // Handle initial state dump (array of events)
     if (Array.isArray(data)) {
-      for (const event of data) {
-        this.applyEvent(event as AppEvent);
-      }
+      for (const event of data) this.applyEvent(event as AppEvent);
       this.notifyState();
       return;
     }
 
     // Handle single event
     const event = data as AppEvent;
-    this.applyEvent(event);
+    if (!this.applyEvent(event)) return;
     this.notifyEvent(event);
     this.notifyState();
   }
 
-  private applyEvent(event: AppEvent) {
-    this.since = event.seq;
-
-    if (!this.currentState) {
-      // Initialize minimal state - will be hydrated by initial dump
-      this.currentState = {
-        room: { id: this.roomId } as any,
-        plan: [],
-        messages: [],
-        conflicts: [],
-        questions: [],
-        files: new Map(),
-        checkpoints: [],
-        budget: { tokens_used: 0, runs_used: 0, tokens_cap: 2000000, runs_cap: 100 },
-        presence: [],
-        current_user: {} as any,
-        current_user_membership: {} as any,
-      };
+  // Returns false for an event we've already applied (a replay after reconnect)
+  private applyEvent(event: AppEvent): boolean {
+    if (typeof event.seq === 'number') {
+      if (event.seq <= this.since && this.currentState) return false;
+      this.since = Math.max(this.since, event.seq);
     }
-
-    const state = this.currentState;
-
-    switch (event.type) {
-      case 'message.posted':
-        state.messages.push(event.payload);
-        break;
-      case 'message.labeled': {
-        const msg = state.messages.find(m => m.id === event.payload.message_id);
-        if (msg) {
-          msg.label = event.payload.label;
-          msg.rationale = event.payload.rationale;
-          msg.domain = event.payload.domain as any;
-        }
-        break;
-      }
-      case 'plan.item_added':
-        state.plan.push(event.payload);
-        break;
-      case 'plan.item_updated': {
-        const item = state.plan.find(p => p.id === event.payload.id);
-        if (item) Object.assign(item, event.payload.changes);
-        break;
-      }
-      case 'plan.approved': {
-        state.plan.forEach(p => { if (p.status === 'draft') p.status = 'todo'; });
-        break;
-      }
-      case 'conflict.opened':
-        state.conflicts.push(event.payload);
-        break;
-      case 'conflict.vote': {
-        const conflict = state.conflicts.find(c => c.id === event.payload.conflict_id);
-        if (conflict) {
-          conflict.votes.push({
-            conflict_id: event.payload.conflict_id,
-            user_id: event.payload.user_id,
-            option: event.payload.option,
-            weight: event.payload.weight,
-          });
-        }
-        break;
-      }
-      case 'conflict.closed': {
-        const conflict = state.conflicts.find(c => c.id === event.payload.conflict_id);
-        if (conflict) {
-          conflict.status = 'closed';
-          conflict.result = event.payload.result;
-          conflict.resolved_by = event.payload.resolved_by;
-        }
-        // Unblock the task
-        const task = state.plan.find(p => p.id === conflict?.task_id);
-        if (task) {
-          task.status = 'todo';
-          task.notes = `unblocked · ${event.payload.result}`;
-        }
-        break;
-      }
-      case 'question.opened':
-        state.questions.push(event.payload);
-        break;
-      case 'question.answered': {
-        const q = state.questions.find(q => q.id === event.payload.question_id);
-        if (q) {
-          q.status = 'answered';
-          q.answer = event.payload.answer;
-        }
-        const task = state.plan.find(p => p.id === q?.task_id);
-        if (task) {
-          task.status = 'todo';
-          task.notes = `unblocked · ${event.payload.answer.toLowerCase()}`;
-        }
-        break;
-      }
-      case 'question.defaulted': {
-        const q = state.questions.find(q => q.id === event.payload.question_id);
-        if (q) {
-          q.status = 'defaulted';
-          q.answer = q.default_option;
-        }
-        break;
-      }
-      case 'task.started': {
-        const task = state.plan.find(p => p.id === event.payload.task_id);
-        if (task) task.status = 'doing';
-        break;
-      }
-      case 'task.finished': {
-        const task = state.plan.find(p => p.id === event.payload.task_id);
-        if (task) task.status = 'done';
-        break;
-      }
-      case 'file.changed': {
-        state.files.set(event.payload.path, { hash: event.payload.hash, version: event.payload.version });
-        break;
-      }
-      case 'checkpoint.created':
-        state.checkpoints.push(event.payload);
-        break;
-      case 'room.rewound': {
-        // State will be rebuilt from events after rewind
-        // For now, just update checkpoints
-        state.checkpoints = state.checkpoints.filter(c => c.seq <= event.payload.seq);
-        break;
-      }
-      case 'budget.updated':
-        state.budget = event.payload;
-        break;
-      case 'presence.join':
-        state.presence.push(event.payload);
-        break;
-      case 'presence.leave':
-        state.presence = state.presence.filter(p => p.user_id !== event.payload.user_id);
-        break;
-      case 'presence.typing': {
-        const p = state.presence.find(p => p.user_id === event.payload.user_id);
-        if (p) p.typing = event.payload.typing;
-        break;
-      }
-      case 'presence.tab': {
-        const p = state.presence.find(p => p.user_id === event.payload.user_id);
-        if (p) p.tab = event.payload.tab;
-        break;
-      }
-    }
-  }
-
-  private flushPendingEvents() {
-    // Events that arrived before connection
+    this.currentState = applyEvent(this.currentState ?? createEmptyState(this.roomId), event);
+    return true;
   }
 
   private notifyEvent(event: AppEvent) {
@@ -247,33 +133,41 @@ export class SocketClient {
   }
 
   private notifyState() {
-    if (this.currentState) {
-      // State is mutated in place, so hand out a fresh snapshot or React won't re-render
-      const s = this.currentState;
-      const snapshot: RoomState = {
-        ...s,
-        plan: s.plan.map(p => ({ ...p })),
-        messages: [...s.messages],
-        conflicts: s.conflicts.map(c => ({ ...c, votes: [...c.votes] })),
-        questions: s.questions.map(q => ({ ...q })),
-        files: new Map(s.files),
-        checkpoints: [...s.checkpoints],
-        presence: s.presence.map(p => ({ ...p })),
-      };
-      this.stateHandlers.forEach(h => h(snapshot));
-      // Also compute presence for convenience
-      this.presenceHandlers.forEach(h => h(this.currentState!.presence));
-    }
+    const state = this.currentState;
+    if (!state) return;
+    // The reducer returns a new object for every change, so handing out the state itself re-renders React
+    this.stateHandlers.forEach(h => h(state));
+    this.presenceHandlers.forEach(h => h(state.presence));
+  }
+
+  private setStatus(status: SocketStatus) {
+    if (this.status === status) return;
+    this.status = status;
+    this.statusHandlers.forEach(h => h(status));
   }
 
   private scheduleReconnect() {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error('[WS] Max reconnect attempts reached');
+      this.setStatus('offline');
       return;
     }
+    this.setStatus('reconnecting');
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
     this.reconnectAttempts++;
-    setTimeout(() => this.connect(), delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      // A failed attempt closes the socket, which schedules the next one
+      this.open().catch(() => {});
+    }, delay);
+  }
+
+  // Try again after giving up (the "Reconnect" button)
+  reconnect() {
+    this.reconnectAttempts = 0;
+    this.closedByClient = false;
+    this.setStatus('connecting');
+    this.open().catch(() => {});
   }
 
   // Apply an event produced locally (demo mode) as if the server had sent it
@@ -283,18 +177,24 @@ export class SocketClient {
 
   onEvent(handler: EventHandler) {
     this.eventHandlers.add(handler);
-    return () => this.eventHandlers.delete(handler);
+    return () => { this.eventHandlers.delete(handler); };
   }
 
   onPresence(handler: PresenceHandler) {
     this.presenceHandlers.add(handler);
-    return () => this.presenceHandlers.delete(handler);
+    return () => { this.presenceHandlers.delete(handler); };
   }
 
   onState(handler: StateHandler) {
     this.stateHandlers.add(handler);
     if (this.currentState) handler(this.currentState);
-    return () => this.stateHandlers.delete(handler);
+    return () => { this.stateHandlers.delete(handler); };
+  }
+
+  onStatus(handler: StatusHandler) {
+    this.statusHandlers.add(handler);
+    handler(this.status);
+    return () => { this.statusHandlers.delete(handler); };
   }
 
   send(event: { type: string; payload: unknown }) {
@@ -312,9 +212,15 @@ export class SocketClient {
   }
 
   disconnect() {
-    this.ws?.close(1000, 'Client disconnect');
+    this.closedByClient = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const ws = this.ws;
     this.ws = null;
-    this.isConnected = false;
+    if (ws) {
+      ws.onclose = null;
+      ws.close(1000, 'Client disconnect');
+    }
   }
 
   getState(): RoomState | null {
@@ -330,7 +236,7 @@ export class SocketClient {
 let currentSocket: SocketClient | null = null;
 
 export function getSocket(roomId: string, since?: number): SocketClient {
-  if (currentSocket && currentSocket['roomId'] === roomId) {
+  if (currentSocket && currentSocket.id === roomId) {
     return currentSocket;
   }
   if (currentSocket) {

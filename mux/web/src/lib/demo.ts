@@ -354,11 +354,9 @@ export function isSampleRoom(id: string): boolean {
 
 export function getDemoRoom(id: string): Room {
   const found = sampleRooms.find(r => r.id === id) || created().find(r => r.id === id);
-  if (found) return found;
-  const room = makeRoom(id, 'Untitled room', '', 0, []);
-  created().unshift(room);
-  saveCreated(created());
-  return room;
+  // Like the real API's 404: an unknown id isn't turned into a new room
+  if (!found) throw new Error('Room not found');
+  return found;
 }
 
 export function createDemoRoom(description: string): Room {

@@ -1,5 +1,5 @@
 // Supabase client for auth only
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type AuthChangeEvent, type Session } from '@supabase/supabase-js';
 import { DEMO_AUTH_USER, isDemoMode, setDemoMode } from './demo';
 
 // Placeholders keep the build and dev server working before .env.local is filled in; auth calls fail until it is.
@@ -18,7 +18,8 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
-    detectSessionInUrl: true,
+    // /auth/callback exchanges the code itself and checks the result; detecting it here too would exchange it twice
+    detectSessionInUrl: false,
   },
 });
 
@@ -65,12 +66,13 @@ export async function getUser() {
   return user;
 }
 
-export function onAuthStateChange(callback: (event: string, session: any) => void) {
+export function onAuthStateChange(callback: (event: AuthChangeEvent, session: Session | null) => void) {
   return supabase.auth.onAuthStateChange(callback);
 }
 
-// Store token for API calls
+// Bearer token for API and socket calls
 export async function getAccessToken(): Promise<string | null> {
+  if (isDemoMode()) return null;
   const { data: { session } } = await supabase.auth.getSession();
   return session?.access_token || null;
 }

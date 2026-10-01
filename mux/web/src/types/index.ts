@@ -44,7 +44,7 @@ export interface PlanItem {
   title: string;
   status: PlanItemStatus;
   owner_role?: DomainRole;
-  notes?: string;
+  notes?: string | null;
   merged_notes?: string[];
 }
 
@@ -65,7 +65,8 @@ export interface Message {
   };
   reply?: string;
   created_at: string;
-  user: User;
+  // Embedded by the demo; real events carry only user_id, so resolve the author from room members
+  user?: User;
 }
 
 export interface Conflict {
@@ -73,7 +74,7 @@ export interface Conflict {
   room_id: string;
   task_id: string;
   options: string[];
-  evidence: { query: string; summary: string; citations: string[] }[];
+  evidence: Evidence[];
   domain: 'ui' | 'architecture' | 'scope';
   status: ConflictStatus;
   result?: string;
@@ -81,6 +82,13 @@ export interface Conflict {
   created_at: string;
   expires_at: string;
   votes: Vote[];
+}
+
+// Research shown on a conflict card. The backend's ResearchSummary has {title, url} citations; older events used bare URLs.
+export interface Evidence {
+  query?: string;
+  summary: string;
+  citations: (string | { title: string; url: string })[];
 }
 
 export interface Vote {
@@ -121,6 +129,8 @@ export interface Checkpoint {
   sandbox_snapshot_uuid: string | null;
   plan: PlanItem[];
   task_log_id: string;
+  // The plan item whose completion produced this checkpoint
+  task_id?: string;
   parent_id: string | null;
   created_at: string;
 }
@@ -134,7 +144,7 @@ export interface Budget {
 
 export interface Presence {
   user_id: string;
-  user: User;
+  user?: User;
   tab: 'feed' | 'preview' | 'code' | 'cards';
   typing?: boolean;
   active: boolean;
@@ -207,7 +217,9 @@ export interface BaseEvent {
   seq: number;
   room_id: string;
   type: EventType;
-  actor_id: string;
+  // architecture.md names this `actor`; the demo uses `actor_id`. Read it with eventActor().
+  actor?: string;
+  actor_id?: string;
   ts: string;
 }
 
@@ -293,7 +305,7 @@ export interface CheckpointCreatedEvent extends BaseEvent {
 
 export interface RoomRewoundEvent extends BaseEvent {
   type: 'room.rewound';
-  payload: { checkpoint_id: string; seq: number };
+  payload: { checkpoint_id?: string; seq?: number };
 }
 
 export interface BudgetUpdatedEvent extends BaseEvent {
@@ -383,3 +395,6 @@ export type AppEvent =
   | PresenceTypingEvent
   | PresenceTabEvent
   | AgentTextDeltaEvent;
+export function eventActor(event: Pick<BaseEvent, 'actor' | 'actor_id'>): string {
+  return event.actor ?? event.actor_id ?? '';
+}

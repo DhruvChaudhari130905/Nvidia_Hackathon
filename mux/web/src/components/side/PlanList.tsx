@@ -6,9 +6,6 @@ import type { PlanItem } from '@/types';
 interface PlanListProps {
   plan: PlanItem[];
   approved: boolean;
-  onEdit?: (items: PlanItem[]) => void;
-  onApprove?: () => void;
-  canEdit: boolean;
 }
 
 const statusStyles: Record<string, string> = {
@@ -27,14 +24,15 @@ const statusLabels: Record<string, string> = {
   skipped_question: 'skipped · waiting on answer',
 };
 
-export function PlanList({ plan, approved, onEdit, onApprove, canEdit }: PlanListProps) {
+export function PlanList({ plan, approved }: PlanListProps) {
   return (
     <div className="plan">
       <div className="plan-head">
         <span>Plan</span>
-        <span>{approved ? 'approved' : 'draft'} {approved ? '· ready' : canEdit ? '· click to edit' : ''}</span>
+        <span>{approved ? 'approved · ready' : 'draft · waiting for the owner'}</span>
       </div>
-      {plan.map((item, index) => (
+      {plan.length === 0 && <span className="m">No plan yet. The coordinator drafts one from the room&apos;s messages.</span>}
+      {plan.map(item => (
         <div key={item.id} className={statusStyles[item.status]}>
           <span className="ic" />
           <div>
@@ -45,11 +43,6 @@ export function PlanList({ plan, approved, onEdit, onApprove, canEdit }: PlanLis
           </div>
         </div>
       ))}
-      {!approved && canEdit && onApprove && (
-        <button className="btn primary mt-2" onClick={onApprove} type="button">
-          Approve Plan
-        </button>
-      )}
     </div>
   );
 }

@@ -58,6 +58,28 @@ export function canRun(path: string): boolean {
 
 // ───────────── Wandbox ─────────────
 
+const CONSENT_KEY = 'mux_remote_run_ok';
+
+// Asks (once per browser) before sending code to wandbox.org. False when the user declines.
+export function remoteRunAllowed(): boolean {
+  try {
+    if (window.localStorage.getItem(CONSENT_KEY) === '1') return true;
+  } catch {
+    // storage blocked; ask every time
+  }
+  const ok = window.confirm(
+    'Running this file sends its source code (and headers or modules next to it) to wandbox.org, a free third-party compiler service.\n\nContinue?',
+  );
+  if (ok) {
+    try {
+      window.localStorage.setItem(CONSENT_KEY, '1');
+    } catch {
+      // ignore
+    }
+  }
+  return ok;
+}
+
 const API = 'https://wandbox.org/api';
 let compilers: Promise<{ name: string; language: string; 'display-name': string; version: string }[]> | null = null;
 

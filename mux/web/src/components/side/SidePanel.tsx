@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import type { RoomState, Conflict, Question, PlanItem } from '@/types';
+import type { RoomState, PlanItem, User, Membership } from '@/types';
 import { ConflictCard } from './ConflictCard';
 import { QuestionCard } from './QuestionCard';
 import { PlanList } from './PlanList';
@@ -9,17 +9,21 @@ import { PlanApproval } from './PlanApproval';
 
 interface SidePanelProps {
   state: RoomState;
+  currentUser: User;
+  members: Membership[];
   currentUserRole: 'owner' | 'editor' | 'viewer';
   currentUserDomainRole: 'pm' | 'design' | 'eng';
   onVote: (conflictId: string, option: string) => void;
   onOverride: (conflictId: string, option: string) => void;
   onAnswer: (questionId: string, answer: string) => void;
-  onPlanUpdate: (items: PlanItem[]) => void;
-  onPlanApprove: () => void;
+  onPlanUpdate: (items: PlanItem[]) => void | Promise<void>;
+  onPlanApprove: () => void | Promise<void>;
 }
 
 export function SidePanel({
   state,
+  currentUser,
+  members,
   currentUserRole,
   currentUserDomainRole,
   onVote,
@@ -30,7 +34,7 @@ export function SidePanel({
 }: SidePanelProps) {
   const openConflicts = state.conflicts.filter(c => c.status === 'open' || c.status === 'voting');
   const openQuestions = state.questions.filter(q => q.status === 'open');
-  const isPlanApproved = state.plan.some(p => p.status !== 'draft');
+  const isPlanApproved = state.plan.length > 0 && state.plan.some(p => p.status !== 'draft');
 
   return (
     <aside className="col flex flex-col" aria-label="Decisions and plan">
@@ -44,9 +48,10 @@ export function SidePanel({
             <ConflictCard
               key={conflict.id}
               conflict={conflict}
-              currentUser={state.current_user}
+              currentUser={currentUser}
               currentUserRole={currentUserRole}
               currentUserDomainRole={currentUserDomainRole}
+              members={members}
               onVote={onVote}
               onOverride={onOverride}
             />
@@ -56,24 +61,20 @@ export function SidePanel({
             <QuestionCard
               key={question.id}
               question={question}
-              currentUser={state.current_user}
               currentUserRole={currentUserRole}
               onAnswer={onAnswer}
             />
           ))}
 
-          {isPlanApproved ? (
-            <PlanList
-              plan={state.plan}
-              approved={true}
-              canEdit={currentUserRole !== 'viewer'}
-            />
-          ) : (
+          {/* Only the owner edits and approves the draft; everyone else sees it read-only */}
+          {!isPlanApproved && currentUserRole === 'owner' ? (
             <PlanApproval
               plan={state.plan}
               onUpdate={onPlanUpdate}
               onApprove={onPlanApprove}
             />
+          ) : (
+            <PlanList plan={state.plan} approved={isPlanApproved} />
           )}
         </div>
       </div>

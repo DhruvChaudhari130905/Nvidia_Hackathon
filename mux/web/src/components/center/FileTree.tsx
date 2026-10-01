@@ -344,6 +344,7 @@ export function FileTree({
           <div
             role="treeitem"
             aria-expanded={isOpen}
+            aria-selected={isTarget}
             tabIndex={0}
             onClick={() => toggle(node.path)}
             onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(node.path); } }}
