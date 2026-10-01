@@ -54,7 +54,15 @@ uvx pyright --pythonpath .venv/bin/python mux tests/test_memory.py tests/test_co
 - Most typing bugs were renames, missing commas, and wrong indentation (functions indented into a class, a test nested inside another test). A syntax error hides every later error, so fix the first error and run the checks again.
 - Pyright found bugs the tests missed (`None` access in tests), and the tests found bugs pyright cannot see (a stray space in a string, a wrong slice index).
 
-## 6. Next
+## 6. Commit and push
+
+- Oct 2: committed steps 1–8, the session logs, and `.gitignore`, and pushed to `main` as `41baff2` (`DhruvChaudhari130905/Nvidia_Hackathon`). The earlier permission problem is gone.
+- `main` had moved on: Dhruv pushed `5d9d37c` (web app build-out in `mux/web/`, 100 files) on Oct 1. The Agent-A commit was rebased on top of it.
+- One conflict in `.gitignore`, resolved by keeping both sides: Dhruv's `__pycache__/` and `*.egg-info/`, and the `.env`, `.env.*`, `!.env.example`, and `.venv/` rules. Tests still passed after the rebase (36 passed).
+- `source-of-truth/design-theme.md` is deleted in `5d9d37c` too, so that open item is settled.
+- Not committed: `mux/server/.env` (does not exist yet), `.venv/`, `__pycache__/`.
+
+## 7. Next
 
 1. Weekend (Oct 3–4): fill `mux/server/.env`, smoke-test `llm.py` (one call per role, streaming, reasoning switch), run the Lightning spike, run `classify` on 10 real scenarios.
 2. Step 9: `mux/evals/coordinator/`, 50 scenarios, label accuracy at least 85%.

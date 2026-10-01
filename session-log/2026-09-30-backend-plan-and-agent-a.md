@@ -120,4 +120,5 @@ The Oct 1 spike moved to the weekend. Until it runs, assume the coordinator runs
 - Decide the gaps in section 1 as Q40+ and add them to `architecture.md`.
 - Decide what happens to a vote tie that neither the owner nor a domain-role voter breaks. `tally` returns `winner=None, decided_by="tie"`. Proposal: the task stays `skipped_conflict` and the owner is asked to override.
 - Fallback labels: a coordinator that fails twice queues the message; a planner that fails twice drafts a one-task plan. Confirm with the team.
-- `source-of-truth/design-theme.md` shows as deleted in `git status`. Restore it if that was not on purpose.
+- ~~`source-of-truth/design-theme.md` shows as deleted in `git status`.~~ Resolved Oct 2: Dhruv's commit `5d9d37c` deletes it on purpose.
+- ~~Push blocked on repo permissions.~~ Resolved Oct 2: steps 1–8 pushed to `main` as `41baff2`.
