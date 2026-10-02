@@ -41,7 +41,7 @@ def test_prompt_shows_room_state():
     assert "- [m1] Priya (pm): add Google login for RSVPs" in user
     assert user.endswith("- [m2] Dan (eng): no auth, keep RSVPs anonymous")
 
-def test_team_notes_are_contect_without_ids():
+def test_team_notes_are_context_without_ids():
     notes = [Message(f"n{i}", "Dan", "eng", f"note {i}") for i in range(1, 8)]
     llm = FakeLLM([MERGE])
     asyncio.run(Coordinator(llm).classify(replace(ROOM, team_notes=notes), NEW))

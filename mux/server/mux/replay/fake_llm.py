@@ -46,7 +46,8 @@ class FakeLLM:
             max_tokens: int | None = None,
             on_delta: DeltaCallback | None = None,
     ) -> LLMReply:
-        self.calls.append(Call(role, messages, tools, schema, reasoning, max_tokens))
+        # copy, because callers like the coder loop keep appending to the same list
+        self.calls.append(Call(role, list(messages), tools, schema, reasoning, max_tokens))
         if not self._script:
             raise AssertionError(f"FakeLLM script is empty on call {len(self.calls)}")
         item = self._script.pop(0)
