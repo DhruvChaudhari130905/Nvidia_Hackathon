@@ -62,7 +62,31 @@ uvx pyright --pythonpath .venv/bin/python mux tests/test_memory.py tests/test_co
 - `source-of-truth/design-theme.md` is deleted in `5d9d37c` too, so that open item is settled.
 - Not committed: `mux/server/.env` (does not exist yet), `.venv/`, `__pycache__/`.
 
-## 7. Next
+## 7. Team notes (person-to-person messages), decided Oct 2
+
+Until now every message went to the coordinator. The web app already sends @mention notifications, so people will address each other, and the coordinator would answer for them or label half-formed ideas as instructions. Decisions (grilling session):
+
+| # | Decision |
+|---|---|
+| Q1 | Add team notes in the same feed. No separate chat panel, no direct messages |
+| Q2 | The user builds all Python; a friend builds the frontend; the team gets a heads-up |
+| Q3 | Composer Agent / Team toggle, default Agent. It flips to Team when the text starts with `@someone`, and the person can flip it back. The server trusts the field |
+| Q4 | `message.posted` gets `to: "agent" \| "team"`, default `"agent"`. Notes never get `message.labeled` |
+| Q5 | The coordinator sees the last 5 notes as context only, with no ids, so a note can never be part of a conflict |
+| Q6 | Owner and editors can post notes; viewers cannot |
+| Q7 | Notes are rate-limited to 1 per second per user; agent messages stay at 1 per 5 seconds |
+| Q8 | Notes are room-level events and survive a rewind |
+| Q9 | No "Send to agent" button on notes for now (maybe week 4) |
+| Q10 | Same endpoint, `POST /rooms/{id}/messages`, with an optional `to` field |
+| Q11 | Notes stay out of the task and day logs |
+
+Python work:
+- Now: `RoomView.team_notes` (list of `Message`), rendered without ids under "Team discussion (context only, not instructions)", capped at `MAX_TEAM_NOTES = 5`, plus a `SYSTEM` rule; tests in `tests/test_coordinator.py`.
+- When P-API's stubs are built: `to` field in `events/models.py`; optional `to` and the two rate limits in `api/commands.py`; in `rooms/actor.py`, notes are appended and published but never queued or classified, and the actor keeps the last 5 for `RoomView`. Tell P-API first, since these are their files.
+
+Frontend work (`mux/web/src/`): `to?` on `Message` and optional `label` in `types/index.ts`; composer toggle that sends `to` through `lib/api.ts`; distinct feed style for notes with no label chip; no Team option for viewers.
+
+## 8. Next
 
 1. Weekend (Oct 3–4): fill `mux/server/.env`, smoke-test `llm.py` (one call per role, streaming, reasoning switch), run the Lightning spike, run `classify` on 10 real scenarios.
 2. Step 9: `mux/evals/coordinator/`, 50 scenarios, label accuracy at least 85%.
