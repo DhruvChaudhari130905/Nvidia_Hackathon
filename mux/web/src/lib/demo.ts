@@ -4,7 +4,7 @@
 //
 // There are a few ready-made sample projects, each with its own plan, feed, decisions, files and
 // preview. Rooms the user creates start blank and are kept in localStorage.
-import type { AppEvent, Membership, PlanItem, Room, User } from '@/types';
+import type { AppEvent, Membership, MessageTo, PlanItem, Room, User } from '@/types';
 
 const DEMO_FLAG_KEY = 'mux_demo';
 const CREATED_ROOMS_KEY = 'mux_demo_rooms';
@@ -486,7 +486,7 @@ function baseDemoRoomEvents(roomId: string): AppEvent[] {
   ];
 }
 
-export function demoMessageEvent(roomId: string, text: string): AppEvent {
+export function demoMessageEvent(roomId: string, text: string, to: MessageTo = 'agent'): AppEvent {
   const now = new Date().toISOString();
   const event: AppEvent = {
     seq: nextDemoSeq(),
@@ -494,7 +494,8 @@ export function demoMessageEvent(roomId: string, text: string): AppEvent {
     type: 'message.posted',
     actor_id: DEMO_USER.id,
     ts: now,
-    payload: { id: `m-${Date.now()}`, room_id: roomId, user_id: DEMO_USER.id, text, label: 'queue', rationale: 'Demo mode: queued locally.', created_at: now, user: DEMO_USER },
+    payload: { id: `m-${Date.now()}`, room_id: roomId, user_id: DEMO_USER.id, text, to,
+      ...(to === 'agent' && { label: 'queue', rationale: 'Demo mode: queued locally.' }), created_at: now, user: DEMO_USER },
   } as AppEvent;
   rememberSent(event);
   return event;

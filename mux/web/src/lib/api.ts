@@ -1,5 +1,5 @@
 // API client for REST commands
-import type { Room, Message, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
+import type { Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
 
 import { createDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
 import { getSocket } from './socket';
@@ -17,7 +17,7 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
   if (roomMatch && !roomMatch[2] && method === 'GET') return getDemoRoom(roomMatch[1]) as T;
   if (roomMatch && roomMatch[2] === '/sharing') return Object.assign(getDemoRoom(roomMatch[1]), body) as T;
   if (roomMatch && roomMatch[2] === '/messages') {
-    getSocket(roomMatch[1]).injectEvent(demoMessageEvent(roomMatch[1], body.text));
+    getSocket(roomMatch[1]).injectEvent(demoMessageEvent(roomMatch[1], body.text, body.to));
   }
   if (path === '/github/connect' || path.endsWith('/export')) return { url: 'https://github.com' } as T;
   return { accepted: true, seq: nextDemoSeq(), version: (body.base_version ?? 0) + 1 } as T;
@@ -57,10 +57,10 @@ export const api = {
     fetchWithAuth<Room>(`/rooms/${id}/sharing`, { method: 'PATCH', body: JSON.stringify(data) }),
 
   // Messages
-  sendMessage: (roomId: string, text: string) =>
+  sendMessage: (roomId: string, text: string, to: MessageTo = 'agent') =>
     fetchWithAuth<{ accepted: true; seq: number }>(`/rooms/${roomId}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, to }),
     }),
 
   // Plan

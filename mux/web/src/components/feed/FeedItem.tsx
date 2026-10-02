@@ -11,11 +11,11 @@ interface FeedItemProps {
 }
 
 export function FeedItem({ message, currentUser }: FeedItemProps) {
-  const isCurrentUser = message.user_id === currentUser.id;
   const isAgent = message.user_id === 'agent' || message.user_id === 'mux';
+  const isNote = message.to === 'team';
 
   return (
-    <div className="msg">
+    <div className={`msg ${isNote ? 'note' : ''}`}>
       <span
         className={`av ${isAgent ? 'agent-av' : ''}`}
         style={{ background: isAgent ? undefined : message.user.color }}
@@ -26,7 +26,13 @@ export function FeedItem({ message, currentUser }: FeedItemProps) {
         <div className="who">
           {isAgent ? 'MUX' : message.user.name}{' '}
           <time className="mono">{format(new Date(message.created_at), 'HH:mm')}</time>
-          {message.label && <LabelChip label={message.label} />}
+          {isNote ? (
+            <span className="note-tag mono">team</span>
+          ) : message.label ? (
+            <LabelChip label={message.label} />
+          ) : (
+            !isAgent && <span className="chip pending">waiting for coordinator</span>
+          )}
         </div>
         <p>{message.text}</p>
       </div>

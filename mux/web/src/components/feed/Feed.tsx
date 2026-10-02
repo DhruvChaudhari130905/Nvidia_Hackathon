@@ -1,16 +1,16 @@
 'use client';
 
 import React from 'react';
-import type { Message, User } from '@/types';
-import { LabelChip } from './LabelChip';
+import type { Message, MessageTo, User } from '@/types';
+import { FeedItem } from './FeedItem';
 import { ConflictBanner } from './ConflictBanner';
 import { Composer } from './Composer';
-import { format } from 'date-fns';
 
 interface FeedProps {
   messages: Message[];
   currentUser: User;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, to: MessageTo) => void;
+  canPostTeam?: boolean;
   activeConflict?: { id: string; taskId: string; options: string[] };
   activeQuestion?: { id: string; taskId: string };
 }
@@ -19,6 +19,7 @@ export function Feed({
   messages,
   currentUser,
   onSendMessage,
+  canPostTeam,
   activeConflict,
   activeQuestion,
 }: FeedProps) {
@@ -53,36 +54,7 @@ export function Feed({
         </div>
       </div>
 
-      <Composer onSend={onSendMessage} />
+      <Composer onSend={onSendMessage} canPostTeam={canPostTeam} />
     </section>
-  );
-}
-
-interface FeedItemProps {
-  message: Message;
-  currentUser: User;
-}
-
-function FeedItem({ message, currentUser }: FeedItemProps) {
-  const isCurrentUser = message.user_id === currentUser.id;
-  const isAgent = message.user_id === 'agent';
-
-  return (
-    <div className="msg">
-      <span
-        className={`av ${isAgent ? 'agent-av' : ''}`}
-        style={{ background: isAgent ? undefined : message.user.color }}
-      >
-        {isAgent ? 'H' : message.user.initials}
-      </span>
-      <div>
-        <div className="who">
-          {isAgent ? 'MUX' : message.user.name}{' '}
-          <time className="mono">{format(new Date(message.created_at), 'HH:mm')}</time>
-          <LabelChip label={message.label} />
-        </div>
-        <p>{message.text}</p>
-      </div>
-    </div>
   );
 }

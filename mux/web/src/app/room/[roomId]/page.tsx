@@ -23,7 +23,7 @@ import { notifyForEvent } from '@/lib/roomNotifications';
 import { NotificationToasts } from '@/components/room/Notifications';
 import { reduce } from '@/lib/reducer';
 import { supabase, getUser, loginHref } from '@/lib/supabase';
-import type { RoomState, Room, User, Message, PlanItem, Conflict, Question, Checkpoint, Membership } from '@/types';
+import type { RoomState, Room, User, Message, MessageTo, PlanItem, Conflict, Question, Checkpoint, Membership } from '@/types';
 import { format } from 'date-fns';
 
 export default function RoomPage() {
@@ -187,10 +187,10 @@ export default function RoomPage() {
     };
   }, [roomId]);
 
-  const handleSendMessage = useCallback(async (text: string) => {
+  const handleSendMessage = useCallback(async (text: string, to: MessageTo) => {
     if (!roomId || !currentUser) return;
     try {
-      await api.sendMessage(roomId, text);
+      await api.sendMessage(roomId, text, to);
       // Message will appear via WebSocket
     } catch (error) {
       console.error('Failed to send message:', error);
@@ -395,6 +395,7 @@ export default function RoomPage() {
             messages={state.messages}
             currentUser={currentUser}
             onSendMessage={handleSendMessage}
+            canPostTeam={currentUserMembership.permission !== 'viewer'}
             activeConflict={openConflicts[0] ? { id: openConflicts[0].id, taskId: openConflicts[0].task_id, options: openConflicts[0].options } : undefined}
             activeQuestion={openQuestions[0] ? { id: openQuestions[0].id, taskId: openQuestions[0].task_id } : undefined}
           />

@@ -3,6 +3,8 @@
 export type UserRole = 'owner' | 'editor' | 'viewer';
 export type DomainRole = 'pm' | 'design' | 'eng';
 export type MessageLabel = 'merge' | 'queue' | 'interrupt' | 'conflict' | 'chat';
+// agent: instructions for the coordinator (the default). team: notes between people, never sent to the coordinator
+export type MessageTo = 'agent' | 'team';
 export type PlanItemStatus = 'draft' | 'todo' | 'doing' | 'done' | 'skipped_conflict' | 'skipped_question';
 export type ConflictStatus = 'open' | 'voting' | 'closed';
 export type QuestionStatus = 'open' | 'answered' | 'defaulted';
@@ -53,7 +55,9 @@ export interface Message {
   room_id: string;
   user_id: string;
   text: string;
-  label: MessageLabel;
+  to?: MessageTo;
+  // Unset while the coordinator hasn't labeled it yet; team notes never get one
+  label?: MessageLabel;
   rationale?: string;
   domain?: 'ui' | 'architecture' | 'scope' | null;
   add_plan_item?: { title: string; after_task_id?: string };

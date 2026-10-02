@@ -97,6 +97,7 @@ input:focus-visible {
 .chip.interrupt { color: var(--conflict); }
 .chip.conflict { color: var(--conflict); }
 .chip.chat { color: var(--muted); }
+.chip.pending { color: var(--faint); font-style: italic; }
 
 .tool {
   margin-left: 38px;
@@ -424,6 +425,10 @@ input:focus-visible {
 .composer form { display: flex; gap: 8px; }
 .composer input, .composer textarea { flex: 1; min-width: 0; background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; color: var(--ink); font: inherit; }
 .composer .hint { font-size: 11px; color: var(--faint); }
+.composer .to-toggle { justify-self: start; }
+.msg.note p { color: var(--muted); }
+.msg.note > div { border-left: 2px solid var(--line); padding-left: 8px; }
+.note-tag { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
 
 .tabs { display: flex; gap: 4px; }
 .urlbar { font: 12px/1 var(--font-mono); color: var(--faint); text-transform: none; letter-spacing: 0; }
