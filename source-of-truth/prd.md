@@ -84,12 +84,13 @@ Judging uses four equally weighted criteria. How MUX scores on each:
    - Presence (avatars, typing, active tab) over MUX's own WebSocket. No Liveblocks.
    - Live agent feed: narration, tool activity, build and test results, and each message with its coordinator label.
    - Steering composer; each message is tagged with author and role.
+   - **Team notes** (proposed, see `architecture.md` §6.1): an Agent / Team toggle in the composer. Team notes are messages between people; they show in the feed but never go to the coordinator or the coder.
 4. **Plan and approval**
    - The coordinator drafts a plan (a list of tasks) from the app description.
    - Editors can add, remove, reorder, and comment on tasks, live, before approval.
    - The owner approves once. Tasks added later do not need approval.
 5. **Concurrent steering and coordinator**
-   - Every message goes to the coordinator, one message at a time per room, so it can see other pending messages. It labels each message:
+   - Every agent message (not team notes) goes to the coordinator, one message at a time per room, so it can see other pending messages. It labels each message:
      - **merge**: fits the current task; given to the coder at its next turn boundary.
      - **queue**: new work; the coordinator adds it to the plan and picks its position.
      - **interrupt**: invalidates current work; the coder stops at its next turn boundary and re-plans.
@@ -288,6 +289,7 @@ Draft beats. The final script is decided in week 4, together with the demo room.
 
 ## 12. Open questions
 
+- Team decisions Q40–Q55 (rewind, setup, votes, team notes, coder files and builds, token baseline) are listed with suggested answers in `architecture.md` §22.
 - Does WebContainers run Hono + SQLite from the starter template, and how fast does it boot? (Oct 1 spike.)
 - Can a Nebius sandbox expose a port for a running app? If so, MUX may switch the preview to it.
 - Does the sandbox have network access for `npm install`, and how long does a build take from the starter image?

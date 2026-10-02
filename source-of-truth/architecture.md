@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | v1, 2026-09-28 |
+| **Status** | v1.1, 2026-10-02. Adds team notes (§6.1, proposed) and the open decisions Q40–Q55 (§22) |
 | **Based on** | [`prd.md`](prd.md) v2 and decisions Q1–Q39 in [`../session-log/2026-09-28-architecture-grill.md`](../session-log/2026-09-28-architecture-grill.md) |
 | **Code** | [`../mux/`](../mux/). Every module named here has a stub file there. |
 | **UI reference** | [`../demos/mux-room-demo.html`](../demos/mux-room-demo.html), theme in [`design-theme.md`](design-theme.md) |
@@ -125,7 +125,7 @@ Defined as Pydantic models in `events/models.py`, exported to `packages/schema/`
 | Group | Types |
 |---|---|
 | Room | `room.created`, `member.joined`, `member.role_changed`, `sharing.changed` |
-| Messages | `message.posted`, `message.labeled` (merge, queue, interrupt, conflict, chat) |
+| Messages | `message.posted` (with `to`: `agent` or `team`, see §6.1), `message.labeled` (merge, queue, interrupt, conflict, chat; never for team notes) |
 | Plan | `plan.drafted`, `plan.edited`, `plan.approved`, `plan.item_added`, `plan.item_updated` |
 | Coordinator | `coordinator.reply`, `conflict.opened`, `conflict.evidence`, `conflict.vote`, `conflict.closed`, `question.opened`, `question.answered`, `question.defaulted` |
 | Coder | `task.started`, `agent.text`, `tool.called`, `tool.result` (summary only), `build.result`, `test.result`, `task.escalated`, `task.finished`, `turn.interrupted` |
@@ -191,6 +191,18 @@ Code: `agents/coordinator/`. It decides **what** gets built. It sees the plan, t
 - Weights **(default)**: every voter counts 1. A voter whose domain role matches the conflict's domain (Design for UI, Eng for architecture, PM for scope) counts 2. A tie goes to the owner's choice, or to the option backed by the domain-role voter if the owner didn't vote.
 - The result is pinned in the log and applied at the next task boundary.
 
+### 6.1 Team notes (proposed by P-Agent-A, 2026-10-02, needs team agreement)
+
+People in a room also need to talk to each other (the web app already sends @mention notifications). Without a separate path, a message like "@Dan login or not?" goes to the coordinator, which answers for Dan or treats a half-formed idea as an instruction.
+
+- The composer has an **Agent / Team** toggle, default Agent. It flips to Team when the text starts with `@someone`, and the person can flip it back. The server trusts the field.
+- `POST /rooms/{id}/messages` takes an optional `to: "agent" | "team"` (default `"agent"`). Owner and editors only. Rate limit: 1 per 5 seconds for agent messages, 1 per second for notes.
+- `message.posted` carries `to`. A team note is stored and published, but it never enters the inbox, is never classified, and never gets `message.labeled`.
+- The coordinator sees the last 5 notes as context only, without ids (`RoomView.team_notes`), so a note can never be part of a conflict. This part is built and tested.
+- Notes are room-level events: a rewind does not grey them out (see Q41 in §22).
+- Notes stay out of the task and day logs.
+- No "Send to agent" button on notes for now (maybe week 4).
+
 ## 7. Coder
 
 Code: `agents/coder/`. It decides **how** to build the current task.
@@ -249,7 +261,7 @@ Nothing else is available: no shell, no package install, no git, no network exce
 ### 7.4 Escalation and limits (`escalation.py`)
 - 2 consecutive failed builds on a task switch that task to Ultra (Q13).
 - `MAX_TURNS` per task: 25 **(default)**. When it's reached, the coder calls `ask_room` or marks the task skipped with a note.
-- Loop detection: the same tool call with the same arguments 3 times, or the same build error twice on Ultra, stops the loop.
+- Loop detection: the same tool call with the same arguments 3 times in a row, or the same build error twice on Ultra, stops the loop. Only back-to-back repeats count, so build, edit, build is progress. Build errors from before the switch to Ultra do not count against Ultra.
 - Reasoning mode is off for simple edits and on for planning and error fixing, if Token Factory exposes a switch **(spike)**.
 
 ## 8. Token efficiency
@@ -390,3 +402,49 @@ One backend process is enough for the hackathon, because room actors live in mem
 
 - **Demo room** (Q22, Q32): decided in week 4.
 - **Stretch:** forking, research mode, real-time co-editing of one file (CRDT).
+
+## 22. Open decisions (Q40–Q55), 2026-10-02
+
+Found while building P-Agent-A's code and reviewing P-Agent-B's coder. Each has a suggested answer. Owners reply "ok" or object; agreed answers then move into the sections above.
+
+### A. Rewind and saving
+
+| # | Decision | In plain words | Suggestion | Owner |
+|---|---|---|---|---|
+| Q40 | How rewind marks undone events | §10 flips `events.active` to false, which edits old records. An event log should never change, and flipping gets confusing after two rewinds | Keep events immutable. Emit `room.rewound{checkpoint_id}` and compute the active set from the checkpoint tree | P-DB |
+| Q41 | What rewind undoes | Rewinding to 2 pm should not remove a teammate who joined at 3 pm or refund spent budget | Split events into **timeline** events (files, plan, messages, cards, logs), which rewind greys out, and **room-level** events (membership, sharing, budget, export, team notes), which rewind never touches | P-DB, P-API |
+| Q42 | Crash recovery | §3 rebuilds from the latest checkpoint, but a checkpoint does not hold members, open cards, locks, or budget | Replay every event from seq 0. Rooms have a few thousand events at most | P-API, P-DB |
+
+### B. Technical setup
+
+| # | Decision | In plain words | Suggestion | Owner |
+|---|---|---|---|---|
+| Q43 | Database connection | Supabase's transaction pooler breaks asyncpg prepared statements | Use the direct or session connection string, or `statement_cache_size=0` | P-DB |
+| Q44 | WebSocket login | Browsers cannot set headers on a WebSocket, and a token in the URL leaks into logs | Send the JWT as the first socket message | P-API |
+| Q45 | Two people editing the plan | `PATCH /plan` sends the whole plan, so the second save wipes out the first | Send plan operations (add, remove, move, rename) by item id | P-API |
+| Q46 | Long build output | Sandbox output is cut at 8 KB, so the useful error is often lost | Parse errors inside the sandbox and return at most 5 `file:line: message` lines as short JSON | P-DB |
+| Q47 | Stuck file locks | A lock could outlive its holder after a restart | Keep locks in memory only and clear them when the actor is rebuilt | P-API |
+
+### C. Coordinator
+
+| # | Decision | In plain words | Suggestion | Owner |
+|---|---|---|---|---|
+| Q48 | A vote nobody can break | Ties go to the owner, then to the domain-role voter. Two Eng voters splitting a scope vote with no owner vote stays tied. `tally` returns `winner=None, decided_by="tie"` | The task stays `skipped_conflict`, and the owner is asked to override | Everyone |
+| Q49 | When the model fails twice | The coordinator queues the message as a plan item, so nothing is lost. The planner drafts a one-task plan the team can fix. Both return `fallback=True` | Keep both | Everyone |
+| Q50 | Team notes | Person-to-person messages in the same feed (§6.1). Touches P-API's files (`events/models.py`, `api/commands.py`, `rooms/actor.py`) and the frontend | Agree to §6.1. P-Agent-A builds the Python parts, the frontend owner builds the UI | Everyone, P-API |
+
+### D. Coder
+
+| # | Decision | In plain words | Suggestion | Owner |
+|---|---|---|---|---|
+| Q51 | Where builds run | `agents/coder/tools/build.py` runs `npm` on the machine that calls it. On the backend server, that runs AI-written code on the server | Builds run only in the Nebius sandbox through `sandbox/runner.py`. The local runner is for development on a laptop | P-DB, P-Agent-B |
+| Q52 | How the coder saves files | `agents/coder/tools/files.py` writes straight to disk, so no `file.changed` event is emitted, and rewind, checkpoints, the code view, and locks never see the change. The coder's versions are content hashes, while `PUT /files` uses a version number | Coder file tools go through the actor (`actor.ask`, answered with a new version or `stale`) and the store and manifest (§9). Use one version style everywhere: the manifest's version number | P-API, P-DB, P-Agent-B |
+| Q53 | Who builds the starter template | `templates/fullstack-starter/` is still one-line stubs; only `CONVENTIONS.md` is written. Nothing can be built or demoed without it | P-Agent-B owns it, done early in week 2 | P-Agent-B |
+| Q54 | The naive baseline for the token target | §8 promises at least 40% fewer tokens than a naive agent, but the naive agent is not defined; `evals/tokens/naive_agent.py` only records numbers | Naive means the same tasks with the full history, whole files, and no compaction. Run both on the same 20 prompts | P-Agent-B |
+| Q55 | What `list_files` returns | §7.3 says the repo map; the code returns the file paths under a directory, and the repo map goes into the context (§7.2) | Keep the code: paths from `list_files`, repo map in the context | P-Agent-B |
+
+### Answered by the weekend spikes, not by the team
+
+- Lightning or Super for the coordinator (Lightning JSON spike, §20).
+- Whether the reasoning switch exists, and whether reasoning stays on for the coder. The coder loop now defaults to `reasoning=None` (not sent) until then.
+

@@ -86,7 +86,33 @@ Python work:
 
 Frontend work (`mux/web/src/`): `to?` on `Message` and optional `label` in `types/index.ts`; composer toggle that sends `to` through `lib/api.ts`; distinct feed style for notes with no label chip; no Team option for viewers.
 
-## 8. Next
+## 8. Coder review (P-Agent-B's code), Oct 2
+
+P-Agent-B's coder arrived in a `new/` folder (Windows line endings, outside the repo layout). It was reviewed, fixed, and moved into place:
+`mux/server/mux/agents/coder/` (loop, context, compaction, escalation, prompts, tools), `mux/server/mux/files/repo_map.py`, `mux/server/tests/test_coder_loop.py` and `test_tools.py`, `mux/evals/tokens/`, and `mux/templates/fullstack-starter/CONVENTIONS.md`.
+
+Bugs fixed (each confirmed by running the code before the fix):
+1. Loop detection counted 3 identical calls anywhere in a task, so the third `run_build` stopped every task and Ultra could never rebuild. Now only 3 in a row count.
+2. Super's last build error counted against Ultra, so Ultra got one try.
+3. Compaction stubbed all but the very last tool result, so the model never saw the other results of its own turn.
+4. `list_files` rejected the `path` argument its schema sends, so every call failed.
+5. `update_plan` built a new empty plan on every call ("current task not found"); its statuses did not match §3.
+6. `ask_room` cards never reached the room.
+7. `edit_file` silently edited the first of several matches.
+8. Token usage was thrown away, so neither the budget nor the token eval could count coder tokens.
+9. A failed `finish_task` still ended the task; done or stopped was guessed from the summary text.
+
+Refinements: builds run in a thread instead of blocking every room; tool definitions are no longer sent twice; old `write_file` and `edit_file` contents are compacted; `node_modules` is skipped; a text-only reply gets a nudge; clipped files are marked; `reasoning` defaults to not sent; `context.py` went from 441 to 128 lines; web search uses `mux.integrations.tavily`; the tests use the shared `FakeLLM`; 18 new tests (62 in total with Agent-A's). `FakeLLM` now copies the message list it records, because the coder loop keeps appending to it.
+
+Not fixed (team decisions Q51–Q55 in `architecture.md` §22): builds still run locally (must move to the sandbox), file tools still write to disk (must go through the actor and store), the template is still stubs, and the naive token baseline is not defined.
+
+## 9. Open decisions and docs, Oct 2
+
+- `source-of-truth/architecture.md` v1.1: §6.1 team notes (proposed), §7.4 loop detection wording, event catalog `to` field, and §22 with the open decisions Q40–Q55 in plain words, each with a suggestion and an owner.
+- `source-of-truth/prd.md`: team notes in the composer, agent messages only to the coordinator, and a pointer to §22.
+- Dhruv pushed the Agent / Team composer toggle (`9ca941b`). Its `to?: 'agent' | 'team'` field, optional `label`, and `sendMessage(roomId, text, to)` match §6.1.
+
+## 10. Next
 
 1. Weekend (Oct 3–4): fill `mux/server/.env`, smoke-test `llm.py` (one call per role, streaming, reasoning switch), run the Lightning spike, run `classify` on 10 real scenarios.
 2. Step 9: `mux/evals/coordinator/`, 50 scenarios, label accuracy at least 85%.
