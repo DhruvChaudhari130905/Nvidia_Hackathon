@@ -1,1 +1,1392 @@
 """RoomActor: an asyncio task that owns the plan, inbox, files, and coder loop, and applies every change one at a time."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+import mimetypes
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional, Any, Awaitable, Iterable
+from uuid import uuid4
+from datetime import datetime, timezone
+
+from mux.events.log import EventLog
+from mux.events.models import (
+    BaseEvent,
+    EventType,
+    RoomCreatedEvent,
+    RoomJoinedEvent,
+    RoomClosedEvent,
+    RoomSharingUpdatedEvent,
+    UserJoinedEvent,
+    UserLeftEvent,
+    UserTypingEvent,
+    UserPresenceChangedEvent,
+    PlanCreatedEvent,
+    PlanUpdatedEvent,
+    PlanItemAddedEvent,
+    PlanItemUpdatedEvent,
+    PlanItemRemovedEvent,
+    PlanItemCompletedEvent,
+    UserMessageSentEvent,
+    CommandApprovePlanEvent,
+    CommandEditPlanEvent,
+    CommandRewindEvent,
+    CommandEndSessionEvent,
+    CommandSteerEvent,
+    CommandVoteEvent,
+    CommandOverrideEvent,
+    CommandAnswerQuestionEvent,
+    FileCreatedEvent,
+    FileUpdatedEvent,
+    FileDeletedEvent,
+    CheckpointCreatedEvent,
+    CheckpointRestoredEvent,
+    ConflictDetectedEvent,
+    ConflictResolvedEvent,
+    QuestionAskedEvent,
+    QuestionAnsweredEvent,
+    AIMessageStartedEvent,
+    AIMessageChunkEvent,
+    AIMessageCompletedEvent,
+    TaskStartedEvent,
+    TaskFinishedEvent,
+)
+from mux.rooms.plan import Plan
+from mux.rooms.inbox import Inbox
+from mux.rooms.presence import PresenceManager, UserPresence
+from mux.rooms.locks import LockManager
+from mux.rooms.sitting import SittingManager, SittingConfig
+from mux.rooms.budget import BudgetManager, BudgetConfig, BudgetState
+from mux.files.store import FileStore
+from mux.files.manifest import FileManifest
+
+logger = logging.getLogger(__name__)
+
+ROOM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+MEMBER_ROLES = frozenset({"editor", "viewer"})
+
+# Events that only exist to be broadcast or that the replay does not need
+_PLAN_EDIT_TYPES = frozenset({"add", "update", "remove", "complete"})
+
+
+class _BroadcastingLog:
+    """Wraps an EventLog so that every append (from the actor, budget or sitting
+    manager) also runs the actor's post-append hook (sequence sync + broadcast)."""
+
+    def __init__(self, log: EventLog, after_append: Callable[[BaseEvent], Awaitable[None]]) -> None:
+        self._log = log
+        self._after_append = after_append
+
+    async def append(self, event: BaseEvent) -> None:
+        await self._log.append(event)
+        await self._after_append(event)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._log, name)
+
+
+@dataclass(frozen=True, slots=True)
+class ActorConfig:
+    """Configuration for RoomActor."""
+    sitting_idle_timeout: int = 1800      # 30 minutes
+    sitting_check_interval: int = 60
+    budget_token_cap: int = 1_000_000
+    budget_sandbox_run_cap: int = 100
+    budget_warning_threshold: float = 0.8
+    presence_idle_timeout: int = 120
+    inbox_max_size: int = 1000
+    lock_idle_timeout: int = 120
+
+
+@dataclass
+class ActorState:
+    """Mutable runtime state for the actor."""
+    room_id: str
+    owner_id: str
+    created_at: float = field(default_factory=time.time)
+    sequence: int = 0
+    running: bool = False
+
+
+class RoomActor:
+    """
+    RoomActor is the single asyncio task that owns all room state and processes
+    every event/command sequentially. This ensures deterministic, conflict-free
+    room evolution.
+
+    Components owned:
+    - Plan: the task plan with validation
+    - Inbox: pending messages for the coder
+    - PresenceManager: ephemeral user presence (typing, tabs, cursors)
+    - LockManager: soft file locks for manual editing
+    - SittingManager: detects session end (idle or owner)
+    - BudgetManager: token/sandbox caps with pause/resume
+    - FileStore + Manifest: file contents and metadata
+    """
+
+    def __init__(
+        self,
+        room_id: str,
+        owner_id: str,
+        event_log: EventLog,
+        config: Optional[ActorConfig] = None,
+        *,
+        on_event: Optional[Callable[[BaseEvent], None]] = None,
+        on_sitting_ended: Optional[Callable[[str, Any], None]] = None,
+        on_budget_pause: Optional[Callable[[str, str], None]] = None,
+        on_budget_resume: Optional[Callable[[str], None]] = None,
+        on_budget_warning: Optional[Callable[[str, float, float], None]] = None,
+        on_lock_expire: Optional[Callable[[str, str], None]] = None,
+        files_root: Optional[Path] = None,
+    ) -> None:
+        if not ROOM_ID_PATTERN.match(room_id):
+            raise ValueError(f"Invalid room id {room_id!r}")
+        self.room_id = room_id
+        self.owner_id = owner_id
+        self.event_log = event_log
+        self.config = config or ActorConfig()
+        self._on_event = on_event
+        self._on_sitting_ended = on_sitting_ended
+        self._on_budget_pause = on_budget_pause
+        self._on_budget_resume = on_budget_resume
+        self._on_budget_warning = on_budget_warning
+        self._on_lock_expire = on_lock_expire
+        self._state = ActorState(room_id=room_id, owner_id=owner_id)
+        self._lock = asyncio.Lock()
+        self._task: Optional[asyncio.Task] = None
+        self._shutdown_event = asyncio.Event()
+        self._turn_event = asyncio.Event()
+        self._last_event_id: Optional[str] = None
+        # All appends go through this wrapper so every event is sequenced and broadcast
+        self._log = _BroadcastingLog(event_log, self._after_append)
+
+        # Persistent room settings (rebuilt from ROOM_* events on rehydration)
+        self.members: dict[str, str] = {}  # user_id -> "editor" | "viewer" (owner is implicit)
+        self.public = False
+        self.allow_anonymous = False
+        self.closed = False
+
+        # Initialize components
+        self.plan = Plan()
+        self.inbox = Inbox(max_size=self.config.inbox_max_size)
+        self.presence = PresenceManager(idle_timeout=self.config.presence_idle_timeout)
+        self.locks = LockManager(
+            idle_timeout=self.config.lock_idle_timeout,
+            on_lock_expire=on_lock_expire,
+        )
+        self.sitting = SittingManager(
+            room_id=room_id,
+            event_log=self._log,
+            owner_id=owner_id,
+            config=SittingConfig(
+                idle_timeout=self.config.sitting_idle_timeout,
+                check_interval=self.config.sitting_check_interval,
+            ),
+            on_sitting_ended=on_sitting_ended,
+        )
+        self.budget = BudgetManager(
+            room_id=room_id,
+            event_log=self._log,
+            owner_id=owner_id,
+            config=BudgetConfig(
+                token_cap=self.config.budget_token_cap,
+                sandbox_run_cap=self.config.budget_sandbox_run_cap,
+                warning_threshold=self.config.budget_warning_threshold,
+            ),
+            on_pause=on_budget_pause,
+            on_resume=on_budget_resume,
+            on_warning=on_budget_warning,
+        )
+        # Each room gets its own directory so rooms never overwrite each other's files
+        self.files = FileStore(root=(files_root or Path.cwd() / ".mux" / "files") / room_id)
+        self.manifest = FileManifest()
+
+    async def start(self) -> None:
+        """Start the actor and all background components."""
+        async with self._lock:
+            if self._state.running:
+                return
+            self._state.running = True
+            self._shutdown_event.clear()
+            await self.sitting.start()
+            self._task = asyncio.create_task(self._run_loop())
+            logger.info(f"RoomActor started for room {self.room_id}")
+
+    async def stop(self, reason: str = "stopped") -> None:
+        """Stop the actor and all background components."""
+        async with self._lock:
+            if not self._state.running:
+                return
+            self._state.running = False
+            self._shutdown_event.set()
+            await self.sitting.stop()
+            if self._task:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+                self._task = None
+            logger.info(f"RoomActor stopped for room {self.room_id}: {reason}")
+
+    def is_running(self) -> bool:
+        return self._state.running
+
+    # ---- Event emission ----
+
+    def _next_sequence(self) -> int:
+        self._state.sequence += 1
+        return self._state.sequence
+
+    async def _emit(self, event: BaseEvent) -> None:
+        """Append event to the log (which assigns its sequence) and broadcast it."""
+        await self._log.append(event)
+
+    async def _after_append(self, event: BaseEvent) -> None:
+        """Runs after every append, including budget/sitting events."""
+        # The log assigns the sequence; keep the actor in sync with it
+        self._state.sequence = max(self._state.sequence, event.sequence)
+        self._last_event_id = str(event.id)
+
+        if self._on_event:
+            asyncio.create_task(self._safe_callback(self._on_event, event))
+
+    async def _safe_callback(self, cb: Callable[[BaseEvent], Any], event: BaseEvent) -> None:
+        try:
+            result = cb(event)
+            # on_event may be sync or async (main.py passes an async broadcaster)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("on_event callback failed")
+
+    def _event_fields(self, user_id: Optional[str]) -> dict:
+        """Common BaseEvent fields. The sequence is a placeholder; the log assigns the real one."""
+        return {
+            "id": uuid4(),
+            "room_id": self.room_id,
+            "user_id": user_id,
+            "timestamp": datetime.now(timezone.utc),
+            "sequence": self._next_sequence(),
+            "prev_event_id": None,
+        }
+
+    # ---- Room settings / membership ----
+
+    def role_of(self, user_id: str) -> Optional[str]:
+        """Return the user's role in this room: owner, editor, viewer, or None."""
+        if user_id == self.owner_id:
+            return "owner"
+        if user_id in self.members:
+            return self.members[user_id]
+        if self.public:
+            return "viewer"
+        return None
+
+    async def init_room(self, name: str, description: Optional[str] = None) -> None:
+        """Record the ROOM_CREATED event (persists the owner and metadata for rehydration)."""
+        async with self._lock:
+            self.manifest.set_room_metadata(name=name, description=description)
+            await self._emit(RoomCreatedEvent(
+                **self._event_fields(self.owner_id),
+                room_name=name,
+                room_description=description,
+                created_by=self.owner_id,
+                initial_plan=None,
+            ))
+
+    async def add_member(self, user_id: str, role: str, granted_by: str, user_name: Optional[str] = None) -> None:
+        """Grant (or change) persistent membership."""
+        if role not in MEMBER_ROLES:
+            raise ValueError(f"Invalid role {role!r}. Must be one of {sorted(MEMBER_ROLES)}")
+        if user_id == self.owner_id:
+            raise ValueError("The owner's role cannot be changed")
+        async with self._lock:
+            self.members[user_id] = role
+            await self._emit(RoomJoinedEvent(
+                **self._event_fields(user_id),
+                user_name=user_name,
+                role=role,
+                granted_by=granted_by,
+            ))
+
+    async def set_sharing(self, public: bool, allow_anonymous: bool, user_id: str) -> None:
+        async with self._lock:
+            self.public = public
+            self.allow_anonymous = allow_anonymous
+            await self._emit(RoomSharingUpdatedEvent(
+                **self._event_fields(user_id),
+                public=public,
+                allow_anonymous=allow_anonymous,
+                updated_by=user_id,
+            ))
+
+    async def close_room(self, user_id: str, reason: Optional[str] = None) -> None:
+        async with self._lock:
+            self.closed = True
+            await self._emit(RoomClosedEvent(
+                **self._event_fields(user_id),
+                closed_by=user_id,
+                reason=reason,
+            ))
+
+    # ---- User lifecycle ----
+
+    async def user_join(
+        self,
+        user_id: str,
+        user_name: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+    ) -> UserPresence:
+        """User joins the room."""
+        async with self._lock:
+            presence = await self.presence.join(user_id, user_name, avatar_url)
+            await self.sitting.record_activity(user_id)
+            event = UserJoinedEvent(
+                id=uuid4(),
+                type=EventType.USER_JOINED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                user_name=user_name,
+            )
+            await self._emit(event)
+        return presence
+
+    async def user_leave(self, user_id: str) -> Optional[UserPresence]:
+        """User leaves the room."""
+        async with self._lock:
+            presence = await self.presence.leave(user_id)
+            await self.sitting.record_leave(user_id)
+            event = UserLeftEvent(
+                id=uuid4(),
+                type=EventType.USER_LEFT,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+            )
+            await self._emit(event)
+        return presence
+
+    # ---- Presence updates ----
+
+    async def set_typing(self, user_id: str, typing: bool) -> bool:
+        async with self._lock:
+            result = await self.presence.set_typing(user_id, typing)
+            if result:
+                event = UserTypingEvent(
+                    id=uuid4(),
+                    type=EventType.USER_TYPING,
+                    room_id=self.room_id,
+                    user_id=user_id,
+                    timestamp=datetime.now(timezone.utc),
+                    sequence=self._next_sequence(),
+                    prev_event_id=None,
+                    is_typing=typing,
+                )
+                await self._emit(event)
+        return result
+
+    async def set_active_tab(self, user_id: str, tab: Optional[str]) -> bool:
+        async with self._lock:
+            return await self.presence.set_active_tab(user_id, tab)
+
+    async def set_cursor(self, user_id: str, position: Optional[dict]) -> bool:
+        async with self._lock:
+            return await self.presence.set_cursor(user_id, position)
+
+    async def set_presence_status(self, user_id: str, status: str) -> bool:
+        async with self._lock:
+            result = await self.presence.set_status(user_id, status)
+            if result:
+                event = UserPresenceChangedEvent(
+                    id=uuid4(),
+                    type=EventType.USER_PRESENCE_CHANGED,
+                    room_id=self.room_id,
+                    user_id=user_id,
+                    timestamp=datetime.now(timezone.utc),
+                    sequence=self._next_sequence(),
+                    prev_event_id=None,
+                    presence=status,
+                )
+                await self._emit(event)
+        return result
+
+    # ---- Plan operations ----
+
+    async def draft_plan(self, items: list[dict], user_id: str) -> list[dict]:
+        async with self._lock:
+            new_items = await self.plan.draft(items)
+            event = PlanCreatedEvent(
+                id=uuid4(),
+                type=EventType.PLAN_CREATED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                plan=new_items,
+                created_by=user_id,
+            )
+            await self._emit(event)
+        return new_items
+
+    async def replace_plan(self, items: list[dict], user_id: str) -> list[dict]:
+        async with self._lock:
+            new_items = await self.plan.replace(items)
+            event = PlanUpdatedEvent(
+                id=uuid4(),
+                type=EventType.PLAN_UPDATED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                plan=new_items,
+                updated_by=user_id,
+            )
+            await self._emit(event)
+        return new_items
+
+    async def add_plan_item(self, item: dict, user_id: str) -> dict:
+        async with self._lock:
+            added = await self.plan.add_item(item)
+            items_list = await self.plan.get_items()
+            position = len(items_list) - 1
+            event = PlanItemAddedEvent(
+                id=uuid4(),
+                type=EventType.PLAN_ITEM_ADDED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                item_id=added["id"],
+                title=added["title"],
+                description=added.get("notes"),
+                position=position,
+                added_by=user_id,
+                # Full item so replay restores status/owner_role/notes exactly
+                metadata={"item": added},
+            )
+            await self._emit(event)
+
+            # Emit TaskStartedEvent if item is added with status "doing"
+            if added.get("status") == "doing":
+                task_started = TaskStartedEvent(
+                    id=uuid4(),
+                    type=EventType.TASK_STARTED,
+                    room_id=self.room_id,
+                    user_id=user_id,
+                    timestamp=datetime.now(timezone.utc),
+                    sequence=self._next_sequence(),
+                    prev_event_id=None,
+                    item_id=added["id"],
+                    title=added["title"],
+                    started_by=user_id,
+                )
+                await self._emit(task_started)
+        return added
+
+    async def update_plan_item(self, item_id: str, changes: dict, user_id: str) -> dict:
+        async with self._lock:
+            # Get old item to check status change
+            items = await self.plan.get_items()
+            old_item = next((item for item in items if item["id"] == item_id), None)
+            old_status = old_item.get("status") if old_item else None
+
+            updated = await self.plan.update_item(item_id, changes)
+            event = PlanItemUpdatedEvent(
+                id=uuid4(),
+                type=EventType.PLAN_ITEM_UPDATED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                item_id=item_id,
+                updates=changes,
+                updated_by=user_id,
+            )
+            await self._emit(event)
+
+            # Emit TaskStartedEvent if status changed to "doing"
+            new_status = updated.get("status")
+            if new_status == "doing" and old_status != "doing":
+                task_started = TaskStartedEvent(
+                    id=uuid4(),
+                    type=EventType.TASK_STARTED,
+                    room_id=self.room_id,
+                    user_id=user_id,
+                    timestamp=datetime.now(timezone.utc),
+                    sequence=self._next_sequence(),
+                    prev_event_id=None,
+                    item_id=item_id,
+                    title=updated["title"],
+                    started_by=user_id,
+                )
+                await self._emit(task_started)
+
+            # Emit TaskFinishedEvent if status changed to "done"
+            if new_status == "done" and old_status != "done":
+                task_finished = TaskFinishedEvent(
+                    id=uuid4(),
+                    type=EventType.TASK_FINISHED,
+                    room_id=self.room_id,
+                    user_id=user_id,
+                    timestamp=datetime.now(timezone.utc),
+                    sequence=self._next_sequence(),
+                    prev_event_id=None,
+                    item_id=item_id,
+                    title=updated["title"],
+                    finished_by=user_id,
+                )
+                await self._emit(task_finished)
+        return updated
+
+    async def remove_plan_item(self, item_id: str, user_id: str) -> dict:
+        async with self._lock:
+            removed = await self.plan.remove_item(item_id)
+            event = PlanItemRemovedEvent(
+                id=uuid4(),
+                type=EventType.PLAN_ITEM_REMOVED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                item_id=item_id,
+                removed_by=user_id,
+            )
+            await self._emit(event)
+        return removed
+
+    async def complete_plan_item(self, item_id: str, user_id: str) -> dict:
+        async with self._lock:
+            completed = await self.plan.complete_item(item_id)
+            now = datetime.now(timezone.utc)
+            event = PlanItemCompletedEvent(
+                id=uuid4(),
+                type=EventType.PLAN_ITEM_COMPLETED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=now,
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                item_id=item_id,
+                completed_by=user_id,
+                completed_at=now,
+            )
+            await self._emit(event)
+
+            # Emit TaskFinishedEvent
+            task_finished = TaskFinishedEvent(
+                id=uuid4(),
+                type=EventType.TASK_FINISHED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=now,
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                item_id=item_id,
+                title=completed["title"],
+                finished_by=user_id,
+            )
+            await self._emit(task_finished)
+        return completed
+
+    async def approve_plan_items(self, item_ids: list[str], user_id: str) -> list[dict]:
+        async with self._lock:
+            items = await self.plan.approve_items(item_ids)
+            event = CommandApprovePlanEvent(
+                id=uuid4(),
+                type=EventType.COMMAND_APPROVE_PLAN,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                plan_item_ids=item_ids,
+                issued_by=user_id,
+                approval_note=None,
+            )
+            await self._emit(event)
+        return items
+
+    # ---- Message / Inbox ----
+
+    async def add_message(
+        self,
+        label: str,
+        content: str,
+        *,
+        message_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        rationale: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> None:
+        """Add a message to the inbox (coordinator labels: merge, queue, interrupt, conflict, chat)."""
+        async with self._lock:
+            await self.inbox.add(label, content, message_id=message_id, user_id=user_id, rationale=rationale, domain=domain)
+            event = UserMessageSentEvent(
+                id=uuid4(),
+                type=EventType.USER_MESSAGE_SENT,
+                room_id=self.room_id,
+                user_id=user_id or "system",
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                message_id=message_id or str(uuid4()),
+                content=content,
+                user_name=None,
+                reply_to=None,
+            )
+            await self._emit(event)
+
+    async def drain_inbox(self) -> tuple[list[str], list[str], bool]:
+        """Drain inbox at turn boundary. Returns (merges, edit_notes, interrupt)."""
+        async with self._lock:
+            return await self.inbox.drain()
+
+    # ---- File operations ----
+
+    async def create_file(self, path: str, content: str, user_id: str) -> str:
+        async with self._lock:
+            file_id = str(uuid4())
+            await self.files.write(path, content)
+            # Infer file type from extension
+            file_type = mimetypes.guess_type(path)[0]
+            self.manifest.add(file_id, path, len(content.encode()), file_type=file_type)
+            event = FileCreatedEvent(
+                id=uuid4(),
+                type=EventType.FILE_CREATED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                file_id=file_id,
+                path=path,
+                name=path.split("/")[-1],
+                content=content,
+                file_type=file_type,
+                size=len(content.encode()),
+                created_by=user_id,
+            )
+            await self._emit(event)
+        return file_id
+
+    async def update_file(self, path: str, content: str, user_id: str) -> None:
+        async with self._lock:
+            old_content = await self.files.read(path)
+            await self.files.write(path, content)
+            file_id = self.manifest.get_id(path)
+            if file_id is None:
+                file_id = str(uuid4())
+                file_type = mimetypes.guess_type(path)[0]
+                self.manifest.add(file_id, path, len(content.encode()), file_type=file_type)
+            else:
+                self.manifest.update(path, len(content.encode()))
+            event = FileUpdatedEvent(
+                id=uuid4(),
+                type=EventType.FILE_UPDATED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                file_id=file_id,
+                path=path,
+                content=content,
+                content_delta={"old": old_content, "new": content} if old_content != content else None,
+                size=len(content.encode()),
+                updated_by=user_id,
+            )
+            await self._emit(event)
+
+    async def delete_file(self, path: str, user_id: str) -> None:
+        async with self._lock:
+            file_id = self.manifest.get_id(path) or ""
+            await self.files.delete(path)
+            self.manifest.remove(path)
+            event = FileDeletedEvent(
+                id=uuid4(),
+                type=EventType.FILE_DELETED,
+                room_id=self.room_id,
+                user_id=user_id,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                file_id=file_id,
+                path=path,
+                deleted_by=user_id,
+            )
+            await self._emit(event)
+
+    # ---- Lock operations ----
+
+    async def lock_file(self, path: str, user_id: str) -> bool:
+        async with self._lock:
+            return await self.locks.lock(path, user_id)
+
+    async def unlock_file(self, path: str, user_id: str) -> bool:
+        async with self._lock:
+            return await self.locks.unlock(path, user_id)
+
+    async def is_locked(self, path: str) -> bool:
+        async with self._lock:
+            return await self.locks.is_locked(path)
+
+    async def locked_by(self, path: str) -> Optional[str]:
+        async with self._lock:
+            return await self.locks.locked_by(path)
+
+    # ---- Budget operations ----
+
+    async def record_tokens(self, delta: int, user_id: str) -> bool:
+        async with self._lock:
+            return await self.budget.record_tokens(delta, user_id)
+
+    async def record_sandbox_run(self, user_id: str) -> bool:
+        async with self._lock:
+            return await self.budget.record_sandbox_run(user_id)
+
+    async def check_budget_allowance(self, estimated_tokens: int = 0, estimated_runs: int = 0) -> bool:
+        async with self._lock:
+            return await self.budget.check_allowance(estimated_tokens, estimated_runs)
+
+    async def raise_budget_caps(self, user_id: str, token_cap: Optional[int] = None, sandbox_run_cap: Optional[int] = None) -> bool:
+        async with self._lock:
+            return await self.budget.raise_caps(user_id, token_cap, sandbox_run_cap)
+
+    async def force_budget_resume(self, user_id: str) -> bool:
+        async with self._lock:
+            return await self.budget.force_resume(user_id)
+
+    # ---- Queries ----
+
+    async def get_plan(self) -> list[dict]:
+        async with self._lock:
+            return await self.plan.get_items()
+
+    async def get_presence(self, user_id: str) -> Optional[UserPresence]:
+        async with self._lock:
+            return await self.presence.get(user_id)
+
+    async def get_all_presence(self) -> dict[str, UserPresence]:
+        async with self._lock:
+            return await self.presence.get_all()
+
+    async def get_budget_status(self) -> dict:
+        async with self._lock:
+            return await self.budget.get_status()
+
+    async def get_sitting_status(self) -> dict:
+        async with self._lock:
+            return await self.sitting.get_status()
+
+    async def get_file(self, path: str) -> Optional[str]:
+        async with self._lock:
+            if path not in self.manifest:
+                return None
+            try:
+                return await self.files.read(path)
+            except FileNotFoundError:
+                return None
+
+    async def list_files(self) -> list[str]:
+        async with self._lock:
+            return self.manifest.list_paths()
+
+    # ---- Checkpoint / Rewind ----
+
+    async def create_checkpoint(self, user_id: str, description: Optional[str] = None, include_files: bool = True, include_plan: bool = True) -> str:
+        """Create a checkpoint of current room state."""
+        checkpoint_id = str(uuid4())
+        async with self._lock:
+            checkpoint_data = await self._snapshot(
+                checkpoint_id, description, user_id, include_files, include_plan,
+                sequence=self._state.sequence, created_at=time.time(),
+            )
+            self.manifest.add_checkpoint(checkpoint_id, checkpoint_data)
+
+            event = CheckpointCreatedEvent(
+                **self._event_fields(user_id),
+                checkpoint_id=checkpoint_id,
+                description=description,
+                created_by=user_id,
+                includes_files=include_files,
+                includes_plan=include_plan,
+            )
+            await self._emit(event)
+        return checkpoint_id
+
+    async def _snapshot(
+        self,
+        checkpoint_id: str,
+        description: Optional[str],
+        user_id: str,
+        include_files: bool,
+        include_plan: bool,
+        *,
+        sequence: int,
+        created_at: float,
+    ) -> dict:
+        """Capture plan/files as checkpoint data (caller holds the lock)."""
+        return {
+            "checkpoint_id": checkpoint_id,
+            "description": description,
+            "sequence": sequence,
+            "plan": await self.plan.get_items() if include_plan else [],
+            "files": {path: await self.files.read(path) for path in self.manifest.list_paths()} if include_files else {},
+            "includes_files": include_files,
+            "includes_plan": include_plan,
+            "created_at": created_at,
+            "created_by": user_id,
+        }
+
+    async def _restore_snapshot(self, checkpoint_data: dict) -> None:
+        """Replace plan and/or files with a checkpoint's contents (caller holds the lock)."""
+        if checkpoint_data.get("includes_plan", True):
+            await self.plan.replace(checkpoint_data.get("plan") or [])
+        if checkpoint_data.get("includes_files", True):
+            files = checkpoint_data.get("files") or {}
+            # Remove files created after the checkpoint, then write the saved ones
+            await self.files.clear()
+            for path, content in files.items():
+                await self.files.write(path, content)
+            self.manifest.rebuild_from_checkpoint(files)
+
+    async def restore_checkpoint(self, checkpoint_id: str, user_id: str) -> bool:
+        """Restore room state from a checkpoint."""
+        async with self._lock:
+            checkpoint_data = self.manifest.get_checkpoint(checkpoint_id)
+            if not checkpoint_data:
+                return False
+
+            await self._restore_snapshot(checkpoint_data)
+
+            event = CheckpointRestoredEvent(
+                **self._event_fields(user_id),
+                checkpoint_id=checkpoint_id,
+                restored_by=user_id,
+                restore_point=checkpoint_data.get("sequence", 0),
+            )
+            await self._emit(event)
+        return True
+
+    async def rewind_to_sequence(self, target_sequence: int, user_id: str, reason: Optional[str] = None, preserve_checkpoint: bool = False) -> bool:
+        """Rewind the plan and files to their state as of a specific event sequence.
+
+        Presence, membership, budget usage, sitting state and checkpoints are kept:
+        rewinding the document must not refund spent budget or drop connected users.
+        """
+        if preserve_checkpoint:
+            await self.create_checkpoint(user_id, f"Pre-rewind checkpoint at sequence {self._state.sequence}")
+
+        async with self._lock:
+            events = await self.event_log.get_all(self.room_id)
+            if not events or target_sequence < 0 or target_sequence > events[-1].sequence:
+                return False
+
+            await self._reset_document_state()
+            await self._replay_unlocked(
+                [e for e in events if e.sequence <= target_sequence],
+                include_session_state=False,
+                record_checkpoints=False,
+            )
+
+            event = CommandRewindEvent(
+                **self._event_fields(user_id),
+                target_sequence=target_sequence,
+                issued_by=user_id,
+                reason=reason,
+                preserve_checkpoint=preserve_checkpoint,
+            )
+            await self._emit(event)
+        return True
+
+    # ---- Replay (rehydration and rewind share one implementation) ----
+
+    async def _reset_document_state(self) -> None:
+        """Clear plan and files. Keeps checkpoints, export history and room metadata."""
+        self.plan = Plan()
+        await self.files.clear()
+        self.manifest.reset_files()
+
+    async def replay(self, events: Iterable[BaseEvent]) -> None:
+        """Rebuild state from the full event log (used by the registry on rehydration)."""
+        async with self._lock:
+            events = list(events)
+            await self._replay_unlocked(events, include_session_state=True, record_checkpoints=True)
+            if events:
+                self._state.sequence = events[-1].sequence
+                self._last_event_id = str(events[-1].id)
+
+    async def _replay_unlocked(
+        self,
+        events: list[BaseEvent],
+        *,
+        include_session_state: bool,
+        record_checkpoints: bool,
+    ) -> None:
+        """Apply events in order. A COMMAND_REWIND resets the document and re-applies
+        only the events at or before its target, exactly like the live rewind did."""
+        applied: list[BaseEvent] = []
+        for event in events:
+            if event.type == EventType.COMMAND_REWIND:
+                applied = [e for e in applied if e.sequence <= event.target_sequence]
+                await self._reset_document_state()
+                for earlier in applied:
+                    await self._apply_event(earlier, include_session_state=False)
+                continue
+
+            if event.type == EventType.CHECKPOINT_CREATED and record_checkpoints:
+                # Checkpoint contents are not in the log; rebuild them from replayed state
+                if not self.manifest.get_checkpoint(event.checkpoint_id):
+                    data = await self._snapshot(
+                        event.checkpoint_id, event.description, event.created_by,
+                        event.includes_files, event.includes_plan,
+                        sequence=applied[-1].sequence if applied else 0,
+                        created_at=event.timestamp.timestamp(),
+                    )
+                    self.manifest.add_checkpoint(event.checkpoint_id, data)
+
+            await self._apply_event(event, include_session_state=include_session_state)
+            applied.append(event)
+
+    async def _apply_event(self, event: BaseEvent, *, include_session_state: bool) -> None:
+        """Apply one event's effect on state (no events are emitted)."""
+        t = event.type
+        try:
+            # Room settings
+            if t == EventType.ROOM_CREATED:
+                self.manifest.set_room_metadata(name=event.room_name, description=event.room_description)
+            elif t == EventType.ROOM_JOINED:
+                self.members[event.user_id] = getattr(event, "role", "editor")
+            elif t == EventType.ROOM_SHARING_UPDATED:
+                self.public = event.public
+                self.allow_anonymous = event.allow_anonymous
+            elif t == EventType.ROOM_CLOSED:
+                self.closed = True
+
+            # Plan
+            elif t in (EventType.PLAN_CREATED, EventType.PLAN_UPDATED):
+                await self.plan.replace(event.plan)
+            elif t == EventType.COMMAND_OVERRIDE:
+                await self.plan.replace(event.new_plan)
+            elif t == EventType.PLAN_ITEM_ADDED:
+                item = (event.metadata or {}).get("item") or {
+                    "id": event.item_id,
+                    "title": event.title,
+                    "notes": event.description,
+                    "status": "draft",
+                }
+                await self.plan.add_item(item)
+            elif t == EventType.PLAN_ITEM_UPDATED:
+                await self.plan.update_item(event.item_id, event.updates)
+            elif t == EventType.PLAN_ITEM_REMOVED:
+                await self.plan.remove_item(event.item_id)
+            elif t == EventType.PLAN_ITEM_COMPLETED:
+                await self.plan.complete_item(event.item_id)
+            elif t == EventType.COMMAND_APPROVE_PLAN:
+                await self.plan.approve_items(event.plan_item_ids)
+            elif t == EventType.COMMAND_EDIT_PLAN:
+                await self.plan.replace(await self._plan_after_edits(event.edits))
+
+            # Files
+            elif t in (EventType.FILE_CREATED, EventType.FILE_UPDATED):
+                content = event.content or ""
+                await self.files.write(event.path, content)
+                file_id = self.manifest.get_id(event.path) or event.file_id
+                self.manifest.add(file_id, event.path, event.size, file_type=mimetypes.guess_type(event.path)[0])
+            elif t == EventType.FILE_DELETED:
+                await self.files.delete(event.path)
+                self.manifest.remove(event.path)
+
+            # Checkpoints
+            elif t == EventType.CHECKPOINT_RESTORED:
+                data = self.manifest.get_checkpoint(event.checkpoint_id)
+                if data:
+                    await self._restore_snapshot(data)
+                else:
+                    logger.warning(f"Room {self.room_id}: checkpoint {event.checkpoint_id} missing during replay")
+
+            # Session state (not rewound)
+            elif include_session_state and t in (EventType.BUDGET_EXCEEDED, EventType.BUDGET_RESUMED):
+                resumed = event.reason == "resumed"
+                self.budget._state = BudgetState(
+                    tokens_used=event.tokens_used,
+                    sandbox_runs_used=event.sandbox_runs_used,
+                    token_cap=event.token_cap,
+                    sandbox_run_cap=event.sandbox_run_cap,
+                    paused=not resumed,
+                    paused_at=None if resumed else time.monotonic(),
+                    paused_reason=None if resumed else event.reason,
+                )
+                self.budget._warned = self.budget._state.is_at_warning(self.config.budget_warning_threshold)
+            elif include_session_state and t == EventType.SITTING_ENDED:
+                self.sitting._active = False
+                self.sitting._owner_ended = event.reason == "owner_ended"
+
+            # Presence is ephemeral and messages are transient queue entries: not replayed.
+        except Exception:
+            logger.exception(f"Room {self.room_id}: failed to apply {t} (seq {event.sequence}) during replay")
+            raise
+
+    async def _plan_after_edits(self, edits: list[dict]) -> list[dict]:
+        """Apply plan edits to a scratch copy and return the result (atomic: all or nothing)."""
+        scratch = Plan(await self.plan.get_items())
+        for edit in edits:
+            edit_type = edit.get("type")
+            if edit_type not in _PLAN_EDIT_TYPES:
+                raise ValueError(f"Invalid edit type {edit_type!r}. Must be one of {sorted(_PLAN_EDIT_TYPES)}")
+            try:
+                if edit_type == "add":
+                    await scratch.add_item(edit["item"])
+                elif edit_type == "update":
+                    await scratch.update_item(edit["item_id"], edit["changes"])
+                elif edit_type == "remove":
+                    await scratch.remove_item(edit["item_id"])
+                elif edit_type == "complete":
+                    await scratch.complete_item(edit["item_id"])
+            except KeyError as e:
+                raise ValueError(f"Plan edit of type {edit_type!r} is missing field {e}") from None
+        return await scratch.get_items()
+
+    # ---- Conflict Detection / Resolution ----
+
+    async def detect_conflict(self, message_ids: list[str], conflict_type: str, description: str, detected_by: str, resolution_deadline: Optional[datetime] = None) -> str:
+        """Detect and record a conflict between messages."""
+        conflict_id = str(uuid4())
+        async with self._lock:
+            event = ConflictDetectedEvent(
+                id=uuid4(),
+                type=EventType.CONFLICT_DETECTED,
+                room_id=self.room_id,
+                user_id=detected_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                conflict_id=conflict_id,
+                description=description,
+                involved_messages=message_ids,
+                conflict_type=conflict_type,
+                detected_by=detected_by,
+                resolution_deadline=resolution_deadline,
+            )
+            await self._emit(event)
+        return conflict_id
+
+    async def resolve_conflict(self, conflict_id: str, resolution: str, resolved_by: str, resolution_details: Optional[dict] = None) -> bool:
+        """Mark a conflict as resolved."""
+        async with self._lock:
+            event = ConflictResolvedEvent(
+                id=uuid4(),
+                type=EventType.CONFLICT_RESOLVED,
+                room_id=self.room_id,
+                user_id=resolved_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                conflict_id=conflict_id,
+                resolution=resolution,
+                resolved_by=resolved_by,
+                resolution_details=resolution_details,
+            )
+            await self._emit(event)
+        return True
+
+    # ---- Command Steering / Voting / Override ----
+
+    async def command_steer(self, instructions: str, issued_by: str, parameters: Optional[dict] = None) -> None:
+        """Issue a steer command to guide the coder."""
+        async with self._lock:
+            event = CommandSteerEvent(
+                id=uuid4(),
+                type=EventType.COMMAND_STEER,
+                room_id=self.room_id,
+                user_id=issued_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                instructions=instructions,
+                issued_by=issued_by,
+                parameters=parameters,
+            )
+            await self._emit(event)
+
+    async def command_vote(self, option_id: str, issued_by: str, vote_value: bool | int | str, plan_item_id: Optional[str] = None) -> None:
+        """Issue a vote command."""
+        async with self._lock:
+            event = CommandVoteEvent(
+                id=uuid4(),
+                type=EventType.COMMAND_VOTE,
+                room_id=self.room_id,
+                user_id=issued_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                option_id=option_id,
+                plan_item_id=plan_item_id,
+                vote_value=vote_value,
+                issued_by=issued_by,
+            )
+            await self._emit(event)
+
+    async def command_override(self, new_plan: list[dict], issued_by: str, reason: Optional[str] = None) -> None:
+        """Override the current plan entirely."""
+        async with self._lock:
+            await self.plan.replace(new_plan)
+            event = CommandOverrideEvent(
+                id=uuid4(),
+                type=EventType.COMMAND_OVERRIDE,
+                room_id=self.room_id,
+                user_id=issued_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                new_plan=new_plan,
+                issued_by=issued_by,
+                reason=reason,
+            )
+            await self._emit(event)
+
+    async def command_edit_plan(self, edits: list[dict], issued_by: str) -> None:
+        """Apply a list of edits to the plan."""
+        async with self._lock:
+            # Validate every edit before changing anything, so the log never
+            # records a partially-applied edit list
+            await self.plan.replace(await self._plan_after_edits(edits))
+
+            event = CommandEditPlanEvent(
+                id=uuid4(),
+                type=EventType.COMMAND_EDIT_PLAN,
+                room_id=self.room_id,
+                user_id=issued_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                edits=edits,
+                issued_by=issued_by,
+            )
+            await self._emit(event)
+
+    async def command_answer_question(self, question_id: str, answer: str, issued_by: str) -> None:
+        """Answer a question in the room."""
+        async with self._lock:
+            event = CommandAnswerQuestionEvent(
+                id=uuid4(),
+                type=EventType.COMMAND_ANSWER_QUESTION,
+                room_id=self.room_id,
+                user_id=issued_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                question_id=question_id,
+                answer=answer,
+                issued_by=issued_by,
+            )
+            await self._emit(event)
+
+    async def command_end_session(self, issued_by: str, reason: Optional[str] = None, cleanup_data: bool = True) -> bool:
+        """End the current session (owner only)."""
+        if issued_by != self.owner_id:
+            return False
+
+        async with self._lock:
+            await self.sitting.end_session(issued_by)
+            event = CommandEndSessionEvent(
+                id=uuid4(),
+                type=EventType.COMMAND_END_SESSION,
+                room_id=self.room_id,
+                user_id=issued_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                issued_by=issued_by,
+                reason=reason,
+                cleanup_data=cleanup_data,
+            )
+            await self._emit(event)
+        return True
+
+    # ---- Questions ----
+
+    async def ask_question(self, question: str, asked_by: str, context: Optional[str] = None, requires_answer: bool = True) -> str:
+        """Ask a question in the room."""
+        question_id = str(uuid4())
+        async with self._lock:
+            event = QuestionAskedEvent(
+                id=uuid4(),
+                type=EventType.QUESTION_ASKED,
+                room_id=self.room_id,
+                user_id=asked_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                question_id=question_id,
+                question=question,
+                asked_by=asked_by,
+                context=context,
+                requires_answer=requires_answer,
+            )
+            await self._emit(event)
+        return question_id
+
+    async def answer_question(self, question_id: str, answer: str, answered_by: str, accepted: bool = False) -> bool:
+        """Answer a question."""
+        async with self._lock:
+            event = QuestionAnsweredEvent(
+                id=uuid4(),
+                type=EventType.QUESTION_ANSWERED,
+                room_id=self.room_id,
+                user_id=answered_by,
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                question_id=question_id,
+                answer=answer,
+                answered_by=answered_by,
+                accepted=accepted,
+            )
+            await self._emit(event)
+        return True
+
+    # ---- AI Streaming ----
+
+    async def start_ai_message(self, message_id: str, trigger: str, model_used: str, user_id: Optional[str] = None) -> None:
+        """Signal start of AI message generation."""
+        async with self._lock:
+            event = AIMessageStartedEvent(
+                id=uuid4(),
+                type=EventType.AI_MESSAGE_STARTED,
+                room_id=self.room_id,
+                user_id=user_id or "ai",
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                message_id=message_id,
+                trigger=trigger,
+                model_used=model_used,
+            )
+            await self._emit(event)
+
+    async def emit_ai_chunk(self, message_id: str, chunk: str, chunk_index: int, user_id: Optional[str] = None) -> None:
+        """Emit a chunk of AI-generated content."""
+        async with self._lock:
+            event = AIMessageChunkEvent(
+                id=uuid4(),
+                type=EventType.AI_MESSAGE_CHUNK,
+                room_id=self.room_id,
+                user_id=user_id or "ai",
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                message_id=message_id,
+                chunk=chunk,
+                chunk_index=chunk_index,
+            )
+            await self._emit(event)
+
+    async def complete_ai_message(self, message_id: str, full_content: str, usage: Optional[dict] = None, finish_reason: Optional[str] = None, user_id: Optional[str] = None) -> None:
+        """Signal completion of AI message generation."""
+        async with self._lock:
+            event = AIMessageCompletedEvent(
+                id=uuid4(),
+                type=EventType.AI_MESSAGE_COMPLETED,
+                room_id=self.room_id,
+                user_id=user_id or "ai",
+                timestamp=datetime.now(timezone.utc),
+                sequence=self._next_sequence(),
+                prev_event_id=None,
+                message_id=message_id,
+                full_content=full_content,
+                usage=usage,
+                finish_reason=finish_reason,
+            )
+            await self._emit(event)
+
+    def notify_turn(self) -> None:
+        """Signal the run loop to process a turn immediately."""
+        self._turn_event.set()
+        self._turn_event.clear()
+
+    # ---- Internal loop ----
+
+    async def _run_loop(self) -> None:
+        """Main actor loop - processes inbox at turn boundaries."""
+        try:
+            while self._state.running:
+                # Wait for next turn signal
+                try:
+                    await asyncio.wait_for(self._turn_event.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+
+                # Check if stopped while waiting
+                if not self._state.running:
+                    break
+
+                # Drain inbox at turn boundary
+                merges, edit_notes, interrupt = await self.drain_inbox()
+
+                if interrupt:
+                    logger.info(f"Room {self.room_id}: interrupt received, aborting turn")
+                    # Could trigger re-plan here
+                    continue
+
+                if merges:
+                    logger.debug(f"Room {self.room_id}: injecting {len(merges)} merges into coder context")
+                    # Merges would be passed to coder loop here
+
+                # Periodic maintenance
+                await self.presence.mark_idle_as_away()
+                await self.presence.cleanup_offline()
+                await self.locks.release_idle_locks()
+
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception(f"RoomActor loop crashed for room {self.room_id}")
+        finally:
+            self._state.running = False
+            self._task = None
+
+
+async def create_room_actor(
+    room_id: str,
+    owner_id: str,
+    event_log: EventLog,
+    config: Optional[ActorConfig] = None,
+    on_event: Optional[Callable[[BaseEvent], None]] = None,
+    on_sitting_ended: Optional[Callable[[str, Any], None]] = None,
+    on_budget_pause: Optional[Callable[[str, str], None]] = None,
+    on_budget_resume: Optional[Callable[[str], None]] = None,
+    on_budget_warning: Optional[Callable[[str, float, float], None]] = None,
+    on_lock_expire: Optional[Callable[[str, str], None]] = None,
+) -> RoomActor:
+    """Factory function to create and start a room actor."""
+    actor = RoomActor(
+        room_id=room_id,
+        owner_id=owner_id,
+        event_log=event_log,
+        config=config,
+        on_event=on_event,
+        on_sitting_ended=on_sitting_ended,
+        on_budget_pause=on_budget_pause,
+        on_budget_resume=on_budget_resume,
+        on_budget_warning=on_budget_warning,
+        on_lock_expire=on_lock_expire,
+    )
+    await actor.start()
+    return actor
