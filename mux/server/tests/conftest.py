@@ -75,6 +75,18 @@ async def db_session(migrated: None) -> AsyncIterator[AsyncSession]:
     finally:
         await engine.dispose()
 
+@pytest.fixture
+async def session_factory(migrated: None) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """A session factory on the test database, for code that opens its own transactions; tables truncated after."""
+    engine = make_engine(safe_test_database_url(), poolclass=NullPool)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+        names = ", ".join(t.name for t in Base.metadata.sorted_tables)
+        async with engine.begin() as conn:
+            await conn.execute(text(f"TRUNCATE {names} CASCADE"))
+    finally:
+        await engine.dispose()
+
 
 @pytest.fixture
 async def room(db_session: AsyncSession, room_id: UUID) -> UUID:
