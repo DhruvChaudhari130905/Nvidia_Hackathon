@@ -12,7 +12,7 @@ from mux.sandbox.runner import Runner
 
 from .ask import ask_room
 from .build import run_build, run_tests
-from .files import FileTools, RoomFileTools
+from .files import ActorFileTools, FileTools, RoomFileTools
 from .finish import finish_task
 from .plan import PlanTool, update_plan
 from .search import web_search
@@ -205,7 +205,7 @@ class CoderToolExecutor:
 
     def __init__(
         self,
-        files: FileTools | RoomFileTools,
+        files: FileTools | RoomFileTools | ActorFileTools,
         *,
         runner: Runner | None = None,
         build_root: str | None = None,

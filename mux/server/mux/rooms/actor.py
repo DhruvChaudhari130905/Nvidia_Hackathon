@@ -55,6 +55,7 @@ from mux.events.models import (
     AIMessageCompletedEvent,
     TaskStartedEvent,
     TaskFinishedEvent,
+    AgentNoticeEvent,
     BudgetExceededEvent,
     SittingEndedEvent,
 )
@@ -158,7 +159,7 @@ class RoomActor:
         event_log: EventLog,
         config: Optional[ActorConfig] = None,
         *,
-        on_event: Optional[Callable[[BaseEvent], None]] = None,
+        on_event: Optional[Callable[[BaseEvent], Any]] = None,
         on_sitting_ended: Optional[Callable[[str, Any], None]] = None,
         on_budget_pause: Optional[Callable[[str, str], None]] = None,
         on_budget_resume: Optional[Callable[[str], None]] = None,
@@ -671,13 +672,15 @@ class RoomActor:
         rationale: Optional[str] = None,
         domain: Optional[str] = None,
         to: Optional[str] = None,
+        enqueue: bool = True,
     ) -> None:
-        """Add a message to the inbox (coordinator labels: merge, queue, interrupt, conflict, chat).
+        """Post a message and add it to the inbox (coordinator labels: merge, queue, interrupt, conflict, chat).
 
         `to="team"` is a note between people: it is posted to the room but never reaches the coder's inbox.
+        `enqueue=False` only posts it; the room runtime enqueues it after the coordinator labels it.
         """
         async with self._lock:
-            if to != "team":
+            if enqueue and to != "team":
                 await self.inbox.add(label, content, message_id=message_id, user_id=user_id, rationale=rationale, domain=domain)
             event = UserMessageSentEvent(
                 id=uuid4(),
@@ -695,6 +698,19 @@ class RoomActor:
             )
             await self._emit(event)
 
+    async def enqueue_message(
+        self, label: str, content: str, *, message_id: Optional[str] = None, user_id: Optional[str] = None,
+        rationale: Optional[str] = None, domain: Optional[str] = None,
+    ) -> None:
+        """Put an already-posted message in the coder's inbox with its coordinator label (no event)."""
+        async with self._lock:
+            await self.inbox.add(label, content, message_id=message_id, user_id=user_id, rationale=rationale, domain=domain)
+
+    async def post_notice(self, kind: str, data: dict, user_id: str = "coordinator") -> None:
+        """Store agent output for the feed (message.labeled, coordinator.reply, tool.called, ...)."""
+        async with self._lock:
+            await self._emit(AgentNoticeEvent(**self._event_fields(user_id), kind=kind, data=data))
+
     async def drain_inbox(self) -> tuple[list[str], list[str], bool]:
         """Drain inbox at turn boundary. Returns (merges, edit_notes, interrupt)."""
         async with self._lock:
@@ -704,61 +720,67 @@ class RoomActor:
 
     async def create_file(self, path: str, content: str, user_id: str) -> str:
         async with self._lock:
-            file_id = str(uuid4())
-            content_hash = await self.files.write(path, content)
-            # Infer file type from extension
-            file_type = mimetypes.guess_type(path)[0]
-            self.manifest.add(file_id, path, len(content.encode()), hash=content_hash, file_type=file_type)
-            event = FileCreatedEvent(
-                id=uuid4(),
-                type=EventType.FILE_CREATED,
-                room_id=self.room_id,
-                user_id=user_id,
-                timestamp=datetime.now(timezone.utc),
-                sequence=self._next_sequence(),
-                prev_event_id=None,
-                file_id=file_id,
-                path=path,
-                name=path.split("/")[-1],
-                content=content,
-                file_type=file_type,
-                size=len(content.encode()),
-                created_by=user_id,
-                hash=content_hash,
-                version=self._version_of(path),
-            )
-            await self._emit(event)
+            return await self._create_file_unlocked(path, content, user_id)
+
+    async def _create_file_unlocked(self, path: str, content: str, user_id: str) -> str:
+        file_id = str(uuid4())
+        content_hash = await self.files.write(path, content)
+        # Infer file type from extension
+        file_type = mimetypes.guess_type(path)[0]
+        self.manifest.add(file_id, path, len(content.encode()), hash=content_hash, file_type=file_type)
+        event = FileCreatedEvent(
+            id=uuid4(),
+            type=EventType.FILE_CREATED,
+            room_id=self.room_id,
+            user_id=user_id,
+            timestamp=datetime.now(timezone.utc),
+            sequence=self._next_sequence(),
+            prev_event_id=None,
+            file_id=file_id,
+            path=path,
+            name=path.split("/")[-1],
+            content=content,
+            file_type=file_type,
+            size=len(content.encode()),
+            created_by=user_id,
+            hash=content_hash,
+            version=self._version_of(path),
+        )
+        await self._emit(event)
         return file_id
 
     async def update_file(self, path: str, content: str, user_id: str) -> None:
         async with self._lock:
-            old_content = await self.files.read(path)
-            content_hash = await self.files.write(path, content)
-            file_id = self.manifest.get_id(path)
-            if file_id is None:
-                file_id = str(uuid4())
-                file_type = mimetypes.guess_type(path)[0]
-                self.manifest.add(file_id, path, len(content.encode()), hash=content_hash, file_type=file_type)
-            else:
-                self.manifest.update(path, len(content.encode()), hash=content_hash)
-            event = FileUpdatedEvent(
-                id=uuid4(),
-                type=EventType.FILE_UPDATED,
-                room_id=self.room_id,
-                user_id=user_id,
-                timestamp=datetime.now(timezone.utc),
-                sequence=self._next_sequence(),
-                prev_event_id=None,
-                file_id=file_id,
-                path=path,
-                content=content,
-                content_delta={"old": old_content, "new": content} if old_content != content else None,
-                size=len(content.encode()),
-                updated_by=user_id,
-                hash=content_hash,
-                version=self._version_of(path),
-            )
-            await self._emit(event)
+            await self._update_file_unlocked(path, content, user_id)
+
+    async def _update_file_unlocked(self, path: str, content: str, user_id: str) -> None:
+        old_content = await self.files.read(path)
+        content_hash = await self.files.write(path, content)
+        file_id = self.manifest.get_id(path)
+        if file_id is None:
+            file_id = str(uuid4())
+            file_type = mimetypes.guess_type(path)[0]
+            self.manifest.add(file_id, path, len(content.encode()), hash=content_hash, file_type=file_type)
+        else:
+            self.manifest.update(path, len(content.encode()), hash=content_hash)
+        event = FileUpdatedEvent(
+            id=uuid4(),
+            type=EventType.FILE_UPDATED,
+            room_id=self.room_id,
+            user_id=user_id,
+            timestamp=datetime.now(timezone.utc),
+            sequence=self._next_sequence(),
+            prev_event_id=None,
+            file_id=file_id,
+            path=path,
+            content=content,
+            content_delta={"old": old_content, "new": content} if old_content != content else None,
+            size=len(content.encode()),
+            updated_by=user_id,
+            hash=content_hash,
+            version=self._version_of(path),
+        )
+        await self._emit(event)
 
     def _version_of(self, path: str) -> int:
         entry = self.manifest.get_entry(path)
@@ -772,22 +794,50 @@ class RoomActor:
 
     async def delete_file(self, path: str, user_id: str) -> None:
         async with self._lock:
-            file_id = self.manifest.get_id(path) or ""
-            await self.files.delete(path)
-            self.manifest.remove(path)
-            event = FileDeletedEvent(
-                id=uuid4(),
-                type=EventType.FILE_DELETED,
-                room_id=self.room_id,
-                user_id=user_id,
-                timestamp=datetime.now(timezone.utc),
-                sequence=self._next_sequence(),
-                prev_event_id=None,
-                file_id=file_id,
-                path=path,
-                deleted_by=user_id,
-            )
-            await self._emit(event)
+            await self._delete_file_unlocked(path, user_id)
+
+    async def _delete_file_unlocked(self, path: str, user_id: str) -> None:
+        file_id = self.manifest.get_id(path) or ""
+        await self.files.delete(path)
+        self.manifest.remove(path)
+        event = FileDeletedEvent(
+            id=uuid4(),
+            type=EventType.FILE_DELETED,
+            room_id=self.room_id,
+            user_id=user_id,
+            timestamp=datetime.now(timezone.utc),
+            sequence=self._next_sequence(),
+            prev_event_id=None,
+            file_id=file_id,
+            path=path,
+            deleted_by=user_id,
+        )
+        await self._emit(event)
+
+    async def save_checked(self, path: str, content: Optional[str], base_version: Optional[int], user_id: str) -> tuple[str, Optional[int]]:
+        """Version-checked save, atomic against every other change to the room.
+
+        `content=None` deletes. `base_version` is the version the edit started from (None or 0: the file
+        must not exist yet). Returns ("ok", new version), ("stale", current version) or ("locked", None)
+        when someone else holds the file's soft lock.
+        """
+        async with self._lock:
+            holder = await self.locks.locked_by(path)
+            if holder and holder != user_id:
+                return "locked", None
+            current = self.manifest.get_entry(path)
+            current_version = current.version if current else None
+            if (base_version or None) != current_version:
+                return "stale", current_version
+            if content is None:
+                if current is not None:
+                    await self._delete_file_unlocked(path, user_id)
+                return "ok", None
+            if current is None:
+                await self._create_file_unlocked(path, content, user_id)
+            else:
+                await self._update_file_unlocked(path, content, user_id)
+            return "ok", self._version_of(path)
 
     # ---- Lock operations ----
 
@@ -1164,7 +1214,10 @@ class RoomActor:
 
     # ---- Conflict Detection / Resolution ----
 
-    async def detect_conflict(self, message_ids: list[str], conflict_type: str, description: str, detected_by: str, resolution_deadline: Optional[datetime] = None) -> str:
+    async def detect_conflict(
+        self, message_ids: list[str], conflict_type: str, description: str, detected_by: str,
+        resolution_deadline: Optional[datetime] = None, *, options: Optional[list[str]] = None, task_id: Optional[str] = None,
+    ) -> str:
         """Detect and record a conflict between messages."""
         conflict_id = str(uuid4())
         async with self._lock:
@@ -1182,6 +1235,8 @@ class RoomActor:
                 conflict_type=conflict_type,
                 detected_by=detected_by,
                 resolution_deadline=resolution_deadline,
+                options=options or [],
+                task_id=task_id,
             )
             await self._emit(event)
         return conflict_id
@@ -1321,7 +1376,11 @@ class RoomActor:
 
     # ---- Questions ----
 
-    async def ask_question(self, question: str, asked_by: str, context: Optional[str] = None, requires_answer: bool = True) -> str:
+    async def ask_question(
+        self, question: str, asked_by: str, context: Optional[str] = None, requires_answer: bool = True, *,
+        options: Optional[list[str]] = None, default_option: Optional[str] = None, task_id: Optional[str] = None,
+        expires_at: Optional[datetime] = None,
+    ) -> str:
         """Ask a question in the room."""
         question_id = str(uuid4())
         async with self._lock:
@@ -1338,6 +1397,10 @@ class RoomActor:
                 asked_by=asked_by,
                 context=context,
                 requires_answer=requires_answer,
+                options=options or [],
+                default_option=default_option,
+                task_id=task_id,
+                expires_at=expires_at,
             )
             await self._emit(event)
         return question_id
@@ -1467,7 +1530,7 @@ async def create_room_actor(
     owner_id: str,
     event_log: EventLog,
     config: Optional[ActorConfig] = None,
-    on_event: Optional[Callable[[BaseEvent], None]] = None,
+    on_event: Optional[Callable[[BaseEvent], Any]] = None,
     on_sitting_ended: Optional[Callable[[str, Any], None]] = None,
     on_budget_pause: Optional[Callable[[str, str], None]] = None,
     on_budget_resume: Optional[Callable[[str], None]] = None,

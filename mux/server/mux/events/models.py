@@ -121,6 +121,8 @@ class EventType(str, Enum):
     # System events
     SYSTEM_ERROR = "system_error"
     SYSTEM_WARNING = "system_warning"
+    # Agent output with no state of its own (message labels, coordinator replies, research, tool calls)
+    AGENT_NOTICE = "agent_notice"
 
 
 def _utcnow() -> datetime:
@@ -487,6 +489,8 @@ class ConflictDetectedEvent(BaseEvent):
     conflict_type: str = Field(..., description="Type of conflict (content, plan, etc.)")
     detected_by: str = Field(..., description="User or system that detected the conflict")
     resolution_deadline: Optional[datetime] = Field(default=None, description="When conflict should be resolved by")
+    options: List[str] = Field(default_factory=list, description="Choices the room votes on")
+    task_id: Optional[str] = Field(default=None, description="Plan task the conflict blocks")
 
 
 class ConflictResolvedEvent(BaseEvent):
@@ -507,6 +511,10 @@ class QuestionAskedEvent(BaseEvent):
     asked_by: str = Field(..., description="User who asked the question")
     context: Optional[str] = Field(default=None, description="Context in which question was asked")
     requires_answer: bool = Field(True, description="Whether an answer is expected")
+    options: List[str] = Field(default_factory=list, description="Choices offered")
+    default_option: Optional[str] = Field(default=None, description="Used if nobody answers in time")
+    task_id: Optional[str] = Field(default=None, description="Plan task waiting on the answer")
+    expires_at: Optional[datetime] = Field(default=None, description="When the default applies")
 
 
 class QuestionAnsweredEvent(BaseEvent):
@@ -557,6 +565,17 @@ class SystemErrorEvent(BaseEvent):
     severity: str = Field(..., description="Error severity (low, medium, high, critical)")
     component: str = Field(..., description="System component where error occurred")
     details: Optional[Dict[str, Any]] = Field(default=None, description="Additional error details")
+
+
+class AgentNoticeEvent(BaseEvent):
+    """Agent output stored for the feed, with no effect on room state.
+
+    `kind` is its event-catalog type (message.labeled, coordinator.reply, conflict.evidence,
+    tool.called, tool.result, build.result, question.defaulted); `data` is the catalog payload.
+    """
+    type: EventType = EventType.AGENT_NOTICE
+    kind: str = Field(..., description="Event-catalog type")
+    data: Dict[str, Any] = Field(default_factory=dict, description="Event-catalog payload")
 
 
 class SystemWarningEvent(BaseEvent):
@@ -622,6 +641,7 @@ Event = Union[
 
 # Export all models for schema generation
 __all__ = [
+    "AgentNoticeEvent",
     "EventType",
     "BaseEvent",
     "RoomCreatedEvent",

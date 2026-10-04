@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from typing import Callable, Optional, cast
+from typing import TYPE_CHECKING, Callable, Optional, cast
 
 from mux.events.log import EventLog
 from mux.rooms.actor import RoomActor, ActorConfig, create_room_actor
-from mux.events.models import EventType, RoomCreatedEvent
+from mux.events.models import BaseEvent, EventType, RoomCreatedEvent
+
+if TYPE_CHECKING:
+    from mux.rooms.runtime import RoomRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +80,13 @@ class RoomRegistry:
         on_budget_resume: Optional[Callable] = None,
         on_budget_warning: Optional[Callable] = None,
         on_lock_expire: Optional[Callable] = None,
+        runtime_factory: Optional[Callable[[RoomActor], "RoomRuntime"]] = None,
     ) -> None:
         self.default_config = default_config or ActorConfig()
         self._on_event = on_event
+        # Builds the room's agents (mux.rooms.runtime); None runs rooms without agents
+        self._runtime_factory = runtime_factory
+        self._runtimes: dict[str, "RoomRuntime"] = {}
         self._on_sitting_ended = on_sitting_ended
         self._on_budget_pause = on_budget_pause
         self._on_budget_resume = on_budget_resume
@@ -87,6 +95,32 @@ class RoomRegistry:
 
         self._actors: dict[str, RoomActor] = {}
         self._lock = asyncio.Lock()
+
+    async def _dispatch(self, event: BaseEvent) -> None:
+        """Every actor event: to the room's agents first (synchronously, so they see emit order), then out."""
+        runtime = self._runtimes.get(event.room_id)
+        if runtime is not None:
+            runtime.observe(event)
+        if self._on_event is not None:
+            result = self._on_event(event)
+            if inspect.isawaitable(result):
+                await result
+
+    async def _start_runtime(self, actor: RoomActor) -> None:
+        if self._runtime_factory is None:
+            return
+        runtime = self._runtime_factory(actor)
+        self._runtimes[actor.room_id] = runtime
+        await runtime.start()
+
+    async def _stop_runtime(self, room_id: str) -> None:
+        runtime = self._runtimes.pop(room_id, None)
+        if runtime is not None:
+            await runtime.stop()
+
+    def runtime(self, room_id: str) -> Optional["RoomRuntime"]:
+        """The room's agents, if they run."""
+        return self._runtimes.get(room_id)
 
     def _get_event_log(self, room_id: str) -> EventLog:
         """Get the event log for a specific room."""
@@ -118,13 +152,14 @@ class RoomRegistry:
                 owner_id=owner_id,
                 event_log=event_log,
                 config=config or self.default_config,
-                on_event=self._on_event,
+                on_event=self._dispatch,
                 on_sitting_ended=self._on_sitting_ended,
                 on_budget_pause=self._on_budget_pause,
                 on_budget_resume=self._on_budget_resume,
                 on_budget_warning=self._on_budget_warning,
                 on_lock_expire=self._on_lock_expire,
             )
+            await self._start_runtime(actor)
             await actor.init_room(name or room_id, description, domain_role)
             self._actors[room_id] = actor
 
@@ -176,7 +211,7 @@ class RoomRegistry:
             owner_id=cast(RoomCreatedEvent, created).created_by,
             event_log=event_log,
             config=config or self.default_config,
-            on_event=self._on_event,
+            on_event=self._dispatch,
             on_sitting_ended=self._on_sitting_ended,
             on_budget_pause=self._on_budget_pause,
             on_budget_resume=self._on_budget_resume,
@@ -187,6 +222,7 @@ class RoomRegistry:
         await actor.replay(events)
         await actor.start()
         self._actors[room_id] = actor
+        await self._start_runtime(actor)
         logger.info(f"Rehydrated room {room_id} from {len(events)} events (owner: {actor.owner_id})")
         return actor
 
@@ -199,6 +235,7 @@ class RoomRegistry:
         """Stop and remove a room actor."""
         async with self._lock:
             actor = self._actors.pop(room_id, None)
+        await self._stop_runtime(room_id)
         if actor:
             await actor.stop(reason)
             logger.info(f"Stopped room {room_id}: {reason}")
@@ -224,6 +261,8 @@ class RoomRegistry:
         async with self._lock:
             actors = list(self._actors.values())
             self._actors.clear()
+        for room_id in list(self._runtimes):
+            await self._stop_runtime(room_id)
 
         errors = []
         for actor in actors:

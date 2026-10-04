@@ -1,6 +1,8 @@
 """FastAPI app factory. Mounts the API routers and the WebSocket endpoint, and starts the room registry on startup."""
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Callable, Optional
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -10,6 +12,10 @@ from mux.api.ws import emit_event
 from mux.events.log import EventLog, InMemoryEventLog
 from mux.events.models import BaseEvent
 import mux.rooms.registry as room_registry
+from mux.config import settings
+from mux.events.bus import event_bus
+from mux.rooms.actor import RoomActor
+from mux.rooms.runtime import RoomRuntime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,6 +32,28 @@ def get_event_log(room_id: str) -> EventLog:
 # Make get_event_log available for dependency injection
 room_registry.get_event_log = get_event_log
 
+STARTER_TEMPLATE = Path(__file__).resolve().parents[2] / "templates" / "fullstack-starter"
+
+
+def agent_runtime_factory() -> Optional[Callable[[RoomActor], RoomRuntime]]:
+    """The room agents, when Token Factory is configured; otherwise rooms run without agents."""
+    if not (settings.token_factory_api_key and settings.token_factory_base_url and settings.model_super):
+        logger.warning("Token Factory is not configured (TOKEN_FACTORY_* / MODEL_SUPER): rooms run without agents")
+        return None
+    from mux.agents.coder.prompts import load_conventions
+    from mux.agents.llm import TokenFactoryLLM
+    from mux.integrations.tavily import TavilySearch
+
+    llm = TokenFactoryLLM()
+    conventions = load_conventions(STARTER_TEMPLATE)
+
+    def make(actor: RoomActor) -> RoomRuntime:
+        search = TavilySearch() if settings.tavily_api_key else None  # one per room: the cache is per room
+        return RoomRuntime(actor, llm, search=search, conventions=conventions, publish=event_bus.publish_json)
+
+    return make
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting MUX server...")
@@ -38,7 +66,7 @@ async def lifespan(app: FastAPI):
         await emit_event(event.room_id, event)
 
     # EventLog is per-room; on_event publishes to event bus
-    registry = await room_registry.init_registry(on_event=on_event_callback)
+    registry = await room_registry.init_registry(on_event=on_event_callback, runtime_factory=agent_runtime_factory())
     await registry.start()
     logger.info("Room registry started")
     yield

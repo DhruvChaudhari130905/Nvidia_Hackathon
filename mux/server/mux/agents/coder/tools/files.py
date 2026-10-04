@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 
 from mux.files.manifest import LiveFiles
 from mux.files.room_files import InvalidPath, RoomFiles, check_path
@@ -148,6 +148,90 @@ class RoomFileTools:
     def list_files(self, path: str = ".") -> dict[str, Any]:
         """Return the room's files under path."""
         return _list_under(self.files.live.manifest, path)
+
+
+class RoomActorFiles(Protocol):
+    """The room actor's file API that ActorFileTools needs (mux.rooms.actor.RoomActor)."""
+
+    async def get_file(self, path: str) -> str | None: ...
+    async def file_version(self, path: str) -> int | None: ...
+    async def list_files(self) -> list[str]: ...
+    async def save_checked(self, path: str, content: str | None, base_version: int | None, user_id: str) -> tuple[str, int | None]: ...
+
+
+class ActorFileTools:
+    """Coder file tools over a running room actor.
+
+    Saves go through `save_checked`, the same atomic, version-checked path as a person's save, so the
+    coder can never overwrite a newer human edit, never writes a file someone holds the lock on, and
+    every change reaches the room live as file.changed.
+    """
+
+    def __init__(self, actor: RoomActorFiles, user_id: str = CODER) -> None:
+        self.actor = actor
+        self.user_id = user_id
+
+    async def _text(self, path: str) -> tuple[str, int]:
+        check = _checked(path)
+        content = await self.actor.get_file(check)
+        version = await self.actor.file_version(check)
+        if content is None or version is None:
+            raise MissingFileError(f"file not found: {path}")
+        return content, version
+
+    async def _save(self, path: str, content: str | None, base_version: int | None) -> tuple[str, int | None]:
+        return await self.actor.save_checked(_checked(path), content, base_version, self.user_id)
+
+    async def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> dict[str, Any]:
+        """Read a file and return its content plus version."""
+        content, version = await self._text(path)
+        return _read_result(path, content, version, start_line, end_line)
+
+    async def write_file(self, path: str, content: str) -> dict[str, Any]:
+        """Create a new file. Refuse to overwrite an existing file."""
+        outcome, version = await self._save(path, content, None)
+        if outcome == "stale":
+            raise FileAlreadyExistsError(f"file already exists: {path}")
+        if outcome == "locked":
+            return {"ok": False, "error": "locked: a teammate is editing this file", "path": path}
+        return {"ok": True, "path": path, "version": version}
+
+    async def edit_file(self, path: str, base_version: int, edits: Iterable[dict[str, str]]) -> dict[str, Any]:
+        """Apply find/replace edits only when base_version is current. Nothing changes otherwise."""
+        content, current = await self._text(path)
+        if base_version != current:
+            return _stale(path, current)
+        updated = apply_edits(path, content, edits, current)
+        if isinstance(updated, dict):
+            return updated
+        outcome, version = await self._save(path, updated, current)
+        if outcome == "locked":
+            return {"ok": False, "error": "locked: a teammate is editing this file", "path": path}
+        if outcome == "stale":  # a person saved between our read and write
+            return _stale(path, version)
+        return {"ok": True, "path": path, "version": version, "previous_version": current}
+
+    async def delete_file(self, path: str, base_version: int) -> dict[str, Any]:
+        """Delete a file only when its version is still current."""
+        if await self.actor.file_version(_checked(path)) is None:
+            raise MissingFileError(f"file not found: {path}")
+        outcome, version = await self._save(path, None, base_version)
+        if outcome == "locked":
+            return {"ok": False, "error": "locked: a teammate is editing this file", "path": path}
+        if outcome == "stale":
+            return _stale(path, version, "stale")
+        return {"ok": True, "path": path, "deleted": True}
+
+    async def list_files(self, path: str = ".") -> dict[str, Any]:
+        """Return the room's files under path."""
+        return _list_under(await self.actor.list_files(), path)
+
+
+def _checked(path: str) -> str:
+    try:
+        return check_path(path)
+    except InvalidPath as exc:
+        raise FileToolError(f"path outside repository: {path}") from exc
 
 
 class FileTools:

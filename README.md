@@ -172,7 +172,7 @@ Nvidia_Hackathon/
 |---|---|
 | Frontend (`mux/web`) | 🟢 Built, works end to end in **demo mode** |
 | Coordinator, Tavily research, memory | 🟢 Done offline |
-| API, room actor, DB layer, coder agent, sandbox | 🟡 Implemented and speaking the web app's contract (REST + socket); 208 tests pass, pyright clean; the agents aren't driven by the room yet |
+| API, room actor, DB layer, coder agent, sandbox | 🟡 Implemented and speaking the web app's contract; coordinator and coder run in every room once Token Factory keys are set; 214 tests pass, pyright clean |
 | Infra (Caddy, VM setup, sandbox image) | 🟡 Written, not deployed |
 | Evals, starter template | 🔴 Placeholders only |
 

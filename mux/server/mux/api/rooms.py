@@ -457,6 +457,7 @@ async def send_message(
     """A steering message (to the agent) or a note between people (to the team)."""
     await actor.add_message(
         label="chat", content=request.text, message_id=str(uuid.uuid4()), user_id=current_user.id, to=request.to,
+        enqueue=False,  # the room runtime labels it with the coordinator, then enqueues merges/interrupts
     )
     return accepted(actor)
 
@@ -569,21 +570,18 @@ async def save_file(
 ) -> FileSaved:
     """Save a manual edit. 409 if someone else holds the lock or the file moved past `base_version`."""
     path = request.path.lstrip("/")
-    holder = await actor.locked_by(path)
-    if holder and holder != current_user.id:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{path} is being edited by {holder}")
-
     current = await actor.file_version(path)
-    if current is not None and request.base_version is not None and request.base_version != current:
+    # No base_version: overwrite whatever is there (still refused while someone else holds the lock)
+    base = request.base_version if request.base_version is not None else current
+    outcome, version = await actor.save_checked(path, request.content, base, current_user.id)
+    if outcome == "locked":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{path} is being edited by {await actor.locked_by(path)}")
+    if outcome == "stale":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"{path} changed since version {request.base_version} (now {current}); reload it",
+            detail=f"{path} changed since version {request.base_version} (now {version}); reload it",
         )
-    if current is None:
-        await actor.create_file(path, request.content, current_user.id)
-    else:
-        await actor.update_file(path, request.content, current_user.id)
-    return FileSaved(seq=actor.sequence, version=await actor.file_version(path) or 0)
+    return FileSaved(seq=actor.sequence, version=version or 0)
 
 
 async def _delete(actor: RoomActor, path: str, user_id: str) -> Accepted:

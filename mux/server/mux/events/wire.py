@@ -12,6 +12,7 @@ import hashlib
 from typing import Any, Optional, cast
 
 from mux.events.models import (
+    AgentNoticeEvent,
     AIMessageChunkEvent,
     AIMessageCompletedEvent,
     BaseEvent,
@@ -95,6 +96,9 @@ def _payload(event: BaseEvent) -> Optional[tuple[str, dict[str, Any]]]:
     room = event.room_id
     ts = _ts(event)
 
+    if t == EventType.AGENT_NOTICE:
+        e = cast(AgentNoticeEvent, event)
+        return e.kind, e.data
     if t == EventType.ROOM_CREATED:
         e = cast(RoomCreatedEvent, event)
         return "room.created", {
@@ -163,7 +167,7 @@ def _payload(event: BaseEvent) -> Optional[tuple[str, dict[str, Any]]]:
     if t == EventType.CONFLICT_DETECTED:
         e = cast(ConflictDetectedEvent, event)
         return "conflict.opened", {
-            "id": e.conflict_id, "room_id": room, "task_id": "", "options": [], "evidence": [],
+            "id": e.conflict_id, "room_id": room, "task_id": e.task_id or "", "options": e.options, "evidence": [],
             "domain": e.conflict_type if e.conflict_type in ("ui", "architecture", "scope") else "scope",
             "status": "open", "created_at": ts,
             "expires_at": e.resolution_deadline.isoformat() if e.resolution_deadline else ts,
@@ -180,8 +184,9 @@ def _payload(event: BaseEvent) -> Optional[tuple[str, dict[str, Any]]]:
     if t == EventType.QUESTION_ASKED:
         e = cast(QuestionAskedEvent, event)
         return "question.opened", {
-            "id": e.question_id, "room_id": room, "task_id": "", "text": e.question, "options": [],
-            "default_option": "", "status": "open", "expires_at": ts, "created_at": ts,
+            "id": e.question_id, "room_id": room, "task_id": e.task_id or "", "text": e.question, "options": e.options,
+            "default_option": e.default_option or "", "status": "open",
+            "expires_at": e.expires_at.isoformat() if e.expires_at else ts, "created_at": ts,
         }
     if t == EventType.QUESTION_ANSWERED:
         e = cast(QuestionAnsweredEvent, event)
