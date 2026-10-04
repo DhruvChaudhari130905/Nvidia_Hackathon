@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, cast
+from typing import cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, update
@@ -12,10 +12,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from mux.db.tables import Membership, Room
 from mux.events.log import scoped
-
-Permission = Literal["owner", "editor", "viewer"]
-DomainRole = Literal["pm", "design", "eng"]
-LinkAccess = Literal["restricted", "anyone"]
+from mux.events.models import DomainRole, LinkAccess, MemberPermission, Permission
 
 @dataclass(frozen=True)
 class Member:
@@ -33,7 +30,7 @@ class RoomRecord:
     title: str
     description: str
     link_access: LinkAccess
-    link_permission: Permission | None
+    link_permission: MemberPermission | None
     head_checkpoint_id: UUID | None
     members: dict[UUID, Member] = field(default_factory=dict)
 
@@ -62,10 +59,11 @@ async def create(
         description: str = "",
         domain_role: DomainRole | None = None,
         *,
+        room_id: UUID | None = None,
         session: AsyncSession | None = None,
 ) -> RoomRecord:
     """Insert the room and the owner's membership in one transaction"""
-    room_id = uuid4()
+    room_id = room_id or uuid4()
     async with scoped(session) as s:
         s.add(Room(id=room_id, owner_id = owner_id, title= title, description=description, link_access="restricted"))
         await s.flush() #memberships.room_id reference the room
@@ -93,7 +91,7 @@ async def load(room_id: UUID, *, session: AsyncSession | None = None) -> RoomRec
         return RoomRecord(
             id=room.id, owner_id = room.owner_id, title=room.title, description=room.description,
             link_access = cast(LinkAccess, room.link_access),
-            link_permission= cast(Permission | None, room.link_permission),
+            link_permission= cast(MemberPermission | None, room.link_permission),
             head_checkpoint_id= room.head_checkpoint_id, members=members,
         )
 
@@ -128,7 +126,7 @@ async def set_member(
 async def set_sharing(
         room_id: UUID,
         link_access: LinkAccess,
-        link_permission: Permission | None,
+        link_permission: MemberPermission | None,
         *,
         session: AsyncSession | None = None,
 ) -> None:

@@ -4,8 +4,14 @@ from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
+from typing import Literal
 
 RoomId = UUID
+Permission = Literal["owner", "editor", "viewer"]
+MemberPermission = Literal["editor", "viewer"] #what can be granted: the owner is set when the room is created
+DomainRole = Literal["pm", "design", "eng"]
+LinkAccess = Literal["restricted", "anyone"]
+MessageTo = Literal["agent", "team"]
 
 EXEMPT_TYPES: frozenset[str] = frozenset({
     "room.created", "sharing.changed", "budget.updated", "room.paused", "room.resumed",
@@ -56,3 +62,38 @@ class RoomRewound(Payload):
        Paths missing from the target checkpoint's manifest are removed; they keep their high-water marks."""
     checkpoint_id: UUID
     versions: dict[str, int]
+
+class RoomCreated(Payload):
+    """Payload of 'room.created'."""
+
+    owner_id: UUID
+    title: str
+    description: str
+
+class MemberJoined(Payload):
+    """Payload of 'member.joined'."""
+
+    user_id: UUID
+    permission: MemberPermission
+    domain_role: DomainRole | None
+
+class MemberRoleChanged(Payload):
+    """Payload of 'member.role_changed'."""
+    
+    user_id: UUID
+    permission: MemberPermission
+
+class SharingChanged(Payload):
+    """Payload of 'sharing.changed'. link_permission is None when link_access is 'restricted'."""
+
+    link_access: LinkAccess
+    link_permission: MemberPermission | None
+
+class MessagePosted(Payload):
+    """Payload of 'message.posted'."""
+
+    id: UUID
+    user_id: UUID
+    text: str
+    to: MessageTo
+    
