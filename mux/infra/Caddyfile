@@ -1,1 +1,59 @@
-# Caddy: TLS and WebSocket upgrades in front of uvicorn.
+{
+	# Global options
+	email admin@example.com
+	# ACME CA for staging (remove for production)
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# Main API domain - replace with your domain (vm-setup.sh substitutes $DOMAIN).
+# One site block serves the REST API, /ws WebSockets and /health: Caddy v2 site
+# addresses cannot contain paths, and reverse_proxy upgrades WebSockets automatically.
+api.example.com {
+	# Request size limits
+	request_body {
+		max_size 50MB
+	}
+
+	reverse_proxy localhost:8000 {
+		# Active health check of the upstream
+		health_uri /health
+		health_interval 10s
+		health_timeout 3s
+		# Keep WebSocket connections open across config reloads
+		stream_close_delay 5m
+	}
+
+	# Security headers
+	header {
+		# HSTS
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		# CSP - adjust based on your frontend needs
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: https:; img-src 'self' data: https:; font-src 'self' data:;"
+		# Other headers
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	# Rate limiting is not built into Caddy. To add it, build Caddy with
+	# github.com/mholt/caddy-ratelimit (xcaddy) and add, e.g.:
+	#   rate_limit {
+	#       zone api {
+	#           key    {remote_host}
+	#           events 10
+	#           window 1s
+	#       }
+	#   }
+	# plus `order rate_limit before basicauth` in the global options.
+
+	# Logging
+	log {
+		output file /var/log/caddy/api-access.log {
+			roll_size 100MB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+}
