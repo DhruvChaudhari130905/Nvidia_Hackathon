@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
 from mux.events.log import EventLog
 from mux.rooms.actor import RoomActor, ActorConfig, create_room_actor
-from mux.events.models import EventType
+from mux.events.models import EventType, RoomCreatedEvent
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ class RoomRegistry:
         *,
         name: Optional[str] = None,
         description: Optional[str] = None,
+        domain_role: Optional[str] = None,
     ) -> RoomActor:
         """Create and start a new room actor. Records ROOM_CREATED (owner + metadata)."""
         async with self._lock:
@@ -124,7 +125,7 @@ class RoomRegistry:
                 on_budget_warning=self._on_budget_warning,
                 on_lock_expire=self._on_lock_expire,
             )
-            await actor.init_room(name or room_id, description)
+            await actor.init_room(name or room_id, description, domain_role)
             self._actors[room_id] = actor
 
             logger.info(f"Created room {room_id} with owner {owner_id}")
@@ -172,7 +173,7 @@ class RoomRegistry:
 
         actor = RoomActor(
             room_id=room_id,
-            owner_id=created.created_by,
+            owner_id=cast(RoomCreatedEvent, created).created_by,
             event_log=event_log,
             config=config or self.default_config,
             on_event=self._on_event,

@@ -14,7 +14,7 @@ ROLE_LEVELS = {
 
 def role_level(role: Optional[str]) -> int:
     """Return the numeric level of a role, 0 if the role is not recognized."""
-    level = ROLE_LEVELS.get(role, 0)
+    level = ROLE_LEVELS.get(role, 0) if role is not None else 0
     if role is not None and level == 0:
         logger.warning(f"Unrecognized role '{role}' treated as having no permissions")
     return level

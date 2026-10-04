@@ -1,31 +1,33 @@
-"""Create, list, and fetch rooms. Sharing settings, invites, and memberships."""
+"""The room REST API from source-of-truth/architecture.md, mounted at /rooms (web/src/lib/api.ts calls it).
+
+Commands answer {"accepted": true, "seq": <room seq>}; the change itself arrives on the room socket as an
+event envelope (mux/events/wire.py). Rooms and members are returned in the web app's Room shape.
+"""
 
 from __future__ import annotations
 
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Literal, Optional, List
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from mux.api.deps import get_room_actor_dep, get_current_user, require_editor, require_owner, require_viewer, User
-from mux.rooms.registry import get_registry
+from mux.events.wire import membership_view
+from mux.integrations.github import get_github_integration
 from mux.rooms.actor import RoomActor
-from mux.events.models import EventType
-from mux.api.files import (
-    FileLockResponse, FileUnlockResponse, FileUpdateResponse, FileDeleteResponse
-)
-from mux.api.commands import (
-    CommandEditPlanResponse, CommandApprovePlanResponse, CommandVoteResponse,
-    CommandOverrideResponse, CommandAnswerQuestionResponse, CommandRewindResponse,
-    CommandRaiseBudgetResponse
-)
+from mux.rooms.registry import get_registry
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# GET /github/connect lives at the root next to /rooms (architecture.md); main.py mounts it
+github_router = APIRouter()
+
+DomainRole = Literal["pm", "design", "eng"]
 
 
 # =============================================================================
@@ -33,27 +35,29 @@ router = APIRouter()
 # =============================================================================
 
 class RoomCreateRequest(BaseModel):
-    """Request to create a new room."""
-    name: str = Field(..., min_length=1, max_length=200, description="Room name")
-    description: Optional[str] = Field(None, max_length=2000, description="Room description")
+    """`POST /rooms`: a room from a description. `name` defaults to the description's first line."""
+    description: Optional[str] = Field(None, max_length=2000, description="What to build")
+    domain_role: Optional[DomainRole] = Field(None, description="The creator's domain role")
+    name: Optional[str] = Field(None, min_length=1, max_length=200, description="Room name")
     initial_plan: Optional[list[dict]] = Field(None, description="Initial plan items")
-    # Frontend-compatible fields
-    domain_role: Optional[str] = Field(None, description="Domain role (frontend compatibility)")
 
+    @model_validator(mode="after")
+    def _needs_name_or_description(self) -> "RoomCreateRequest":
+        if not (self.name or (self.description or "").strip()):
+            raise ValueError("Give a description (or a name)")
+        return self
 
-class RoomCreateResponse(BaseModel):
-    """Response after creating a room."""
-    room_id: str
-    name: str
-    description: Optional[str]
-    owner_id: str
-    created: bool  # True if newly created, False if rehydrated
+    def room_name(self) -> str:
+        if self.name:
+            return self.name
+        return (self.description or "").strip().splitlines()[0][:200]
 
 
 class RoomJoinRequest(BaseModel):
     """Request to join a room."""
     user_name: Optional[str] = Field(None, max_length=100, description="Display name")
     avatar_url: Optional[str] = Field(None, description="Avatar URL")
+    domain_role: Optional[DomainRole] = Field(None, description="Domain role when joining a public room")
 
 
 class RoomJoinResponse(BaseModel):
@@ -66,7 +70,7 @@ class RoomJoinResponse(BaseModel):
 
 
 class RoomStatusResponse(BaseModel):
-    """Current room status snapshot."""
+    """Current room status snapshot (GET /rooms/{id}/status)."""
     room_id: str
     owner_id: str
     name: Optional[str] = None
@@ -79,11 +83,6 @@ class RoomStatusResponse(BaseModel):
     locks_held: int
     files_count: int
     running: bool
-
-
-class RoomListResponse(BaseModel):
-    """List of rooms."""
-    rooms: list[dict]
 
 
 class RoomLeaveResponse(BaseModel):
@@ -99,17 +98,11 @@ class RoomCloseResponse(BaseModel):
     reason: Optional[str]
 
 
-# Frontend-compatible models
-class RoomSharingUpdateRequest(BaseModel):
-    """Request to update room sharing settings."""
-    public: bool = Field(..., description="Whether room is publicly accessible")
-    allow_anonymous: bool = Field(False, description="Allow anonymous access")
-
-
 class MemberAddRequest(BaseModel):
     """Request to grant a user membership in a room (owner only)."""
     user_id: str = Field(..., min_length=1, max_length=200, description="User to add")
     role: Literal["editor", "viewer"] = Field("editor", description="Role to grant")
+    domain_role: Optional[DomainRole] = Field(None, description="Domain role (pm, design, eng)")
 
 
 class MemberResponse(BaseModel):
@@ -120,112 +113,137 @@ class MemberResponse(BaseModel):
     sequence: int
 
 
-class RoomSharingResponse(BaseModel):
-    """Response after updating sharing settings."""
-    room_id: str
-    public: bool
-    allow_anonymous: bool
-    updated: bool
+class SharingUpdateRequest(BaseModel):
+    """`PATCH /rooms/{id}/sharing`."""
+    link_access: Literal["restricted", "anyone"]
+    # Joining a shared room grants editor; a viewer-only link isn't supported yet
+    link_permission: Literal["editor", "viewer"] = "editor"
+    invites: list[str] = Field(default_factory=list, description="Emails to invite (not supported yet)")
 
 
 class MessageCreateRequest(BaseModel):
-    """Request to send a chat message."""
-    content: str = Field(..., min_length=1, max_length=10000, description="Message content")
-    reply_to: Optional[str] = Field(None, description="Message ID being replied to")
-
-
-class MessageResponse(BaseModel):
-    """Response after sending a message."""
-    message_id: str
-    sequence: int
-    event_type: str = "message_posted"
+    """`POST /rooms/{id}/messages`."""
+    text: str = Field(..., min_length=1, max_length=10000)
+    to: Literal["agent", "team"] = "agent"
 
 
 class PlanUpdateRequest(BaseModel):
-    """Request to update the plan (frontend-compatible)."""
-    items: List[dict] = Field(..., description="Plan items")
+    """`PATCH /rooms/{id}/plan`: the whole draft plan."""
+    items: list[dict] = Field(..., description="Plan items")
 
 
-class PlanApproveRequest(BaseModel):
-    """Request to approve plan items (frontend-compatible)."""
-    plan_item_ids: List[str] = Field(..., min_length=1, description="IDs of plan items to approve")
+class OptionRequest(BaseModel):
+    """`POST .../conflicts/{cid}/vote` and `.../override`."""
+    option: str = Field(..., min_length=1, max_length=500)
 
 
-class ConflictVoteRequest(BaseModel):
-    """Request to vote on a conflict (frontend-compatible)."""
-    option_id: str = Field(..., description="ID of option being voted for")
-    vote_value: bool = Field(..., description="Vote value (true/false)")
-    plan_item_id: Optional[str] = Field(None, description="Specific plan item being voted on")
+class AnswerRequest(BaseModel):
+    """`POST .../questions/{qid}/answer`."""
+    answer: str = Field(..., min_length=1, max_length=10000)
 
 
-class ConflictOverrideRequest(BaseModel):
-    """Request to override a conflict (frontend-compatible)."""
-    new_plan: List[dict] = Field(..., description="New plan to replace current one")
-    reason: Optional[str] = Field(None, description="Reason for override")
+class FilePathRequest(BaseModel):
+    """`POST /rooms/{id}/files/lock` and `/unlock`."""
+    path: str = Field(..., min_length=1, max_length=500)
 
 
-class QuestionAnswerRequest(BaseModel):
-    """Request to answer a question (frontend-compatible)."""
-    question_id: str = Field(..., description="ID of the question being answered")
-    answer: str = Field(..., min_length=1, max_length=10000, description="The answer text")
-
-
-class FileLockRequest(BaseModel):
-    """Request to lock a file (frontend-compatible with path in body)."""
-    path: str = Field(..., min_length=1, max_length=500, description="File path")
-
-
-class FileUnlockRequest(BaseModel):
-    """Request to unlock a file (frontend-compatible with path in body)."""
-    path: str = Field(..., min_length=1, max_length=500, description="File path")
-
-
-class FileUpdateRequestFrontend(BaseModel):
-    """Request to update a file (frontend-compatible with path in body)."""
-    path: str = Field(..., min_length=1, max_length=500, description="File path")
-    content: str = Field(..., description="New file content")
-    base_version: Optional[int] = Field(None, description="Expected base version for optimistic locking")
+class FileSaveRequest(BaseModel):
+    """`PUT /rooms/{id}/files`: a manual edit, checked against the version it was based on."""
+    path: str = Field(..., min_length=1, max_length=500)
+    content: str
+    base_version: Optional[int] = Field(None, ge=0, description="Version the edit started from (0: a new file)")
 
 
 class RewindRequest(BaseModel):
-    """Request to rewind (frontend-compatible with checkpoint_id)."""
-    checkpoint_id: str = Field(..., description="Checkpoint ID to rewind to")
+    checkpoint_id: str
 
 
 class BudgetUpdateRequest(BaseModel):
-    """Request to update budget (frontend-compatible)."""
-    tokens_cap: Optional[int] = Field(None, ge=1, description="New token cap")
-    runs_cap: Optional[int] = Field(None, ge=1, description="New sandbox run cap")
+    """`PATCH /rooms/{id}/budget`."""
+    tokens_cap: Optional[int] = Field(None, ge=1)
+    runs_cap: Optional[int] = Field(None, ge=1)
 
 
-# =============================================================================
-# Helper: Get RoomActor for a room (creates/rehydrates if needed)
-# =============================================================================
+class ExportRequest(BaseModel):
+    """`POST /rooms/{id}/export`: push the latest checkpoint to <your GitHub account>/<repo_name>."""
+    repo_name: str = Field(..., min_length=1, max_length=100)
+    private: bool = Field(True, description="Visibility for a new repo (the repo must exist for now)")
+
+
+class Accepted(BaseModel):
+    """Every command's answer; the effect arrives on the socket."""
+    accepted: Literal[True] = True
+    seq: int
+
+
+class FileSaved(Accepted):
+    version: int
+
+
+class BudgetView(BaseModel):
+    tokens_used: int
+    runs_used: int
+    tokens_cap: int
+    runs_cap: int
+
+
+class UrlResponse(BaseModel):
+    url: str
+
 
 # Shared dependency: looks up (or rehydrates) an existing room; never creates one.
 get_room_actor = get_room_actor_dep
 
 
+def accepted(actor: RoomActor) -> Accepted:
+    return Accepted(seq=actor.sequence)
+
+
+async def room_view(actor: RoomActor) -> dict[str, Any]:
+    """The web app's `Room` shape."""
+    meta = actor.manifest.get_room_metadata()
+    budget = await actor.budget.get_status()
+    checkpoints = actor.manifest.list_checkpoints()
+    head = max(checkpoints.items(), key=lambda kv: kv[1].get("created_at", 0))[0] if checkpoints else None
+    members = [membership_view(actor.room_id, actor.owner_id, "owner", actor.domain_roles.get(actor.owner_id),
+                               actor.member_names.get(actor.owner_id))]
+    members += [
+        membership_view(actor.room_id, uid, role, actor.domain_roles.get(uid), actor.member_names.get(uid))
+        for uid, role in actor.members.items()
+    ]
+    created = (actor.created_at or datetime.now(timezone.utc)).isoformat()
+    return {
+        "id": actor.room_id,
+        "title": meta.get("name") or actor.room_id,
+        "description": meta.get("description") or "",
+        "owner_id": actor.owner_id,
+        "link_access": "anyone" if actor.public else "restricted",
+        "link_permission": "editor",
+        "budget_tokens_cap": budget["token_cap"],
+        "budget_runs_cap": budget["sandbox_run_cap"],
+        "head_checkpoint_id": head,
+        "created_at": created,
+        "members": members,
+    }
+
+
 # =============================================================================
-# Endpoints
+# Rooms
 # =============================================================================
 
-@router.post("", response_model=RoomCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_room(
     request: RoomCreateRequest,
     current_user: User = Depends(get_current_user),
-) -> RoomCreateResponse:
-    """
-    Create a new room with the current user as owner.
-    """
+) -> dict[str, Any]:
+    """Create a room with the current user as owner."""
     registry = get_registry()
-
-    # Generate a room ID using UUID (in production, this would come from the database)
     room_id = f"room_{uuid.uuid4().hex[:12]}"
 
-    # Create the room actor (records ROOM_CREATED with owner and metadata)
+    # Records ROOM_CREATED with owner, metadata and the owner's domain role
     actor = await registry.create_room(
-        room_id, current_user.id, name=request.name, description=request.description
+        room_id, current_user.id, name=request.room_name(), description=request.description,
+        domain_role=request.domain_role,
     )
 
     if request.initial_plan:
@@ -237,46 +255,39 @@ async def create_room(
             await registry.stop_room(room_id, reason="invalid initial plan")
             raise
 
-    return RoomCreateResponse(
-        room_id=room_id,
-        name=request.name,
-        description=request.description,
-        owner_id=current_user.id,
-        created=True,
-    )
+    return await room_view(actor)
 
 
-@router.get("", response_model=RoomListResponse)
-async def list_rooms(
-    current_user: User = Depends(get_current_user),
-) -> RoomListResponse:
-    """
-    List active rooms (rooms with running actors) the current user can access.
-    Note: In production, this would query a database for all rooms the user has access to.
-    """
+@router.get("")
+async def list_rooms(current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
+    """Rooms the current user can access (rooms with running actors, until rooms are stored in Postgres)."""
     registry = get_registry()
-    room_ids = await registry.list_rooms()
-
     rooms = []
-    for room_id in room_ids:
+    for room_id in await registry.list_rooms():
         actor = await registry.get_room(room_id)
         if actor and actor.role_of(current_user.id) is not None:
-            rooms.append(await get_room_status(actor))
+            rooms.append(await room_view(actor))
+    return rooms
 
-    return RoomListResponse(rooms=rooms)
 
-
-@router.get("/{room_id}", response_model=RoomStatusResponse)
+@router.get("/{room_id}")
 async def get_room_endpoint(
     room_id: str,
     current_user: User = Depends(require_viewer),
     actor: RoomActor = Depends(get_room_actor),
+) -> dict[str, Any]:
+    """One room, in the Room shape. Requires viewer permission."""
+    return await room_view(actor)
+
+
+@router.get("/{room_id}/status", response_model=RoomStatusResponse)
+async def get_room_status_endpoint(
+    room_id: str,
+    current_user: User = Depends(require_viewer),
+    actor: RoomActor = Depends(get_room_actor),
 ) -> RoomStatusResponse:
-    """
-    Get detailed status of a room.
-    Requires viewer permission.
-    """
-    return await get_room_status(actor)
+    """Operational snapshot: presence, locks, sitting, budget."""
+    return RoomStatusResponse(**await get_room_status(actor))
 
 
 @router.post("/{room_id}/join", response_model=RoomJoinResponse)
@@ -299,7 +310,8 @@ async def join_room(
             detail="This room is private; ask the owner to add you"
         )
     if actor.public and current_user.id != actor.owner_id and current_user.id not in actor.members:
-        await actor.add_member(current_user.id, "editor", granted_by=current_user.id, user_name=request.user_name)
+        await actor.add_member(current_user.id, "editor", granted_by=current_user.id, user_name=request.user_name,
+                               domain_role=request.domain_role)
 
     presence = await actor.user_join(
         user_id=current_user.id,
@@ -392,7 +404,7 @@ async def get_room_status(actor: RoomActor) -> dict:
         "active_members": len(members),
         "plan_items": len(plan_items),
         "budget": budget_status,
-        "sitting_active": sitting_status["active"],
+        "sitting_active": sitting_status.get("active", False),
         "sitting_idle_seconds": sitting_status.get("idle_seconds"),
         "locks_held": len(locks),
         "files_count": files_count,
@@ -401,28 +413,22 @@ async def get_room_status(actor: RoomActor) -> dict:
 
 
 # =============================================================================
-# Frontend-Compatible Endpoints
+# Sharing and membership
 # =============================================================================
 
-@router.patch("/{room_id}/sharing", response_model=RoomSharingResponse)
+@router.patch("/{room_id}/sharing")
 async def update_room_sharing(
     room_id: str,
-    request: RoomSharingUpdateRequest,
+    request: SharingUpdateRequest,
     current_user: User = Depends(require_owner),
     actor: RoomActor = Depends(get_room_actor),
-) -> RoomSharingResponse:
-    """
-    Update room sharing settings (owner only).
-    Frontend-compatible endpoint. Public rooms are viewable by any signed-in user,
-    and joining one grants editor membership.
-    """
-    await actor.set_sharing(request.public, request.allow_anonymous, current_user.id)
-    return RoomSharingResponse(
-        room_id=room_id,
-        public=request.public,
-        allow_anonymous=request.allow_anonymous,
-        updated=True,
-    )
+) -> dict[str, Any]:
+    """Owner only. "anyone": any signed-in user with the link can view, and joining grants editor."""
+    if request.invites:
+        # Invites are emails and we keep no email -> user mapping yet; add people with POST /members
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email invites are not supported yet")
+    await actor.set_sharing(request.link_access == "anyone", False, current_user.id)
+    return await room_view(actor)
 
 
 @router.post("/{room_id}/members", response_model=MemberResponse)
@@ -432,340 +438,270 @@ async def add_member(
     current_user: User = Depends(require_owner),
     actor: RoomActor = Depends(get_room_actor),
 ) -> MemberResponse:
-    """
-    Grant a user editor or viewer membership (owner only).
-    """
-    await actor.add_member(request.user_id, request.role, granted_by=current_user.id)
-    return MemberResponse(
-        room_id=room_id,
-        user_id=request.user_id,
-        role=request.role,
-        sequence=actor._state.sequence,
-    )
+    """Grant a user editor or viewer membership (owner only)."""
+    await actor.add_member(request.user_id, request.role, granted_by=current_user.id, domain_role=request.domain_role)
+    return MemberResponse(room_id=room_id, user_id=request.user_id, role=request.role, sequence=actor.sequence)
 
 
-@router.post("/{room_id}/messages", response_model=MessageResponse)
+# =============================================================================
+# Messages and plan
+# =============================================================================
+
+@router.post("/{room_id}/messages", response_model=Accepted)
 async def send_message(
     room_id: str,
     request: MessageCreateRequest,
     current_user: User = Depends(require_editor),
     actor: RoomActor = Depends(get_room_actor),
-) -> MessageResponse:
-    """
-    Send a chat message to the room (editor+).
-    Frontend-compatible endpoint.
-    """
-    message_id = str(uuid.uuid4())
+) -> Accepted:
+    """A steering message (to the agent) or a note between people (to the team)."""
     await actor.add_message(
-        label="chat",
-        content=request.content,
-        message_id=message_id,
-        user_id=current_user.id,
+        label="chat", content=request.text, message_id=str(uuid.uuid4()), user_id=current_user.id, to=request.to,
     )
-    return MessageResponse(
-        message_id=message_id,
-        sequence=actor._state.sequence,
-    )
+    return accepted(actor)
 
 
-@router.patch("/{room_id}/plan", response_model=CommandEditPlanResponse)
-async def update_plan_frontend(
+@router.patch("/{room_id}/plan", response_model=Accepted)
+async def update_plan(
     room_id: str,
     request: PlanUpdateRequest,
     current_user: User = Depends(require_editor),
     actor: RoomActor = Depends(get_room_actor),
-) -> CommandEditPlanResponse:
-    """
-    Update the plan (frontend-compatible endpoint).
-    Uses the same logic as edit-plan but with frontend-friendly path/body.
-    """
-    # Convert items to edits format
-    edits = []
-    for item in request.items:
-        if "id" not in item:
-            # New item
-            edits.append({"type": "add", "item": item})
-        else:
-            # Check if item exists
-            existing_items = await actor.plan.get_items()
-            existing = next((i for i in existing_items if i["id"] == item["id"]), None)
-            if existing:
-                # Update existing item
-                changes = {k: v for k, v in item.items() if k != "id"}
-                edits.append({"type": "update", "item_id": item["id"], "changes": changes})
-            else:
-                # Add new item with specific ID
-                edits.append({"type": "add", "item": item})
-
-    await actor.command_edit_plan(edits, current_user.id)
-    return CommandEditPlanResponse(
-        sequence=actor._state.sequence,
-        edits_applied=len(edits),
-    )
+) -> Accepted:
+    """Replace the draft plan with the edited one (emits plan.edited with the items)."""
+    await actor.replace_plan(request.items, current_user.id)
+    return accepted(actor)
 
 
-@router.post("/{room_id}/plan/approve", response_model=CommandApprovePlanResponse)
-async def approve_plan_frontend(
+@router.post("/{room_id}/plan/approve", response_model=Accepted)
+async def approve_plan(
     room_id: str,
-    request: PlanApproveRequest,
     current_user: User = Depends(require_owner),
     actor: RoomActor = Depends(get_room_actor),
-) -> CommandApprovePlanResponse:
-    """
-    Approve plan items (frontend-compatible endpoint).
-    """
-    await actor.approve_plan_items(request.plan_item_ids, current_user.id)
-    return CommandApprovePlanResponse(
-        sequence=actor._state.sequence,
-        approved_items=request.plan_item_ids,
-    )
+) -> Accepted:
+    """Approve the plan: every draft item becomes todo."""
+    drafts = [item["id"] for item in await actor.get_plan() if item.get("status") == "draft"]
+    await actor.approve_plan_items(drafts, current_user.id)
+    return accepted(actor)
 
 
-@router.post("/{room_id}/conflicts/{conflict_id}/vote", response_model=CommandVoteResponse)
-async def vote_on_conflict_frontend(
+# =============================================================================
+# Conflicts and questions
+# =============================================================================
+
+@router.post("/{room_id}/conflicts/{conflict_id}/vote", response_model=Accepted)
+async def vote_on_conflict(
     room_id: str,
     conflict_id: str,
-    request: ConflictVoteRequest,
+    request: OptionRequest,
     current_user: User = Depends(require_editor),
     actor: RoomActor = Depends(get_room_actor),
-) -> CommandVoteResponse:
-    """
-    Vote on a conflict (frontend-compatible endpoint).
-    """
-    await actor.command_vote(
-        option_id=request.option_id,
-        issued_by=current_user.id,
-        vote_value=request.vote_value,
-        plan_item_id=request.plan_item_id,
-    )
-    return CommandVoteResponse(sequence=actor._state.sequence)
+) -> Accepted:
+    await actor.command_vote(option_id=request.option, issued_by=current_user.id, vote_value=True, plan_item_id=conflict_id)
+    return accepted(actor)
 
 
-@router.post("/{room_id}/conflicts/{conflict_id}/override", response_model=CommandOverrideResponse)
-async def override_conflict_frontend(
+@router.post("/{room_id}/conflicts/{conflict_id}/override", response_model=Accepted)
+async def override_conflict(
     room_id: str,
     conflict_id: str,
-    request: ConflictOverrideRequest,
+    request: OptionRequest,
     current_user: User = Depends(require_owner),
     actor: RoomActor = Depends(get_room_actor),
-) -> CommandOverrideResponse:
-    """
-    Override a conflict (frontend-compatible endpoint).
-    """
-    await actor.command_override(
-        new_plan=request.new_plan,
-        issued_by=current_user.id,
-        reason=request.reason,
-    )
-    return CommandOverrideResponse(sequence=actor._state.sequence)
+) -> Accepted:
+    """The owner picks the result and closes the conflict."""
+    if not await actor.resolve_conflict(conflict_id, request.option, current_user.id, {"override": True}):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Conflict not found: {conflict_id}")
+    return accepted(actor)
 
 
-@router.post("/{room_id}/questions/{question_id}/answer", response_model=CommandAnswerQuestionResponse)
-async def answer_question_frontend(
+@router.post("/{room_id}/questions/{question_id}/answer", response_model=Accepted)
+async def answer_question(
     room_id: str,
     question_id: str,
-    request: QuestionAnswerRequest,
+    request: AnswerRequest,
     current_user: User = Depends(require_editor),
     actor: RoomActor = Depends(get_room_actor),
-) -> CommandAnswerQuestionResponse:
-    """
-    Answer a question (frontend-compatible endpoint).
-    """
-    await actor.command_answer_question(
-        question_id=request.question_id,
-        answer=request.answer,
-        issued_by=current_user.id,
-    )
-    return CommandAnswerQuestionResponse(sequence=actor._state.sequence)
+) -> Accepted:
+    await actor.command_answer_question(question_id=question_id, answer=request.answer, issued_by=current_user.id)
+    return accepted(actor)
 
 
 # =============================================================================
-# File Endpoints (Frontend-Compatible - path in body)
+# Files (soft locks, version-checked saves)
 # =============================================================================
 
-@router.post("/{room_id}/files/lock", response_model=FileLockResponse)
-async def lock_file_frontend(
+@router.post("/{room_id}/files/lock", response_model=Accepted)
+async def lock_file(
     room_id: str,
-    request: FileLockRequest,
+    request: FilePathRequest,
     current_user: User = Depends(require_editor),
     actor: RoomActor = Depends(get_room_actor),
-) -> FileLockResponse:
-    """
-    Lock a file for editing (frontend-compatible with path in body).
-    """
+) -> Accepted:
     path = request.path.lstrip("/")
-    locked = await actor.lock_file(path, current_user.id)
-    locked_by = await actor.locked_by(path) if locked else None
-
-    return FileLockResponse(
-        path=path,
-        locked=locked,
-        locked_by=locked_by,
-        sequence=actor._state.sequence,
-    )
+    if not await actor.lock_file(path, current_user.id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{path} is being edited by {await actor.locked_by(path)}")
+    return accepted(actor)
 
 
-@router.post("/{room_id}/files/unlock", response_model=FileUnlockResponse)
-async def unlock_file_frontend(
+@router.post("/{room_id}/files/unlock", response_model=Accepted)
+async def unlock_file(
     room_id: str,
-    request: FileUnlockRequest,
+    request: FilePathRequest,
     current_user: User = Depends(require_editor),
     actor: RoomActor = Depends(get_room_actor),
-) -> FileUnlockResponse:
-    """
-    Unlock a file (frontend-compatible with path in body).
-    """
+) -> Accepted:
+    """The lock holder (or the owner) releases a lock."""
     path = request.path.lstrip("/")
-
-    # Check if user can unlock
-    locked_by = await actor.locked_by(path)
-    if locked_by and locked_by != current_user.id:
-        # Check if current user is owner
-        if current_user.id != actor.owner_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only the lock holder or room owner can unlock"
-            )
-
-    unlocked = await actor.unlock_file(path, current_user.id)
-
-    return FileUnlockResponse(
-        path=path,
-        unlocked=unlocked,
-        sequence=actor._state.sequence,
-    )
+    holder = await actor.locked_by(path)
+    if holder and holder != current_user.id and current_user.id != actor.owner_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the lock holder or room owner can unlock")
+    await actor.unlock_file(path, holder or current_user.id)
+    return accepted(actor)
 
 
-@router.put("/{room_id}/files", response_model=FileUpdateResponse)
-async def update_file_frontend(
+@router.put("/{room_id}/files", response_model=FileSaved)
+async def save_file(
     room_id: str,
-    request: FileUpdateRequestFrontend,
+    request: FileSaveRequest,
     current_user: User = Depends(require_editor),
     actor: RoomActor = Depends(get_room_actor),
-) -> FileUpdateResponse:
-    """
-    Update a file (frontend-compatible with path in body).
-    """
+) -> FileSaved:
+    """Save a manual edit. 409 if someone else holds the lock or the file moved past `base_version`."""
     path = request.path.lstrip("/")
+    holder = await actor.locked_by(path)
+    if holder and holder != current_user.id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{path} is being edited by {holder}")
 
-    # Check if locked by another user
-    if await actor.is_locked(path):
-        locked_by = await actor.locked_by(path)
-        if locked_by != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"File is locked by another user: {locked_by}"
-            )
-
-    await actor.update_file(path, request.content, current_user.id)
-
-    entry = actor.manifest.get_entry(path)
-
-    return FileUpdateResponse(
-        file_id=entry.file_id if entry else "",
-        path=path,
-        size=entry.size if entry else len(request.content.encode()),
-        sequence=actor._state.sequence,
-    )
+    current = await actor.file_version(path)
+    if current is not None and request.base_version is not None and request.base_version != current:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{path} changed since version {request.base_version} (now {current}); reload it",
+        )
+    if current is None:
+        await actor.create_file(path, request.content, current_user.id)
+    else:
+        await actor.update_file(path, request.content, current_user.id)
+    return FileSaved(seq=actor.sequence, version=await actor.file_version(path) or 0)
 
 
-@router.delete("/{room_id}/files/{file_path:path}", response_model=FileDeleteResponse)
-async def delete_file_frontend(
+async def _delete(actor: RoomActor, path: str, user_id: str) -> Accepted:
+    path = path.lstrip("/")
+    if await actor.get_file(path) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"File not found: {path}")
+    await actor.delete_file(path, user_id)
+    return accepted(actor)
+
+
+@router.delete("/{room_id}/files", response_model=Accepted)
+async def delete_file(
+    room_id: str,
+    path: str = Query(..., min_length=1),
+    current_user: User = Depends(require_editor),
+    actor: RoomActor = Depends(get_room_actor),
+) -> Accepted:
+    return await _delete(actor, path, current_user.id)
+
+
+@router.delete("/{room_id}/files/{file_path:path}", response_model=Accepted)
+async def delete_file_by_path(
     room_id: str,
     file_path: str,
-    current_user: User = Depends(require_owner),
+    current_user: User = Depends(require_editor),
     actor: RoomActor = Depends(get_room_actor),
-) -> FileDeleteResponse:
-    """
-    Delete a file (frontend-compatible with path as path parameter).
-    """
-    path = file_path.lstrip("/")
-
-    # Check if file exists
-    content = await actor.get_file(path)
-    if content is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"File not found: {path}"
-        )
-
-    await actor.delete_file(path, current_user.id)
-
-    return FileDeleteResponse(
-        path=path,
-        sequence=actor._state.sequence,
-        deleted=True,
-    )
+) -> Accepted:
+    return await _delete(actor, file_path, current_user.id)
 
 
-@router.post("/{room_id}/rewind", response_model=CommandRewindResponse)
-async def rewind_frontend(
+# =============================================================================
+# Rewind, budget, session, export
+# =============================================================================
+
+@router.post("/{room_id}/rewind", response_model=Accepted)
+async def rewind(
     room_id: str,
     request: RewindRequest,
-    current_user: User = Depends(require_owner),
+    current_user: User = Depends(require_editor),
     actor: RoomActor = Depends(get_room_actor),
-) -> CommandRewindResponse:
-    """
-    Rewind room state to a checkpoint (frontend-compatible with checkpoint_id).
-    """
-    # Get the checkpoint to find its sequence
+) -> Accepted:
+    """Rewind plan and files to a checkpoint (a checkpoint of the current state is saved first)."""
     checkpoint_data = actor.manifest.get_checkpoint(request.checkpoint_id)
     if not checkpoint_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Checkpoint not found: {request.checkpoint_id}"
-        )
-
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Checkpoint not found: {request.checkpoint_id}")
     target_sequence = checkpoint_data.get("sequence", 0)
-
-    success = await actor.rewind_to_sequence(
+    ok = await actor.rewind_to_sequence(
         target_sequence=target_sequence,
         user_id=current_user.id,
         reason=f"Rewind to checkpoint {request.checkpoint_id}",
         preserve_checkpoint=True,
     )
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Rewind failed: no events found or invalid target sequence"
-        )
-    return CommandRewindResponse(
-        sequence=actor._state.sequence,
-        target_sequence=target_sequence,
-    )
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rewind failed: invalid target sequence")
+    return accepted(actor)
 
 
-@router.patch("/{room_id}/budget", response_model=CommandRaiseBudgetResponse)
-async def update_budget_frontend(
+@router.patch("/{room_id}/budget", response_model=BudgetView)
+async def update_budget(
     room_id: str,
     request: BudgetUpdateRequest,
     current_user: User = Depends(require_owner),
     actor: RoomActor = Depends(get_room_actor),
-) -> CommandRaiseBudgetResponse:
-    """
-    Update budget caps (frontend-compatible endpoint).
-    """
-    budget_status = await actor.budget.get_status()
-    was_paused = budget_status["paused"]
+) -> BudgetView:
+    """Raise the caps (owner only); a paused room resumes once it is under them."""
+    if not await actor.raise_budget_caps(user_id=current_user.id, token_cap=request.tokens_cap, sandbox_run_cap=request.runs_cap):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New caps must be higher than the current caps")
+    b = await actor.budget.get_status()
+    return BudgetView(tokens_used=b["tokens_used"], runs_used=b["sandbox_runs_used"], tokens_cap=b["token_cap"], runs_cap=b["sandbox_run_cap"])
 
-    success = await actor.raise_budget_caps(
-        user_id=current_user.id,
-        token_cap=request.tokens_cap,
-        sandbox_run_cap=request.runs_cap,
-    )
-    if not success:
-        # require_owner already passed, so a False here means the caps were not raised
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New caps must be higher than the current caps"
+
+@router.post("/{room_id}/end-session", response_model=Accepted)
+async def end_session(
+    room_id: str,
+    current_user: User = Depends(require_owner),
+    actor: RoomActor = Depends(get_room_actor),
+) -> Accepted:
+    """End the sitting (owner only)."""
+    await actor.command_end_session(current_user.id, reason="owner_ended")
+    return accepted(actor)
+
+
+@router.post("/{room_id}/export", response_model=UrlResponse)
+async def export_room(
+    room_id: str,
+    request: ExportRequest,
+    current_user: User = Depends(require_owner),
+    actor: RoomActor = Depends(get_room_actor),
+) -> UrlResponse:
+    """Push the room's current code to <connected GitHub user>/<repo_name> (the repo must already exist)."""
+    github = get_github_integration()
+    username = github.get_connection_status(current_user.id).get("username")
+    if not username:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connect GitHub first (GET /github/connect)")
+
+    checkpoint_id = await actor.create_checkpoint(current_user.id, "Export to GitHub")
+    checkpoint_data = actor.manifest.get_checkpoint(checkpoint_id) or {}
+    try:
+        result = await github.export_checkpoint(
+            user_id=current_user.id, checkpoint_data=checkpoint_data, github_owner=username,
+            github_repo=request.repo_name, branch="main", commit_message=None, path_prefix="",
         )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    actor.manifest.add_export_record({
+        "checkpoint_id": checkpoint_id, "github_owner": username, "github_repo": request.repo_name,
+        "branch": "main", "commit_sha": result.commit_sha, "html_url": result.html_url,
+        "files_exported": result.files_pushed, "exported_at": datetime.now(timezone.utc).timestamp(),
+        "exported_by": current_user.id,
+    })
+    return UrlResponse(url=result.html_url)
 
-    new_status = await actor.budget.get_status()
-    resumed = was_paused and not new_status["paused"]
 
-    return CommandRaiseBudgetResponse(
-        sequence=actor._state.sequence,
-        token_cap=request.tokens_cap,
-        sandbox_run_cap=request.runs_cap,
-        resumed=resumed,
-    )
+@github_router.get("/github/connect", response_model=UrlResponse)
+async def github_connect(current_user: User = Depends(get_current_user)) -> UrlResponse:
+    """The GitHub authorization URL to send the user to (repo scope, asked for only at export)."""
+    try:
+        auth_url, _state = get_github_integration().get_authorization_url(current_user.id)
+    except RuntimeError as e:  # GITHUB_CLIENT_ID / SECRET not set
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+    return UrlResponse(url=auth_url)

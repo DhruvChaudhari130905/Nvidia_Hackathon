@@ -10,3 +10,7 @@ __pycache__/
 .env.*
 !.env.example
 .venv/
+
+# Local runtime data (SQLite fallback DB, file store)
+*.db
+.mux/

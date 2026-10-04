@@ -358,7 +358,6 @@ type TypedEventType =
 // Events without a dedicated payload type yet
 export interface GenericEvent extends BaseEvent {
   type: Exclude<EventType, TypedEventType>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   payload: any;
 }
 

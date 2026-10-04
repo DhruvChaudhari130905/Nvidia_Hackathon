@@ -6,8 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from mux.config import settings
 
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Global engine and session factory
 engine: AsyncEngine | None = None
-async_session_maker: sessionmaker | None = None
+async_session_maker: async_sessionmaker[AsyncSession] | None = None
 
 
 async def init_db() -> None:
@@ -45,9 +44,7 @@ async def init_db() -> None:
         max_overflow=10,
     )
 
-    async_session_maker = sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
+    async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
     # Create tables (in production, use Alembic migrations)
     # await create_tables()

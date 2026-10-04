@@ -1,268 +1,157 @@
-"""Room WebSocket. Streams events from ?since=seq and carries ephemeral presence (avatars, typing, active tab)."""
+"""Room WebSocket (docs/06-event-catalog.md). Streams event envelopes from ?since=seq and carries ephemeral presence.
+
+    GET /rooms/{id}/ws?since={seq}
+    first client message: {"type": "auth", "payload": {"token": "<supabase jwt>"}}
+
+The token may also come as ?token= or an Authorization header. The server first sends a JSON array
+with every envelope after `since`, then one envelope per message.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
 
-from uuid import uuid4
-
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, WebSocketException, status
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 
 from mux.auth.supabase import User, verify_supabase_token
 from mux.events.bus import event_bus
-from mux.events.models import BaseEvent, EventType
+from mux.events.models import BaseEvent
+from mux.events.wire import ephemeral, to_envelope
+from mux.rooms.actor import ROOM_ID_PATTERN, RoomActor
 from mux.rooms.registry import get_registry
-from mux.rooms.actor import RoomActor, ROOM_ID_PATTERN
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-
-# Map backend event types to frontend-compatible aliases
-EVENT_TYPE_ALIASES = {
-    EventType.USER_JOINED: EventType.PRESENCE_JOIN,
-    EventType.USER_LEFT: EventType.PRESENCE_LEAVE,
-    EventType.USER_TYPING: EventType.PRESENCE_TYPING,
-    EventType.USER_PRESENCE_CHANGED: EventType.PRESENCE_TAB,
-    EventType.PLAN_ITEM_ADDED: EventType.PLAN_ITEM_ADDED_ALIAS,
-    EventType.PLAN_ITEM_UPDATED: EventType.PLAN_ITEM_UPDATED_ALIAS,
-    EventType.COMMAND_APPROVE_PLAN: EventType.PLAN_APPROVED,
-    EventType.USER_MESSAGE_SENT: EventType.MESSAGE_POSTED,
-    EventType.COMMAND_VOTE: EventType.CONFLICT_VOTE,
-    EventType.COMMAND_OVERRIDE: EventType.CONFLICT_OVERRIDE,
-    EventType.COMMAND_ANSWER_QUESTION: EventType.QUESTION_ANSWER,
-    EventType.PLAN_ITEM_COMPLETED: EventType.TASK_FINISHED,
-    EventType.FILE_CREATED: EventType.FILE_CHANGED,
-    EventType.FILE_UPDATED: EventType.FILE_CHANGED,
-    EventType.COMMAND_REWIND: EventType.ROOM_REWOUND,
-    EventType.BUDGET_EXCEEDED: EventType.BUDGET_UPDATED,
-    EventType.CONFLICT_DETECTED: EventType.CONFLICT_OPENED,
-    EventType.CONFLICT_RESOLVED: EventType.CONFLICT_CLOSED,
-    EventType.QUESTION_ASKED: EventType.QUESTION_OPENED,
-    EventType.QUESTION_ANSWERED: EventType.QUESTION_ANSWER,
-    EventType.CHECKPOINT_CREATED: EventType.CHECKPOINT_CREATED,  # Same
-    EventType.SITTING_ENDED: EventType.SITTING_ENDED,  # Same
-}
+AUTH_TIMEOUT_SECONDS = 10
 
 
-# =============================================================================
-# WebSocket Authentication
-# =============================================================================
-
-async def authenticate_websocket(
-    websocket: WebSocket,
-    token: Optional[str] = Query(None),
-) -> User:
-    """
-    Authenticate WebSocket connection via JWT token.
-    Token can be passed as query parameter or Authorization header.
-    """
-    # Try query param first, then header
-    auth_token = token
-    if not auth_token:
-        auth_header = websocket.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            auth_token = auth_header[7:]
-
-    if not auth_token:
-        raise WebSocketException(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Missing authentication token"
-        )
-
-    # Same verification as the REST API (handles Supabase's aud claim)
-    payload = verify_supabase_token(auth_token)
-    if payload is None:
-        raise WebSocketException(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Invalid or expired token"
-        )
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise WebSocketException(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Token missing user ID"
-        )
-
-    return User(
-        id=user_id,
-        email=payload.get("email"),
-        role=payload.get("role", "authenticated"),
-    )
+def _user_from_token(token: str) -> Optional[User]:
+    """Same verification as the REST API (handles Supabase's aud claim)."""
+    payload = verify_supabase_token(token)
+    if payload is None or not payload.get("sub"):
+        return None
+    return User(id=payload["sub"], email=payload.get("email"), role=payload.get("role", "authenticated"))
 
 
-# =============================================================================
-# WebSocket Endpoint
-# =============================================================================
+async def _authenticate(websocket: WebSocket, token: Optional[str]) -> Optional[User]:
+    """Token from ?token=, the Authorization header, or the first message ({"type": "auth"})."""
+    if not token:
+        header = websocket.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            token = header[7:]
+    if not token:
+        try:
+            first = json.loads(await asyncio.wait_for(websocket.receive_text(), AUTH_TIMEOUT_SECONDS))
+        except (asyncio.TimeoutError, ValueError, WebSocketDisconnect):
+            return None
+        if isinstance(first, dict) and first.get("type") == "auth":
+            token = (first.get("payload") or {}).get("token")
+    return _user_from_token(token) if token else None
 
-@router.websocket("/rooms/{room_id}")
+
+@router.websocket("/rooms/{room_id}/ws")
 async def room_websocket(
     websocket: WebSocket,
     room_id: str,
-    since: Optional[int] = Query(None, description="Event sequence to replay from"),
-    user: User = Depends(authenticate_websocket),
+    since: int = Query(0, description="Last seq the client has; everything after it is replayed"),
+    token: Optional[str] = Query(None),
 ):
-    """
-    WebSocket endpoint for real-time room events and presence.
-
-    Query Parameters:
-    - since: Event sequence number to replay from (optional)
-
-    Message Types (client -> server):
-    - {"type": "presence", "status": "online|away|offline", "tab": "editor|terminal|...", "cursor": {...}, "typing": true|false}
-    - {"type": "ping"} (responds with pong)
-
-    Event Types (server -> client):
-    - All domain events (plan, files, budget, sitting, presence, etc.) plus frontend aliases
-    - {"type": "presence_update", "user_id": "...", "status": "...", "tab": "...", "cursor": {...}, "typing": true|false}
-    - {"type": "pong"} (response to ping)
-    - {"type": "error", "message": "..."}
-    """
-    # Look up (or rehydrate) the room; WebSockets never create rooms
-    actor = None
-    if ROOM_ID_PATTERN.match(room_id):
-        actor = await get_registry().get_room_or_rehydrate(room_id)
-    if actor is None:
-        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason="Room not found")
-    if actor.role_of(user.id) is None:
-        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason="No access to this room")
-
     await websocket.accept()
 
+    user = await _authenticate(websocket, token)
+    if user is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing or invalid authentication token")
+        return
+
+    # Look up (or rehydrate) the room; WebSockets never create rooms
+    actor = await get_registry().get_room_or_rehydrate(room_id) if ROOM_ID_PATTERN.match(room_id) else None
+    if actor is None or actor.role_of(user.id) is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Room not found")
+        return
+
+    conn = None
+
+    async def dump_and_subscribe(events: list[BaseEvent]) -> None:
+        nonlocal conn
+        envelopes = [env for env in map(to_envelope, events) if env is not None]
+        await websocket.send_text(json.dumps(envelopes, default=str))
+        conn = event_bus.connect(room_id, websocket, last_seq=events[-1].sequence if events else since)
+
     try:
-        # Replay events from sequence if requested (before live events start flowing)
-        if since is not None and since > 0:
-            events = await actor.event_log.read_from(since, limit=1000)
-            for event in events:
-                await websocket.send_text(event.model_dump_json())
-
-        # Register with event bus for real-time broadcasts
-        event_bus.connect(room_id, websocket)
-
-        # Join the room (records presence + sitting activity; the actor broadcasts user_joined)
+        await actor.subscribe_since(since, dump_and_subscribe)
+        # Records presence + sitting activity; reaches everyone (this client too) as presence.join
         await actor.user_join(user_id=user.id)
 
-        # Main message loop
         while True:
             try:
-                data = await websocket.receive_text()
-                message = json.loads(data)
+                message = json.loads(await websocket.receive_text())
                 if not isinstance(message, dict):
                     raise ValueError("Message must be a JSON object")
-                await handle_client_message(actor, message, user.id, websocket, room_id)
+                await handle_client_message(actor, message, user.id, websocket)
             except WebSocketDisconnect:
                 break
-            except json.JSONDecodeError:
-                await send_error(websocket, "Invalid JSON")
-            except ValueError as e:
-                await send_error(websocket, str(e))
+            except ValueError as e:  # includes json.JSONDecodeError
+                await send_error(websocket, actor, str(e))
             except Exception as e:
                 logger.exception(f"Error handling WebSocket message: {e}")
-                await send_error(websocket, "Internal error")
+                await send_error(websocket, actor, "Internal error")
     except WebSocketDisconnect:
         pass
-
     finally:
-        # Cleanup (the actor broadcasts user_left)
-        event_bus.disconnect(room_id, websocket)
-        await actor.user_leave(user.id)
+        if conn is not None:
+            event_bus.disconnect(room_id, conn)
+            await actor.user_leave(user.id)
 
 
-# =============================================================================
-# Message Handlers
-# =============================================================================
-
-async def handle_client_message(
-    actor: RoomActor,
-    message: dict,
-    user_id: str,
-    websocket: WebSocket,
-    room_id: str,
-):
-    """Handle incoming client messages for presence updates."""
+async def handle_client_message(actor: RoomActor, message: dict[str, Any], user_id: str, websocket: WebSocket) -> None:
+    """presence.tab / presence.typing (as sent by web/src/lib/socket.ts), ping, and a late auth message."""
     msg_type = message.get("type")
+    payload = message.get("payload") or {}
 
-    if msg_type == "presence":
-        await handle_presence_update(actor, message, user_id, room_id)
+    if msg_type == "presence.typing":
+        # The actor records it and it reaches everyone as presence.typing
+        await actor.set_typing(user_id, bool(payload.get("typing")))
+    elif msg_type == "presence.tab":
+        tab = payload.get("tab")
+        if tab not in ("feed", "preview", "code", "cards"):
+            raise ValueError(f"Invalid tab: {tab!r}")
+        await actor.set_active_tab(user_id, tab)
+        await event_bus.publish_json(actor.room_id, ephemeral(
+            actor.room_id, actor.sequence, "presence.tab", user_id, {"user_id": user_id, "tab": tab}, _now(),
+        ))
     elif msg_type == "ping":
-        await websocket.send_text(json.dumps({"type": "pong"}))
+        await websocket.send_text(json.dumps({"type": "pong", "seq": actor.sequence}))
+    elif msg_type == "auth":
+        pass  # already authenticated
     else:
-        await send_error(websocket, f"Unknown message type: {msg_type}")
+        raise ValueError(f"Unknown message type: {msg_type}")
 
 
-async def handle_presence_update(
-    actor: RoomActor,
-    message: dict,
-    user_id: str,
-    room_id: str,
-):
-    """Handle presence update from client."""
-    # Typing indicator
-    if "typing" in message:
-        await actor.set_typing(user_id, message["typing"])
-
-    # Active tab
-    if "tab" in message:
-        await actor.set_active_tab(user_id, message["tab"])
-
-    # Cursor position
-    if "cursor" in message:
-        await actor.set_cursor(user_id, message["cursor"])
-
-    # Presence status
-    if "status" in message:
-        await actor.set_presence_status(user_id, message["status"])
-
-    # Broadcast the full presence snapshot (typing/status changes are also
-    # broadcast as events by the actor)
-    presence = await actor.presence.get(user_id)
-    if presence:
-        await event_bus.publish_json(room_id, {
-            "type": "presence_update",
-            "user_id": user_id,
-            "user_name": presence.user_name,
-            "avatar_url": presence.avatar_url,
-            "status": presence.status,
-            "tab": presence.active_tab,
-            "cursor": presence.cursor_position,
-            "typing": presence.typing,
-        })
-
-
-async def send_error(websocket: WebSocket, message: str):
-    """Send error message to client."""
+async def send_error(websocket: WebSocket, actor: RoomActor, message: str) -> None:
+    """Errors carry the current seq so a client that tracks seq from every message keeps its place."""
     try:
-        await websocket.send_text(json.dumps({"type": "error", "message": message}))
+        await websocket.send_text(json.dumps({"type": "error", "message": message, "seq": actor.sequence}))
     except Exception:
         pass
 
 
-async def emit_event_with_alias(room_id: str, event: BaseEvent) -> None:
-    """
-    Emit an event and its frontend-compatible alias (if any) to all WebSocket connections in a room.
-    """
-    # Publish the original event
-    await event_bus.publish(room_id, event)
-
-    # Also publish the alias with the full payload. (Rebuilding it as a BaseEvent
-    # dropped every subclass field, so e.g. message.posted arrived without content.)
-    alias_type = EVENT_TYPE_ALIASES.get(event.type)
-    if alias_type and alias_type != event.type:
-        payload = event.model_dump(mode="json")
-        payload["type"] = alias_type.value
-        payload["id"] = str(uuid4())  # New UUID for alias event
-        await event_bus.publish_json(room_id, payload)
+async def emit_event(room_id: str, event: BaseEvent) -> None:
+    """Send an actor event to the room's sockets as its catalog envelope (events with none are dropped)."""
+    envelope = to_envelope(event)
+    if envelope is not None:
+        await event_bus.publish_envelope(room_id, envelope)
 
 
-# =============================================================================
-# Health check endpoint for load balancers
-# =============================================================================
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-@router.get("/health")
+
+@router.get("/ws/health")
 async def ws_health():
-    """WebSocket health check."""
     return {"status": "healthy", "connections": event_bus.connection_count()}

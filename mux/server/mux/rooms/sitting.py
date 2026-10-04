@@ -262,9 +262,10 @@ class SittingManager:
 
         # Return callback to fire after lock released
         if self._on_sitting_ended:
+            callback = self._on_sitting_ended
             def _fire():
                 try:
-                    self._on_sitting_ended(self.room_id, event)
+                    callback(self.room_id, event)
                 except Exception:
                     logger.exception("on_sitting_ended callback failed")
             return _fire

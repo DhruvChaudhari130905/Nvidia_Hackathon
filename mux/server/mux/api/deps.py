@@ -18,7 +18,7 @@ async def get_room_actor_dep(
     """
     Get the RoomActor for an existing room, rehydrating it from the event log if needed.
 
-    Rooms are only created by POST /api/rooms; an unknown or closed room is a 404.
+    Rooms are only created by POST /rooms; an unknown or closed room is a 404.
     (Previously any request for an unknown id created the room and made the caller owner.)
     """
     if not ROOM_ID_PATTERN.match(room_id):

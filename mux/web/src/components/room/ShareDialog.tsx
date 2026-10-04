@@ -64,7 +64,7 @@ export function ShareDialog({ isOpen, onClose, room }: ShareDialogProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div className="bg-[var(--panel)] rounded-xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-semibold">Share "{room.title}"</h2>
+          <h2 className="text-lg font-semibold">Share &ldquo;{room.title}&rdquo;</h2>
           <button className="btn p-2" onClick={onClose} type="button">
             <X className="w-5 h-5" />
           </button>

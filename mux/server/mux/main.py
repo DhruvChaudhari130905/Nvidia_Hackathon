@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mux import dbsession
 from mux.api import rooms, files, commands, export, ws
-from mux.api.ws import emit_event_with_alias
+from mux.api.ws import emit_event
 from mux.events.log import EventLog, InMemoryEventLog
 from mux.events.models import BaseEvent
 import mux.rooms.registry as room_registry
@@ -34,8 +34,8 @@ async def lifespan(app: FastAPI):
 
     # Initialize room registry with event bus callback for real-time WebSocket broadcasts
     async def on_event_callback(event: BaseEvent) -> None:
-        """Publish actor events to WebSocket event bus with frontend-compatible aliases."""
-        await emit_event_with_alias(event.room_id, event)
+        """Send actor events to the room's sockets as catalog envelopes."""
+        await emit_event(event.room_id, event)
 
     # EventLog is per-room; on_event publishes to event bus
     registry = await room_registry.init_registry(on_event=on_event_callback)
@@ -69,11 +69,14 @@ def create_app() -> FastAPI:
         """Domain validation errors (bad plan items, unknown ids, ...) are client errors."""
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": str(exc)})
 
-    app.include_router(rooms.router, prefix="/api/rooms", tags=["rooms"])
+    # The web app's API (architecture.md): /rooms/..., /github/connect, and the room socket /rooms/{id}/ws
+    app.include_router(rooms.router, prefix="/rooms", tags=["rooms"])
+    app.include_router(rooms.github_router, tags=["github"])
+    app.include_router(ws.router, tags=["websocket"])
+    # Operator APIs
     app.include_router(files.router, prefix="/api/files", tags=["files"])
     app.include_router(commands.router, prefix="/api/commands", tags=["commands"])
     app.include_router(export.router, prefix="/api/export", tags=["export"])
-    app.include_router(ws.router, prefix="/ws", tags=["websocket"])
 
     @app.get("/")
     async def root():

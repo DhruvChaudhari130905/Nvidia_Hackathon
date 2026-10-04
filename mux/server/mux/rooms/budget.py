@@ -191,9 +191,10 @@ class BudgetManager:
             elif new_state.is_at_warning(self.config.warning_threshold) and not self._warned:
                 self._warned = True
                 if self._on_warning:
+                    callback = self._on_warning
                     def _fire():
                         try:
-                            self._on_warning(self.room_id, new_state.token_pct, new_state.sandbox_run_pct)
+                            callback(self.room_id, new_state.token_pct, new_state.sandbox_run_pct)
                         except Exception:
                             logger.exception("on_warning callback failed")
                     fire_callback = _fire
@@ -223,9 +224,10 @@ class BudgetManager:
             elif new_state.is_at_warning(self.config.warning_threshold) and not self._warned:
                 self._warned = True
                 if self._on_warning:
+                    callback = self._on_warning
                     def _fire():
                         try:
-                            self._on_warning(self.room_id, new_state.token_pct, new_state.sandbox_run_pct)
+                            callback(self.room_id, new_state.token_pct, new_state.sandbox_run_pct)
                         except Exception:
                             logger.exception("on_warning callback failed")
                     fire_callback = _fire
@@ -320,9 +322,11 @@ class BudgetManager:
         await self.event_log.append(event)
 
         if self._on_pause:
+
+            callback = self._on_pause
             def _fire():
                 try:
-                    self._on_pause(self.room_id, reason)
+                    callback(self.room_id, reason)
                 except Exception:
                     logger.exception("on_pause callback failed")
             return _fire
@@ -350,9 +354,11 @@ class BudgetManager:
         await self.event_log.append(event)
 
         if self._on_resume:
+
+            callback = self._on_resume
             def _fire():
                 try:
-                    self._on_resume(self.room_id)
+                    callback(self.room_id)
                 except Exception:
                     logger.exception("on_resume callback failed")
             return _fire

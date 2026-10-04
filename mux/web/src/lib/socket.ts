@@ -1,6 +1,7 @@
 // WebSocket client for real-time events and presence
 import type { AppEvent, Presence, RoomState } from '@/types';
 import { demoRoomEvents, isDemoMode } from './demo';
+import { getAccessToken } from './supabase';
 
 type EventHandler = (event: AppEvent) => void;
 type PresenceHandler = (presence: Presence[]) => void;
@@ -8,7 +9,7 @@ type StateHandler = (state: RoomState) => void;
 
 export class SocketClient {
   private ws: WebSocket | null = null;
-  private url: string;
+  private apiHost: string;
   private roomId: string;
   private since: number;
   private reconnectAttempts = 0;
@@ -24,24 +25,27 @@ export class SocketClient {
   constructor(roomId: string, since: number = 0) {
     this.roomId = roomId;
     this.since = since;
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const apiHost = process.env.NEXT_PUBLIC_API_URL?.replace(/^http/, 'ws') || 'ws://localhost:8000';
-    this.url = `${apiHost}/rooms/${roomId}/ws?since=${since}`;
+    this.apiHost = process.env.NEXT_PUBLIC_API_URL?.replace(/^http/, 'ws') || 'ws://localhost:8000';
   }
 
-  connect(): Promise<void> {
+  async connect(): Promise<void> {
     if (isDemoMode()) {
       // Replay a canned room instead of opening a WebSocket
       if (!this.currentState) this.handleMessage(demoRoomEvents(this.roomId));
       this.isConnected = true;
-      return Promise.resolve();
+      return;
     }
+    const token = await getAccessToken();
+    // Resume from the last seq seen, so a reconnect replays only what was missed
+    const url = `${this.apiHost}/rooms/${this.roomId}/ws?since=${this.since}`;
     return new Promise((resolve, reject) => {
       try {
-        this.ws = new WebSocket(this.url);
+        this.ws = new WebSocket(url);
 
         this.ws.onopen = () => {
           console.log('[WS] Connected');
+          // The first message authenticates the socket (docs/06-event-catalog.md)
+          this.ws?.send(JSON.stringify({ type: 'auth', payload: { token } }));
           this.isConnected = true;
           this.reconnectAttempts = 0;
           this.flushPendingEvents();

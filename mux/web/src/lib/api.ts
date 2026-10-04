@@ -3,6 +3,7 @@ import type { Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Ch
 
 import { createDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
 import { getSocket } from './socket';
+import { getAccessToken } from './supabase';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -25,7 +26,7 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
 
 async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (isDemoMode()) return demoFetch<T>(path, options);
-  const token = localStorage.getItem('supabase_token');
+  const token = await getAccessToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
@@ -37,7 +38,9 @@ async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promis
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ message: 'Request failed' }));
-    throw new Error(error.message || `HTTP ${res.status}`);
+    // FastAPI puts the reason in `detail` (a list of field errors for a 422)
+    const detail = typeof error.detail === 'string' ? error.detail : error.detail && JSON.stringify(error.detail);
+    throw new Error(error.message || detail || `HTTP ${res.status}`);
   }
 
   if (res.status === 204) return {} as T;

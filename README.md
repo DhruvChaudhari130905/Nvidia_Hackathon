@@ -171,11 +171,12 @@ Nvidia_Hackathon/
 | Area | Status |
 |---|---|
 | Frontend (`mux/web`) | 🟢 Built, works end to end in **demo mode** |
-| Coordinator, Tavily research, memory | 🟢 Done offline, 36 tests passing |
-| API, room actor, DB, coder agent, sandbox | 🔴 Not started |
-| Evals, infra, starter template | 🔴 Not started |
+| Coordinator, Tavily research, memory | 🟢 Done offline |
+| API, room actor, DB layer, coder agent, sandbox | 🟡 Implemented and speaking the web app's contract (REST + socket); 208 tests pass, pyright clean; the agents aren't driven by the room yet |
+| Infra (Caddy, VM setup, sandbox image) | 🟡 Written, not deployed |
+| Evals, starter template | 🔴 Placeholders only |
 
-Details: **[Status & roadmap](docs/07-status-and-roadmap.md)** · [`PROJECT_STATUS.md`](PROJECT_STATUS.md) · [`BUGS_AND_ERRORS.md`](BUGS_AND_ERRORS.md)
+Details: **[Status & roadmap](docs/07-status-and-roadmap.md)**
 
 ## 🧑‍🤝‍🧑 Team
 

@@ -10,7 +10,7 @@ from jose import jwt
 
 import mux.rooms.registry as room_registry
 from mux.config import settings
-from mux.events.models import EventType, UserMessageSentEvent
+from mux.events.models import UserMessageSentEvent
 from mux.main import create_app
 
 SECRET = "test-secret"
@@ -39,9 +39,9 @@ def client(tmp_path, monkeypatch):
 
 
 def create_room(c, owner="alice", **body) -> str:
-    r = c.post("/api/rooms", json={"name": "demo", **body}, headers=auth(owner))
+    r = c.post("/rooms", json={"description": "demo", **body}, headers=auth(owner))
     assert r.status_code == 201, r.text
-    return r.json()["room_id"]
+    return r.json()["id"]
 
 
 def registry_call(c, fn, *args):
@@ -62,57 +62,60 @@ def test_configured_audience_is_enforced(client, monkeypatch):
     monkeypatch.setattr(settings, "supabase_jwt_audience", "authenticated")
     create_room(client)
     bad = {"Authorization": f"Bearer {token('alice', aud='other')}"}
-    assert client.post("/api/rooms", json={"name": "x"}, headers=bad).status_code == 401
+    assert client.post("/rooms", json={"name": "x"}, headers=bad).status_code == 401
 
 
 # --- rooms / permissions --------------------------------------------------
 
 def test_room_status_and_list(client):
     rid = create_room(client)
-    r = client.get(f"/api/rooms/{rid}", headers=auth("alice"))
+    r = client.get(f"/rooms/{rid}", headers=auth("alice"))
     assert r.status_code == 200, r.text
-    assert r.json()["name"] == "demo"
-    assert [x["room_id"] for x in client.get("/api/rooms", headers=auth("alice")).json()["rooms"]] == [rid]
-    assert client.get("/api/rooms", headers=auth("mallory")).json()["rooms"] == []
+    room = r.json()
+    assert room["title"] == "demo" and room["owner_id"] == "alice" and room["link_access"] == "restricted"
+    assert room["members"][0]["permission"] == "owner"
+    assert [x["id"] for x in client.get("/rooms", headers=auth("alice")).json()] == [rid]
+    assert client.get("/rooms", headers=auth("mallory")).json() == []
+    assert client.get(f"/rooms/{rid}/status", headers=auth("alice")).json()["name"] == "demo"
 
 
 def test_unknown_room_is_404_not_claimed(client):
     r = client.post("/api/files/room_unclaimed/files", json={"path": "a.txt", "content": "hi"}, headers=auth("mallory"))
     assert r.status_code == 404
-    assert client.get("/api/rooms/room_unclaimed", headers=auth("mallory")).status_code == 404
+    assert client.get("/rooms/room_unclaimed", headers=auth("mallory")).status_code == 404
 
 
 def test_private_room_requires_membership(client):
     rid = create_room(client)
-    assert client.post(f"/api/rooms/{rid}/join", json={}, headers=auth("mallory")).status_code == 403
+    assert client.post(f"/rooms/{rid}/join", json={}, headers=auth("mallory")).status_code == 403
     assert client.post(f"/api/commands/{rid}/steer", json={"instructions": "x"}, headers=auth("mallory")).status_code == 403
 
-    r = client.post(f"/api/rooms/{rid}/members", json={"user_id": "bob", "role": "editor"}, headers=auth("alice"))
+    r = client.post(f"/rooms/{rid}/members", json={"user_id": "bob", "role": "editor"}, headers=auth("alice"))
     assert r.status_code == 200, r.text
-    r = client.post(f"/api/rooms/{rid}/join", json={"user_name": "Bob"}, headers=auth("bob"))
+    r = client.post(f"/rooms/{rid}/join", json={"user_name": "Bob"}, headers=auth("bob"))
     assert r.status_code == 200, r.text
     assert client.post(f"/api/commands/{rid}/steer", json={"instructions": "x"}, headers=auth("bob")).status_code == 200
     # Leaving does not revoke membership
-    client.post(f"/api/rooms/{rid}/leave", headers=auth("bob"))
+    client.post(f"/rooms/{rid}/leave", headers=auth("bob"))
     assert client.post(f"/api/commands/{rid}/steer", json={"instructions": "y"}, headers=auth("bob")).status_code == 200
     # Only the owner can add members
-    assert client.post(f"/api/rooms/{rid}/members", json={"user_id": "eve"}, headers=auth("bob")).status_code == 403
+    assert client.post(f"/rooms/{rid}/members", json={"user_id": "eve"}, headers=auth("bob")).status_code == 403
 
 
 def test_public_room_join_grants_editor(client):
     rid = create_room(client)
-    assert client.patch(f"/api/rooms/{rid}/sharing", json={"public": True}, headers=auth("alice")).status_code == 200
-    assert client.get(f"/api/rooms/{rid}", headers=auth("carol")).status_code == 200  # viewer
+    assert client.patch(f"/rooms/{rid}/sharing", json={"link_access": "anyone"}, headers=auth("alice")).status_code == 200
+    assert client.get(f"/rooms/{rid}", headers=auth("carol")).status_code == 200  # viewer
     assert client.post(f"/api/commands/{rid}/steer", json={"instructions": "x"}, headers=auth("carol")).status_code == 403
-    assert client.post(f"/api/rooms/{rid}/join", json={}, headers=auth("carol")).status_code == 200
+    assert client.post(f"/rooms/{rid}/join", json={}, headers=auth("carol")).status_code == 200
     assert client.post(f"/api/commands/{rid}/steer", json={"instructions": "x"}, headers=auth("carol")).status_code == 200
 
 
 def test_closed_room_cannot_be_reclaimed(client):
     rid = create_room(client)
-    assert client.post(f"/api/rooms/{rid}/close", headers=auth("alice")).status_code == 200
-    assert client.get(f"/api/rooms/{rid}", headers=auth("mallory")).status_code == 404
-    assert client.get(f"/api/rooms/{rid}", headers=auth("alice")).status_code == 404
+    assert client.post(f"/rooms/{rid}/close", headers=auth("alice")).status_code == 200
+    assert client.get(f"/rooms/{rid}", headers=auth("mallory")).status_code == 404
+    assert client.get(f"/rooms/{rid}", headers=auth("alice")).status_code == 404
 
 
 def test_invalid_plan_edit_is_400_and_atomic(client):
@@ -184,29 +187,139 @@ def read_until(ws, predicate, max_rounds=20):
     raise AssertionError(f"not found in {[m['type'] for m in seen]}")
 
 
-def test_websocket_receives_actor_events_and_aliases(client):
+def connect_ws(client, rid, user="alice", since=0):
+    """Open the room socket and return it with the initial dump (a JSON array of envelopes)."""
+    ws = client.websocket_connect(f"/rooms/{rid}/ws?since={since}&token={token(user)}").__enter__()
+    dump = json.loads(ws.receive_text())
+    assert isinstance(dump, list)
+    return ws, dump
+
+
+def test_websocket_streams_catalog_envelopes(client):
     rid = create_room(client)
-    with client.websocket_connect(f"/ws/rooms/{rid}?token={token('alice')}") as ws:
-        read_until(ws, lambda m: m["type"] == "user_joined")
-        client.post(f"/api/rooms/{rid}/messages", json={"content": "hello"}, headers=auth("alice"))
+    ws, dump = connect_ws(client, rid)
+    try:
+        assert [e["type"] for e in dump] == ["room.created"]
+        assert set(dump[0]) == {"seq", "room_id", "type", "actor", "actor_id", "ts", "payload"}
+
+        join, _ = read_until(ws, lambda m: m["type"] == "presence.join")
+        assert join["payload"]["user_id"] == "alice"
+
+        client.post(f"/rooms/{rid}/messages", json={"text": "hello", "to": "team"}, headers=auth("alice"))
         msg, _ = read_until(ws, lambda m: m["type"] == "message.posted")
-        assert msg["content"] == "hello"
+        assert msg["payload"]["text"] == "hello" and msg["payload"]["to"] == "team"
+        assert msg["seq"] > join["seq"]
 
-        ws.send_text(json.dumps({"type": "presence", "status": "busy"}))
+        ws.send_text(json.dumps({"type": "presence.tab", "payload": {"tab": "nope"}}))
         err, _ = read_until(ws, lambda m: m["type"] == "error")
-        assert "Invalid status" in err["message"]
+        assert "Invalid tab" in err["message"]
 
-        ws.send_text(json.dumps({"type": "presence", "typing": True}))
-        upd, _ = read_until(ws, lambda m: m["type"] == "presence_update")
-        assert upd["typing"] is True
+        ws.send_text(json.dumps({"type": "presence.tab", "payload": {"tab": "code"}}))
+        tab, _ = read_until(ws, lambda m: m["type"] == "presence.tab")
+        assert tab["payload"] == {"user_id": "alice", "tab": "code"}
+        assert tab["seq"] == msg["seq"]  # ephemeral: keeps the client's resume point
+
+        ws.send_text(json.dumps({"type": "presence.typing", "payload": {"typing": True}}))
+        typing, _ = read_until(ws, lambda m: m["type"] == "presence.typing")
+        assert typing["payload"] == {"user_id": "alice", "typing": True}
+    finally:
+        ws.__exit__(None, None, None)
 
 
-def test_websocket_rejects_non_members(client):
+def test_websocket_first_message_auth_and_resume(client):
+    rid = create_room(client)
+    client.post(f"/rooms/{rid}/messages", json={"text": "one"}, headers=auth("alice"))
+    with client.websocket_connect(f"/rooms/{rid}/ws") as ws:
+        ws.send_text(json.dumps({"type": "auth", "payload": {"token": token("alice")}}))
+        dump = json.loads(ws.receive_text())
+    assert [e["type"] for e in dump] == ["room.created", "message.posted"]
+    seqs = [e["seq"] for e in dump]
+    assert seqs == sorted(set(seqs))
+
+    # Resuming from the last seq replays only what came after it, with no duplicates
+    client.post(f"/rooms/{rid}/messages", json={"text": "two"}, headers=auth("alice"))
+    ws, dump = connect_ws(client, rid, since=dump[-1]["seq"])
+    try:
+        texts = [e["payload"]["text"] for e in dump if e["type"] == "message.posted"]
+        assert texts == ["two"]
+        _, seen = read_until(ws, lambda m: m["type"] == "presence.join")
+        stored = [m["seq"] for m in seen if m["type"] not in ("pong", "error", "presence.tab")]
+        assert all(s > dump[-1]["seq"] for s in stored)
+    finally:
+        ws.__exit__(None, None, None)
+
+
+def test_websocket_rejects_non_members_and_missing_tokens(client):
     from starlette.websockets import WebSocketDisconnect
     rid = create_room(client)
     with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(f"/ws/rooms/{rid}?token={token('mallory')}") as ws:
+        with client.websocket_connect(f"/rooms/{rid}/ws?token={token('mallory')}") as ws:
             ws.receive_text()
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/rooms/{rid}/ws") as ws:
+            ws.send_text(json.dumps({"type": "auth", "payload": {"token": "garbage"}}))
+            ws.receive_text()
+
+
+# --- the web app's REST contract ------------------------------------------
+
+def test_file_saves_are_version_checked(client):
+    rid = create_room(client)
+    r = client.put(f"/rooms/{rid}/files", json={"path": "a.py", "content": "v1", "base_version": 0}, headers=auth("alice"))
+    assert r.status_code == 200, r.text
+    assert r.json()["accepted"] is True and r.json()["version"] == 1
+    r = client.put(f"/rooms/{rid}/files", json={"path": "a.py", "content": "v2", "base_version": 1}, headers=auth("alice"))
+    assert r.json()["version"] == 2
+    # An edit based on a stale version is refused instead of silently overwriting
+    stale = client.put(f"/rooms/{rid}/files", json={"path": "a.py", "content": "v2b", "base_version": 1}, headers=auth("alice"))
+    assert stale.status_code == 409
+    assert client.get(f"/api/files/{rid}/files/a.py", headers=auth("alice")).json()["content"] == "v2"
+
+    # Someone else's lock blocks a save
+    client.post(f"/rooms/{rid}/members", json={"user_id": "bob"}, headers=auth("alice"))
+    assert client.post(f"/rooms/{rid}/files/lock", json={"path": "a.py"}, headers=auth("bob")).status_code == 200
+    assert client.post(f"/rooms/{rid}/files/lock", json={"path": "a.py"}, headers=auth("alice")).status_code == 409
+    blocked = client.put(f"/rooms/{rid}/files", json={"path": "a.py", "content": "x", "base_version": 2}, headers=auth("alice"))
+    assert blocked.status_code == 409
+    assert client.post(f"/rooms/{rid}/files/unlock", json={"path": "a.py"}, headers=auth("bob")).status_code == 200
+
+    assert client.delete(f"/rooms/{rid}/files", params={"path": "a.py"}, headers=auth("alice")).status_code == 200
+    assert client.delete(f"/rooms/{rid}/files", params={"path": "a.py"}, headers=auth("alice")).status_code == 404
+
+
+def test_plan_conflict_question_session_commands(client):
+    rid = create_room(client, domain_role="design")
+    assert client.get(f"/rooms/{rid}", headers=auth("alice")).json()["members"][0]["domain_role"] == "design"
+
+    items = [{"id": "t1", "title": "Pricing page", "status": "draft"}, {"id": "t2", "title": "Auth", "status": "draft"}]
+    r = client.patch(f"/rooms/{rid}/plan", json={"items": items}, headers=auth("alice"))
+    assert r.status_code == 200 and r.json()["accepted"] is True
+    assert client.post(f"/rooms/{rid}/plan/approve", headers=auth("alice")).status_code == 200
+    room = registry_call(client, room_registry.get_registry().get_room, rid)
+    assert {i["status"] for i in registry_call(client, room.get_plan)} == {"todo"}
+
+    assert client.post(f"/rooms/{rid}/conflicts/c1/vote", json={"option": "SQLite"}, headers=auth("alice")).status_code == 200
+    assert client.post(f"/rooms/{rid}/conflicts/c1/override", json={"option": "SQLite"}, headers=auth("alice")).status_code == 200
+    assert client.post(f"/rooms/{rid}/questions/q1/answer", json={"answer": "Yes"}, headers=auth("alice")).status_code == 200
+    assert client.post(f"/rooms/{rid}/end-session", headers=auth("alice")).status_code == 200
+
+    b = client.patch(f"/rooms/{rid}/budget", json={"tokens_cap": 5_000_000}, headers=auth("alice")).json()
+    assert b["tokens_cap"] == 5_000_000 and set(b) == {"tokens_used", "runs_used", "tokens_cap", "runs_cap"}
+
+    ws, dump = connect_ws(client, rid)
+    ws.__exit__(None, None, None)
+    types = [e["type"] for e in dump]
+    for expected in ("plan.edited", "plan.approved", "conflict.vote", "conflict.closed", "question.answered"):
+        assert expected in types, types
+    vote = next(e for e in dump if e["type"] == "conflict.vote")["payload"]
+    assert vote == {"conflict_id": "c1", "user_id": "alice", "option": "SQLite", "weight": 1}
+
+
+def test_export_needs_github(client):
+    rid = create_room(client)
+    r = client.post(f"/rooms/{rid}/export", json={"repo_name": "demo", "private": True}, headers=auth("alice"))
+    assert r.status_code == 400 and "Connect GitHub" in r.json()["detail"]
+    assert client.get("/github/connect", headers=auth("alice")).status_code == 503  # OAuth app not configured
 
 
 # --- event log, rewind, rehydration ---------------------------------------
@@ -218,7 +331,7 @@ def test_rewind_restores_files_and_keeps_sequences_unique(client):
     client.put(f"/api/files/{rid}/files/a.py", json={"path": "a.py", "content": "v2"}, headers=auth("alice"))
     client.post(f"/api/files/{rid}/files", json={"path": "b.py", "content": "new"}, headers=auth("alice"))
 
-    r = client.post(f"/api/rooms/{rid}/rewind", json={"checkpoint_id": cp}, headers=auth("alice"))
+    r = client.post(f"/rooms/{rid}/rewind", json={"checkpoint_id": cp}, headers=auth("alice"))
     assert r.status_code == 200, r.text
     assert client.get(f"/api/files/{rid}/files/a.py", headers=auth("alice")).json()["content"] == "v1"
     assert client.get(f"/api/files/{rid}/files/b.py", headers=auth("alice")).status_code == 404
@@ -232,17 +345,19 @@ def test_rewind_restores_files_and_keeps_sequences_unique(client):
 
 def test_rehydration_restores_state(client):
     rid = create_room(client, initial_plan=[{"id": "p1", "title": "T", "status": "draft"}])
-    client.post(f"/api/rooms/{rid}/members", json={"user_id": "bob"}, headers=auth("alice"))
+    client.post(f"/rooms/{rid}/members", json={"user_id": "bob"}, headers=auth("alice"))
     client.post(f"/api/files/{rid}/files", json={"path": "f.py", "content": "x=1"}, headers=auth("alice"))
     client.post(f"/api/export/{rid}/checkpoints", json={}, headers=auth("alice"))
-    client.patch(f"/api/rooms/{rid}/plan", json={"items": [{"id": "p2", "title": "U", "status": "doing"}]}, headers=auth("alice"))
+    # PATCH /plan sends the whole plan (architecture.md, Q45)
+    client.patch(f"/rooms/{rid}/plan", json={"items": [{"id": "p1", "title": "T", "status": "draft"},
+                                                       {"id": "p2", "title": "U", "status": "doing"}]}, headers=auth("alice"))
     client.post(f"/api/commands/{rid}/approve-plan", json={"plan_item_ids": ["p1"]}, headers=auth("alice"))
 
     reg = room_registry.get_registry()
     registry_call(client, reg.stop_room, rid)
 
     # Next request rehydrates from the log; ownership and membership come from events
-    r = client.get(f"/api/rooms/{rid}", headers=auth("bob"))
+    r = client.get(f"/rooms/{rid}", headers=auth("bob"))
     assert r.status_code == 200, r.text
     assert r.json()["owner_id"] == "alice"
     room = registry_call(client, reg.get_room, rid)
@@ -302,19 +417,42 @@ async def test_github_user_info_with_private_email(monkeypatch):
 # --- units ----------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_alias_event_keeps_payload(monkeypatch):
+async def test_emit_event_sends_envelope_once_per_connection(monkeypatch):
     from mux.api import ws as ws_module
-    sent = []
+    from mux.events.bus import EventBus
 
-    async def capture_event(room_id, event):
-        sent.append(json.loads(event.model_dump_json()))
+    class FakeSocket:
+        def __init__(self):
+            self.sent = []
 
-    async def capture_json(room_id, message):
-        sent.append(message)
+        async def send_text(self, data: str) -> None:
+            self.sent.append(json.loads(data))
 
-    monkeypatch.setattr(ws_module.event_bus, "publish", capture_event)
-    monkeypatch.setattr(ws_module.event_bus, "publish_json", capture_json)
+    bus = EventBus()
+    monkeypatch.setattr(ws_module, "event_bus", bus)
+    fresh, caught_up = FakeSocket(), FakeSocket()
+    bus.connect("r", fresh, last_seq=0)
+    bus.connect("r", caught_up, last_seq=1)  # already had seq 1 in its initial dump
+
     event = UserMessageSentEvent(room_id="r", sequence=1, message_id="m1", content="hi", user_id="u")
-    await ws_module.emit_event_with_alias("r", event)
-    assert [m["type"] for m in sent] == [EventType.USER_MESSAGE_SENT.value, EventType.MESSAGE_POSTED.value]
-    assert sent[1]["content"] == "hi"
+    await ws_module.emit_event("r", event)
+    await ws_module.emit_event("r", event)  # a late duplicate broadcast is dropped
+    assert [m["type"] for m in fresh.sent] == ["message.posted"]
+    assert fresh.sent[0]["payload"]["text"] == "hi" and fresh.sent[0]["seq"] == 1
+    assert caught_up.sent == []
+
+
+def test_every_mapped_event_has_a_catalog_type():
+    """Every envelope type the server can send is one the web app knows (web/src/types/index.ts)."""
+    import inspect
+    import re
+    from pathlib import Path
+    import mux.events.models as models
+    from mux.events.wire import to_envelope
+
+    ts_types = Path(__file__).resolve().parents[2] / "web" / "src" / "types" / "index.ts"
+    known = set(re.findall(r"\| '([a-z_.]+)'", ts_types.read_text()))
+    wire_src = (Path(models.__file__).parent / "wire.py").read_text()
+    sent = set(re.findall(r'return "([a-z_.]+)", ', wire_src))
+    assert sent and sent <= known, sent - known
+    assert inspect.isfunction(to_envelope)

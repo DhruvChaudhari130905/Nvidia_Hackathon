@@ -29,6 +29,8 @@ GET /rooms/{id}/ws?since={seq}
 first client message: {"type": "auth", "payload": {"token": "<supabase jwt>"}}
 ```
 
+The token may also come as `?token=` or an `Authorization` header. The server answers with a JSON array of every envelope after `since`, then one envelope per message. Unstored messages (`presence.tab`) carry the room's current `seq`, so they never move a client's resume point. Server code: `mux/server/mux/api/ws.py`, envelope mapping in `mux/server/mux/events/wire.py`.
+
 ## 📖 All event types
 
 | Group | Event | Stored | Payload (short) |

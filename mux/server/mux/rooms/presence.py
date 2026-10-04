@@ -145,16 +145,10 @@ class PresenceManager:
         self._idle_timeout = idle_timeout
         self._offline_cleanup_age = offline_cleanup_age
         self._use_asyncio = use_asyncio
-        # Always create both mutexes so __len__/__contains__ work in async mode
-        self._async_mutex: asyncio.Lock | None = asyncio.Lock() if use_asyncio else None
-        self._sync_mutex: threading.RLock = threading.RLock()
-
-    def _get_mutex(self) -> asyncio.Lock | threading.RLock:
-        """Get the appropriate mutex for the current mode."""
-        if self._use_asyncio:
-            assert self._async_mutex is not None
-            return self._async_mutex
-        return self._sync_mutex
+        # Async methods take the asyncio lock and *_sync methods the RLock, whatever the mode
+        # (a plain `with` can't take an asyncio.Lock, nor `async with` an RLock).
+        self._async_mutex = asyncio.Lock()
+        self._sync_mutex = threading.RLock()
 
     def _get_now(self) -> float:
         return time.monotonic()
@@ -170,8 +164,7 @@ class PresenceManager:
         If the user already has presence (e.g., reconnecting), updates
         their info and sets status to online.
         """
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             existing = self._users.get(user_id)
             if existing:
                 updated = existing.with_rejoin(user_name, avatar_url)
@@ -193,8 +186,7 @@ class PresenceManager:
         user_name: Optional[str] = None,
         avatar_url: Optional[str] = None,
     ) -> UserPresence:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             existing = self._users.get(user_id)
             if existing:
                 updated = existing.with_rejoin(user_name, avatar_url)
@@ -212,19 +204,16 @@ class PresenceManager:
 
     async def leave(self, user_id: str) -> Optional[UserPresence]:
         """Remove a user's presence when they leave the room."""
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             return self._users.pop(user_id, None)
 
     def leave_sync(self, user_id: str) -> Optional[UserPresence]:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             return self._users.pop(user_id, None)
 
     async def set_typing(self, user_id: str, typing: bool) -> bool:
         """Update a user's typing indicator. Returns True if user exists."""
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -232,8 +221,7 @@ class PresenceManager:
             return True
 
     def set_typing_sync(self, user_id: str, typing: bool) -> bool:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -241,8 +229,7 @@ class PresenceManager:
             return True
 
     async def set_active_tab(self, user_id: str, tab: Optional[str]) -> bool:
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -250,8 +237,7 @@ class PresenceManager:
             return True
 
     def set_active_tab_sync(self, user_id: str, tab: Optional[str]) -> bool:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -259,8 +245,7 @@ class PresenceManager:
             return True
 
     async def set_cursor(self, user_id: str, position: Optional[CursorPosition]) -> bool:
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -268,8 +253,7 @@ class PresenceManager:
             return True
 
     def set_cursor_sync(self, user_id: str, position: Optional[CursorPosition]) -> bool:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -277,8 +261,7 @@ class PresenceManager:
             return True
 
     async def set_status(self, user_id: str, status: str) -> bool:
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -286,8 +269,7 @@ class PresenceManager:
             return True
 
     def set_status_sync(self, user_id: str, status: str) -> bool:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -295,8 +277,7 @@ class PresenceManager:
             return True
 
     async def update_activity(self, user_id: str) -> bool:
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -304,8 +285,7 @@ class PresenceManager:
             return True
 
     def update_activity_sync(self, user_id: str) -> bool:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             user = self._users.get(user_id)
             if user is None:
                 return False
@@ -313,29 +293,24 @@ class PresenceManager:
             return True
 
     async def get(self, user_id: str) -> Optional[UserPresence]:
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             return self._users.get(user_id)
 
     def get_sync(self, user_id: str) -> Optional[UserPresence]:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             return self._users.get(user_id)
 
     async def get_all(self) -> Dict[str, UserPresenceDict]:
         """Get all users' presence as serialized dicts (safe copies)."""
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             return {uid: pres.to_dict() for uid, pres in self._users.items()}
 
     def get_all_sync(self) -> Dict[str, UserPresenceDict]:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             return {uid: pres.to_dict() for uid, pres in self._users.items()}
 
     async def get_online_users(self) -> Dict[str, UserPresenceDict]:
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             return {
                 uid: pres.to_dict()
                 for uid, pres in self._users.items()
@@ -344,8 +319,7 @@ class PresenceManager:
 
     async def get_typing_users(self) -> Dict[str, UserPresenceDict]:
         """Get users who are currently typing (auto-clears expired indicators)."""
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             result = {}
             for uid, pres in self._users.items():
                 if pres.typing:
@@ -357,8 +331,7 @@ class PresenceManager:
 
     def get_typing_users_sync(self) -> Dict[str, UserPresenceDict]:
         """Get users who are currently typing (auto-clears expired indicators)."""
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             result = {}
             for uid, pres in self._users.items():
                 if pres.typing:
@@ -371,8 +344,7 @@ class PresenceManager:
     async def prune_expired_typing(self) -> list[str]:
         """Clear expired typing indicators. Returns list of user_ids cleared."""
         cleared = []
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             for uid, pres in self._users.items():
                 if pres.typing and pres.is_typing_expired():
                     self._users[uid] = pres.with_typing(False)
@@ -381,8 +353,7 @@ class PresenceManager:
 
     def prune_expired_typing_sync(self) -> list[str]:
         cleared = []
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             for uid, pres in self._users.items():
                 if pres.typing and pres.is_typing_expired():
                     self._users[uid] = pres.with_typing(False)
@@ -391,29 +362,24 @@ class PresenceManager:
 
     async def get_count(self) -> int:
         """Return accurate user count (async-safe)."""
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             return len(self._users)
 
     async def has_user(self, user_id: str) -> bool:
         """Return True if user is present (async-safe)."""
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             return user_id in self._users
 
     def get_count_sync(self) -> int:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             return len(self._users)
 
     def has_user_sync(self, user_id: str) -> bool:
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             return user_id in self._users
 
     async def get_idle_users(self) -> Dict[str, UserPresenceDict]:
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             return {
                 uid: pres.to_dict()
                 for uid, pres in self._users.items()
@@ -425,8 +391,7 @@ class PresenceManager:
         Does NOT update last_seen (so they stay away until activity).
         """
         changed = []
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             for user_id, pres in self._users.items():
                 if pres.status == "online" and pres.is_idle(self._idle_timeout):
                     self._users[user_id] = pres.with_status("away")
@@ -435,8 +400,7 @@ class PresenceManager:
 
     def mark_idle_as_away_sync(self) -> list[str]:
         changed = []
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             for user_id, pres in self._users.items():
                 if pres.status == "online" and pres.is_idle(self._idle_timeout):
                     self._users[user_id] = pres.with_status("away")
@@ -447,8 +411,7 @@ class PresenceManager:
         """Remove users who have been offline longer than offline_cleanup_age."""
         removed = []
         now = self._get_now()
-        mutex = self._get_mutex()
-        async with mutex:
+        async with self._async_mutex:
             for user_id, pres in list(self._users.items()):
                 if pres.status == "offline" and (now - pres.last_seen) > self._offline_cleanup_age:
                     del self._users[user_id]
@@ -458,8 +421,7 @@ class PresenceManager:
     def cleanup_offline_sync(self) -> list[str]:
         removed = []
         now = self._get_now()
-        mutex = self._get_mutex()
-        with mutex:
+        with self._sync_mutex:
             for user_id, pres in list(self._users.items()):
                 if pres.status == "offline" and (now - pres.last_seen) > self._offline_cleanup_age:
                     del self._users[user_id]

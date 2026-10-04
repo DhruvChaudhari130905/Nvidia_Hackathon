@@ -10,7 +10,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional, Any, Awaitable, Iterable
+from typing import Callable, Optional, Any, Awaitable, Iterable, cast
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -55,13 +55,15 @@ from mux.events.models import (
     AIMessageCompletedEvent,
     TaskStartedEvent,
     TaskFinishedEvent,
+    BudgetExceededEvent,
+    SittingEndedEvent,
 )
 from mux.rooms.plan import Plan
 from mux.rooms.inbox import Inbox
-from mux.rooms.presence import PresenceManager, UserPresence
+from mux.rooms.presence import CursorPosition, PresenceManager, UserPresence, UserPresenceDict
 from mux.rooms.locks import LockManager
-from mux.rooms.sitting import SittingManager, SittingConfig
-from mux.rooms.budget import BudgetManager, BudgetConfig, BudgetState
+from mux.rooms.sitting import SittingManager, SittingConfig, SittingStatus
+from mux.rooms.budget import BudgetManager, BudgetConfig, BudgetState, BudgetStatus
 from mux.files.store import FileStore
 from mux.files.manifest import FileManifest
 
@@ -78,6 +80,8 @@ class _BroadcastingLog:
     """Wraps an EventLog so that every append (from the actor, budget or sitting
     manager) also runs the actor's post-append hook (sequence sync + broadcast)."""
 
+    room_id: str  # declared for the EventLog protocol; read through __getattr__
+
     def __init__(self, log: EventLog, after_append: Callable[[BaseEvent], Awaitable[None]]) -> None:
         self._log = log
         self._after_append = after_append
@@ -85,6 +89,24 @@ class _BroadcastingLog:
     async def append(self, event: BaseEvent) -> None:
         await self._log.append(event)
         await self._after_append(event)
+
+    async def read_from(self, seq: int, limit: int = 100) -> list[BaseEvent]:
+        return await self._log.read_from(seq, limit)
+
+    async def get_latest(self, limit: int = 100) -> list[BaseEvent]:
+        return await self._log.get_latest(limit)
+
+    async def get_all(self, room_id: str) -> list[BaseEvent]:
+        return await self._log.get_all(room_id)
+
+    async def has_events(self, room_id: str) -> bool:
+        return await self._log.has_events(room_id)
+
+    async def get_latest_checkpoint(self, room_id: str) -> Optional[CheckpointCreatedEvent]:
+        return await self._log.get_latest_checkpoint(room_id)
+
+    async def get_since(self, room_id: str, sequence: int) -> list[BaseEvent]:
+        return await self._log.get_since(room_id, sequence)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._log, name)
@@ -167,6 +189,9 @@ class RoomActor:
 
         # Persistent room settings (rebuilt from ROOM_* events on rehydration)
         self.members: dict[str, str] = {}  # user_id -> "editor" | "viewer" (owner is implicit)
+        self.domain_roles: dict[str, str] = {}  # user_id -> "pm" | "design" | "eng" (owner included)
+        self.member_names: dict[str, str] = {}  # user_id -> display name, when one was given
+        self.created_at: Optional[datetime] = None
         self.public = False
         self.allow_anonymous = False
         self.closed = False
@@ -288,19 +313,26 @@ class RoomActor:
             return "viewer"
         return None
 
-    async def init_room(self, name: str, description: Optional[str] = None) -> None:
+    async def init_room(self, name: str, description: Optional[str] = None, domain_role: Optional[str] = None) -> None:
         """Record the ROOM_CREATED event (persists the owner and metadata for rehydration)."""
         async with self._lock:
             self.manifest.set_room_metadata(name=name, description=description)
-            await self._emit(RoomCreatedEvent(
+            if domain_role:
+                self.domain_roles[self.owner_id] = domain_role
+            event = RoomCreatedEvent(
                 **self._event_fields(self.owner_id),
                 room_name=name,
                 room_description=description,
                 created_by=self.owner_id,
                 initial_plan=None,
-            ))
+                domain_role=domain_role,
+            )
+            self.created_at = event.timestamp
+            await self._emit(event)
 
-    async def add_member(self, user_id: str, role: str, granted_by: str, user_name: Optional[str] = None) -> None:
+    async def add_member(
+        self, user_id: str, role: str, granted_by: str, user_name: Optional[str] = None, domain_role: Optional[str] = None
+    ) -> None:
         """Grant (or change) persistent membership."""
         if role not in MEMBER_ROLES:
             raise ValueError(f"Invalid role {role!r}. Must be one of {sorted(MEMBER_ROLES)}")
@@ -308,11 +340,16 @@ class RoomActor:
             raise ValueError("The owner's role cannot be changed")
         async with self._lock:
             self.members[user_id] = role
+            if domain_role:
+                self.domain_roles[user_id] = domain_role
+            if user_name:
+                self.member_names[user_id] = user_name
             await self._emit(RoomJoinedEvent(
                 **self._event_fields(user_id),
                 user_name=user_name,
                 role=role,
                 granted_by=granted_by,
+                domain_role=domain_role,
             ))
 
     async def set_sharing(self, public: bool, allow_anonymous: bool, user_id: str) -> None:
@@ -400,7 +437,7 @@ class RoomActor:
         async with self._lock:
             return await self.presence.set_active_tab(user_id, tab)
 
-    async def set_cursor(self, user_id: str, position: Optional[dict]) -> bool:
+    async def set_cursor(self, user_id: str, position: Optional[CursorPosition]) -> bool:
         async with self._lock:
             return await self.presence.set_cursor(user_id, position)
 
@@ -633,10 +670,15 @@ class RoomActor:
         user_id: Optional[str] = None,
         rationale: Optional[str] = None,
         domain: Optional[str] = None,
+        to: Optional[str] = None,
     ) -> None:
-        """Add a message to the inbox (coordinator labels: merge, queue, interrupt, conflict, chat)."""
+        """Add a message to the inbox (coordinator labels: merge, queue, interrupt, conflict, chat).
+
+        `to="team"` is a note between people: it is posted to the room but never reaches the coder's inbox.
+        """
         async with self._lock:
-            await self.inbox.add(label, content, message_id=message_id, user_id=user_id, rationale=rationale, domain=domain)
+            if to != "team":
+                await self.inbox.add(label, content, message_id=message_id, user_id=user_id, rationale=rationale, domain=domain)
             event = UserMessageSentEvent(
                 id=uuid4(),
                 type=EventType.USER_MESSAGE_SENT,
@@ -649,6 +691,7 @@ class RoomActor:
                 content=content,
                 user_name=None,
                 reply_to=None,
+                to=to,
             )
             await self._emit(event)
 
@@ -662,10 +705,10 @@ class RoomActor:
     async def create_file(self, path: str, content: str, user_id: str) -> str:
         async with self._lock:
             file_id = str(uuid4())
-            await self.files.write(path, content)
+            content_hash = await self.files.write(path, content)
             # Infer file type from extension
             file_type = mimetypes.guess_type(path)[0]
-            self.manifest.add(file_id, path, len(content.encode()), file_type=file_type)
+            self.manifest.add(file_id, path, len(content.encode()), hash=content_hash, file_type=file_type)
             event = FileCreatedEvent(
                 id=uuid4(),
                 type=EventType.FILE_CREATED,
@@ -681,6 +724,8 @@ class RoomActor:
                 file_type=file_type,
                 size=len(content.encode()),
                 created_by=user_id,
+                hash=content_hash,
+                version=self._version_of(path),
             )
             await self._emit(event)
         return file_id
@@ -688,14 +733,14 @@ class RoomActor:
     async def update_file(self, path: str, content: str, user_id: str) -> None:
         async with self._lock:
             old_content = await self.files.read(path)
-            await self.files.write(path, content)
+            content_hash = await self.files.write(path, content)
             file_id = self.manifest.get_id(path)
             if file_id is None:
                 file_id = str(uuid4())
                 file_type = mimetypes.guess_type(path)[0]
-                self.manifest.add(file_id, path, len(content.encode()), file_type=file_type)
+                self.manifest.add(file_id, path, len(content.encode()), hash=content_hash, file_type=file_type)
             else:
-                self.manifest.update(path, len(content.encode()))
+                self.manifest.update(path, len(content.encode()), hash=content_hash)
             event = FileUpdatedEvent(
                 id=uuid4(),
                 type=EventType.FILE_UPDATED,
@@ -710,8 +755,20 @@ class RoomActor:
                 content_delta={"old": old_content, "new": content} if old_content != content else None,
                 size=len(content.encode()),
                 updated_by=user_id,
+                hash=content_hash,
+                version=self._version_of(path),
             )
             await self._emit(event)
+
+    def _version_of(self, path: str) -> int:
+        entry = self.manifest.get_entry(path)
+        return entry.version if entry else 0
+
+    async def file_version(self, path: str) -> Optional[int]:
+        """Current version of a file, or None if it doesn't exist."""
+        async with self._lock:
+            entry = self.manifest.get_entry(path)
+            return entry.version if entry else None
 
     async def delete_file(self, path: str, user_id: str) -> None:
         async with self._lock:
@@ -782,15 +839,15 @@ class RoomActor:
         async with self._lock:
             return await self.presence.get(user_id)
 
-    async def get_all_presence(self) -> dict[str, UserPresence]:
+    async def get_all_presence(self) -> dict[str, UserPresenceDict]:
         async with self._lock:
             return await self.presence.get_all()
 
-    async def get_budget_status(self) -> dict:
+    async def get_budget_status(self) -> BudgetStatus:
         async with self._lock:
             return await self.budget.get_status()
 
-    async def get_sitting_status(self) -> dict:
+    async def get_sitting_status(self) -> SittingStatus:
         async with self._lock:
             return await self.sitting.get_status()
 
@@ -915,6 +972,20 @@ class RoomActor:
             await self._emit(event)
         return True
 
+    async def subscribe_since(self, since: int, subscribe: Callable[[list[BaseEvent]], Awaitable[None]]) -> None:
+        """Read the events after `since` and run `subscribe(events)` while no new event can be emitted.
+
+        A WebSocket sends them as its initial dump and registers for live events inside `subscribe`,
+        so no event falls between the two.
+        """
+        async with self._lock:
+            await subscribe(await self.event_log.get_since(self.room_id, since))
+
+    @property
+    def sequence(self) -> int:
+        """The room's latest event sequence."""
+        return self._state.sequence
+
     # ---- Replay (rehydration and rewind share one implementation) ----
 
     async def _reset_document_state(self) -> None:
@@ -944,99 +1015,127 @@ class RoomActor:
         applied: list[BaseEvent] = []
         for event in events:
             if event.type == EventType.COMMAND_REWIND:
-                applied = [e for e in applied if e.sequence <= event.target_sequence]
+                target = cast(CommandRewindEvent, event).target_sequence
+                applied = [e for e in applied if e.sequence <= target]
                 await self._reset_document_state()
                 for earlier in applied:
                     await self._apply_event(earlier, include_session_state=False)
                 continue
 
             if event.type == EventType.CHECKPOINT_CREATED and record_checkpoints:
+                cp = cast(CheckpointCreatedEvent, event)
                 # Checkpoint contents are not in the log; rebuild them from replayed state
-                if not self.manifest.get_checkpoint(event.checkpoint_id):
+                if not self.manifest.get_checkpoint(cp.checkpoint_id):
                     data = await self._snapshot(
-                        event.checkpoint_id, event.description, event.created_by,
-                        event.includes_files, event.includes_plan,
+                        cp.checkpoint_id, cp.description, cp.created_by,
+                        cp.includes_files, cp.includes_plan,
                         sequence=applied[-1].sequence if applied else 0,
-                        created_at=event.timestamp.timestamp(),
+                        created_at=cp.timestamp.timestamp(),
                     )
-                    self.manifest.add_checkpoint(event.checkpoint_id, data)
+                    self.manifest.add_checkpoint(cp.checkpoint_id, data)
 
             await self._apply_event(event, include_session_state=include_session_state)
             applied.append(event)
 
     async def _apply_event(self, event: BaseEvent, *, include_session_state: bool) -> None:
-        """Apply one event's effect on state (no events are emitted)."""
+        """Apply one event's effect on state (no events are emitted).
+
+        Dispatches on `event.type`; each branch casts to the model class that type is stored as.
+        """
         t = event.type
         try:
             # Room settings
             if t == EventType.ROOM_CREATED:
-                self.manifest.set_room_metadata(name=event.room_name, description=event.room_description)
+                e = cast(RoomCreatedEvent, event)
+                self.manifest.set_room_metadata(name=e.room_name, description=e.room_description)
+                self.created_at = e.timestamp
+                if e.domain_role:
+                    self.domain_roles[e.created_by] = e.domain_role
             elif t == EventType.ROOM_JOINED:
-                self.members[event.user_id] = getattr(event, "role", "editor")
+                e = cast(RoomJoinedEvent, event)
+                self.members[e.user_id] = getattr(event, "role", "editor")
+                if e.domain_role:
+                    self.domain_roles[e.user_id] = e.domain_role
+                if e.user_name:
+                    self.member_names[e.user_id] = e.user_name
             elif t == EventType.ROOM_SHARING_UPDATED:
-                self.public = event.public
-                self.allow_anonymous = event.allow_anonymous
+                e = cast(RoomSharingUpdatedEvent, event)
+                self.public = e.public
+                self.allow_anonymous = e.allow_anonymous
             elif t == EventType.ROOM_CLOSED:
                 self.closed = True
 
             # Plan
             elif t in (EventType.PLAN_CREATED, EventType.PLAN_UPDATED):
-                await self.plan.replace(event.plan)
+                e = cast(PlanCreatedEvent | PlanUpdatedEvent, event)
+                await self.plan.replace(e.plan)
             elif t == EventType.COMMAND_OVERRIDE:
-                await self.plan.replace(event.new_plan)
+                e = cast(CommandOverrideEvent, event)
+                await self.plan.replace(e.new_plan)
             elif t == EventType.PLAN_ITEM_ADDED:
-                item = (event.metadata or {}).get("item") or {
-                    "id": event.item_id,
-                    "title": event.title,
-                    "notes": event.description,
+                e = cast(PlanItemAddedEvent, event)
+                item = (e.metadata or {}).get("item") or {
+                    "id": e.item_id,
+                    "title": e.title,
+                    "notes": e.description,
                     "status": "draft",
                 }
                 await self.plan.add_item(item)
             elif t == EventType.PLAN_ITEM_UPDATED:
-                await self.plan.update_item(event.item_id, event.updates)
+                e = cast(PlanItemUpdatedEvent, event)
+                await self.plan.update_item(e.item_id, e.updates)
             elif t == EventType.PLAN_ITEM_REMOVED:
-                await self.plan.remove_item(event.item_id)
+                e = cast(PlanItemRemovedEvent, event)
+                await self.plan.remove_item(e.item_id)
             elif t == EventType.PLAN_ITEM_COMPLETED:
-                await self.plan.complete_item(event.item_id)
+                e = cast(PlanItemCompletedEvent, event)
+                await self.plan.complete_item(e.item_id)
             elif t == EventType.COMMAND_APPROVE_PLAN:
-                await self.plan.approve_items(event.plan_item_ids)
+                e = cast(CommandApprovePlanEvent, event)
+                await self.plan.approve_items(e.plan_item_ids)
             elif t == EventType.COMMAND_EDIT_PLAN:
-                await self.plan.replace(await self._plan_after_edits(event.edits))
+                e = cast(CommandEditPlanEvent, event)
+                await self.plan.replace(await self._plan_after_edits(e.edits))
 
             # Files
             elif t in (EventType.FILE_CREATED, EventType.FILE_UPDATED):
-                content = event.content or ""
-                await self.files.write(event.path, content)
-                file_id = self.manifest.get_id(event.path) or event.file_id
-                self.manifest.add(file_id, event.path, event.size, file_type=mimetypes.guess_type(event.path)[0])
+                e = cast(FileCreatedEvent | FileUpdatedEvent, event)
+                content = e.content or ""
+                content_hash = await self.files.write(e.path, content)
+                file_id = self.manifest.get_id(e.path) or e.file_id
+                self.manifest.add(file_id, e.path, e.size, hash=content_hash, file_type=mimetypes.guess_type(e.path)[0])
             elif t == EventType.FILE_DELETED:
-                await self.files.delete(event.path)
-                self.manifest.remove(event.path)
+                e = cast(FileDeletedEvent, event)
+                await self.files.delete(e.path)
+                self.manifest.remove(e.path)
 
             # Checkpoints
             elif t == EventType.CHECKPOINT_RESTORED:
-                data = self.manifest.get_checkpoint(event.checkpoint_id)
+                e = cast(CheckpointRestoredEvent, event)
+                data = self.manifest.get_checkpoint(e.checkpoint_id)
                 if data:
                     await self._restore_snapshot(data)
                 else:
-                    logger.warning(f"Room {self.room_id}: checkpoint {event.checkpoint_id} missing during replay")
+                    logger.warning(f"Room {self.room_id}: checkpoint {e.checkpoint_id} missing during replay")
 
             # Session state (not rewound)
             elif include_session_state and t in (EventType.BUDGET_EXCEEDED, EventType.BUDGET_RESUMED):
-                resumed = event.reason == "resumed"
+                e = cast(BudgetExceededEvent, event)
+                resumed = e.reason == "resumed"
                 self.budget._state = BudgetState(
-                    tokens_used=event.tokens_used,
-                    sandbox_runs_used=event.sandbox_runs_used,
-                    token_cap=event.token_cap,
-                    sandbox_run_cap=event.sandbox_run_cap,
+                    tokens_used=e.tokens_used,
+                    sandbox_runs_used=e.sandbox_runs_used,
+                    token_cap=e.token_cap,
+                    sandbox_run_cap=e.sandbox_run_cap,
                     paused=not resumed,
                     paused_at=None if resumed else time.monotonic(),
-                    paused_reason=None if resumed else event.reason,
+                    paused_reason=None if resumed else e.reason,
                 )
                 self.budget._warned = self.budget._state.is_at_warning(self.config.budget_warning_threshold)
             elif include_session_state and t == EventType.SITTING_ENDED:
+                e = cast(SittingEndedEvent, event)
                 self.sitting._active = False
-                self.sitting._owner_ended = event.reason == "owner_ended"
+                self.sitting._owner_ended = e.reason == "owner_ended"
 
             # Presence is ephemeral and messages are transient queue entries: not replayed.
         except Exception:

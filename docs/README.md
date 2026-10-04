@@ -74,8 +74,7 @@ These docs summarise and link to the original design contract. When they disagre
 | [`source-of-truth/architecture.md`](../source-of-truth/architecture.md) | The technical design, section by section |
 | [`session-log/`](../session-log/) | Every design decision (Q1–Q39) and how we got there |
 | [`demos/`](../demos/) | Static HTML mockups of the room and the workflow |
-| [`PROJECT_STATUS.md`](../PROJECT_STATUS.md) | Done / not done, file by file |
-| [`BUGS_AND_ERRORS.md`](../BUGS_AND_ERRORS.md) | Known bugs from the Oct 2 review |
+| [`source-of-truth/design-theme.md`](../source-of-truth/design-theme.md) | GitHub Dark theme tokens used by the web app |
 
 ## 🔤 Glossary
 

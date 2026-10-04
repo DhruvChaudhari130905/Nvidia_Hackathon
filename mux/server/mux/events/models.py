@@ -1,7 +1,7 @@
 """Pydantic event models. Exported to JSON Schema, and TypeScript types are generated from them."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional, Dict, Any, Union
 from pydantic import BaseModel, Field, ConfigDict, field_serializer
@@ -123,16 +123,21 @@ class EventType(str, Enum):
     SYSTEM_WARNING = "system_warning"
 
 
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now (datetime.utcnow is deprecated and naive)."""
+    return datetime.now(timezone.utc)
+
+
 # Base event model
 class BaseEvent(BaseModel):
     """Base model for all events."""
     id: UUID = Field(default_factory=uuid4, description="Unique event identifier")
     type: EventType = Field(..., description="Event type")
     room_id: str = Field(..., description="Room identifier")
-    user_id: Optional[str] = Field(None, description="User who triggered the event (if applicable)")
-    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Event timestamp")
+    user_id: Optional[str] = Field(default=None, description="User who triggered the event (if applicable)")
+    timestamp: datetime = Field(default_factory=_utcnow, description="Event timestamp")
     sequence: int = Field(..., description="Monotonically increasing sequence number within room")
-    prev_event_id: Optional[UUID] = Field(None, description="ID of previous event in the room")
+    prev_event_id: Optional[UUID] = Field(default=None, description="ID of previous event in the room")
 
     model_config = ConfigDict(
         serialize_by_alias=True,
@@ -152,31 +157,33 @@ class RoomCreatedEvent(BaseEvent):
     """Room was created."""
     type: EventType = EventType.ROOM_CREATED
     room_name: str = Field(..., description="Name of the room")
-    room_description: Optional[str] = Field(None, description="Description of the room")
+    room_description: Optional[str] = Field(default=None, description="Description of the room")
     created_by: str = Field(..., description="User ID of creator")
-    initial_plan: Optional[List[Dict[str, Any]]] = Field(None, description="Initial plan items")
+    initial_plan: Optional[List[Dict[str, Any]]] = Field(default=None, description="Initial plan items")
+    domain_role: Optional[str] = Field(default=None, description="Owner's domain role (pm, design, eng)")
 
 
 class RoomJoinedEvent(BaseEvent):
     """User became a member of the room (persistent membership, unlike presence)."""
     type: EventType = EventType.ROOM_JOINED
-    user_id: str = Field(..., description="User who joined")
-    user_name: Optional[str] = Field(None, description="Display name of user")
+    user_id: str = Field(..., description="User who joined")  # pyright: ignore[reportIncompatibleVariableOverride]
+    user_name: Optional[str] = Field(default=None, description="Display name of user")
     role: str = Field("editor", description="Membership role granted (editor or viewer)")
-    granted_by: Optional[str] = Field(None, description="User who granted membership")
+    granted_by: Optional[str] = Field(default=None, description="User who granted membership")
+    domain_role: Optional[str] = Field(default=None, description="Member's domain role (pm, design, eng)")
 
 
 class RoomLeftEvent(BaseEvent):
     """User left the room."""
     type: EventType = EventType.ROOM_LEFT
-    user_id: str = Field(..., description="User who left")
+    user_id: str = Field(..., description="User who left")  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class RoomClosedEvent(BaseEvent):
     """Room was closed."""
     type: EventType = EventType.ROOM_CLOSED
     closed_by: str = Field(..., description="User who closed the room")
-    reason: Optional[str] = Field(None, description="Reason for closing")
+    reason: Optional[str] = Field(default=None, description="Reason for closing")
 
 
 class RoomSharingUpdatedEvent(BaseEvent):
@@ -191,27 +198,27 @@ class RoomSharingUpdatedEvent(BaseEvent):
 class UserJoinedEvent(BaseEvent):
     """User joined the room session."""
     type: EventType = EventType.USER_JOINED
-    user_id: str = Field(..., description="User who joined")
-    user_name: Optional[str] = Field(None, description="Display name")
+    user_id: str = Field(..., description="User who joined")  # pyright: ignore[reportIncompatibleVariableOverride]
+    user_name: Optional[str] = Field(default=None, description="Display name")
 
 
 class UserLeftEvent(BaseEvent):
     """User left the room session."""
     type: EventType = EventType.USER_LEFT
-    user_id: str = Field(..., description="User who left")
+    user_id: str = Field(..., description="User who left")  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class UserTypingEvent(BaseEvent):
     """User is typing."""
     type: EventType = EventType.USER_TYPING
-    user_id: str = Field(..., description="User who is typing")
+    user_id: str = Field(..., description="User who is typing")  # pyright: ignore[reportIncompatibleVariableOverride]
     is_typing: bool = Field(True, description="Typing status")
 
 
 class UserPresenceChangedEvent(BaseEvent):
     """User presence changed (away/online/etc)."""
     type: EventType = EventType.USER_PRESENCE_CHANGED
-    user_id: str = Field(..., description="User whose presence changed")
+    user_id: str = Field(..., description="User whose presence changed")  # pyright: ignore[reportIncompatibleVariableOverride]
     presence: str = Field(..., description="New presence state (online, away, offline)")
 
 
@@ -235,10 +242,10 @@ class PlanItemAddedEvent(BaseEvent):
     type: EventType = EventType.PLAN_ITEM_ADDED
     item_id: str = Field(..., description="Unique ID of the plan item")
     title: str = Field(..., description="Title of the plan item")
-    description: Optional[str] = Field(None, description="Description of the plan item")
+    description: Optional[str] = Field(default=None, description="Description of the plan item")
     position: int = Field(..., description="Position in the plan (0-based)")
     added_by: str = Field(..., description="User who added the item")
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata")
 
 
 class PlanItemUpdatedEvent(BaseEvent):
@@ -261,7 +268,7 @@ class PlanItemCompletedEvent(BaseEvent):
     type: EventType = EventType.PLAN_ITEM_COMPLETED
     item_id: str = Field(..., description="ID of the completed plan item")
     completed_by: str = Field(..., description="User who completed the item")
-    completed_at: datetime = Field(default_factory=datetime.utcnow, description="Completion timestamp")
+    completed_at: datetime = Field(default_factory=_utcnow, description="Completion timestamp")
 
 
 # Message events
@@ -270,9 +277,10 @@ class UserMessageSentEvent(BaseEvent):
     type: EventType = EventType.USER_MESSAGE_SENT
     message_id: str = Field(..., description="Unique message identifier")
     content: str = Field(..., description="Message content")
-    user_id: str = Field(..., description="User who sent the message")
-    user_name: Optional[str] = Field(None, description="Display name of sender")
-    reply_to: Optional[str] = Field(None, description="ID of message being replied to")
+    user_id: str = Field(..., description="User who sent the message")  # pyright: ignore[reportIncompatibleVariableOverride]
+    user_name: Optional[str] = Field(default=None, description="Display name of sender")
+    reply_to: Optional[str] = Field(default=None, description="ID of message being replied to")
+    to: Optional[str] = Field(default=None, description="'agent' (steers the coordinator) or 'team' (a note between people)")
 
 
 class AIMessageStartedEvent(BaseEvent):
@@ -296,8 +304,8 @@ class AIMessageCompletedEvent(BaseEvent):
     type: EventType = EventType.AI_MESSAGE_COMPLETED
     message_id: str = Field(..., description="Unique message identifier")
     full_content: str = Field(..., description="Complete message content")
-    usage: Optional[Dict[str, Any]] = Field(None, description="Token usage statistics")
-    finish_reason: Optional[str] = Field(None, description="Why generation stopped")
+    usage: Optional[Dict[str, Any]] = Field(default=None, description="Token usage statistics")
+    finish_reason: Optional[str] = Field(default=None, description="Why generation stopped")
 
 
 # Command events (matching commands.py docstring)
@@ -306,14 +314,14 @@ class CommandSteerEvent(BaseEvent):
     type: EventType = EventType.COMMAND_STEER
     instructions: str = Field(..., description="Natural language steering instructions")
     issued_by: str = Field(..., description="User who issued the command")
-    parameters: Optional[Dict[str, Any]] = Field(None, description="Additional parameters")
+    parameters: Optional[Dict[str, Any]] = Field(default=None, description="Additional parameters")
 
 
 class CommandVoteEvent(BaseEvent):
     """Vote command issued."""
     type: EventType = EventType.COMMAND_VOTE
     option_id: str = Field(..., description="ID of option being voted for")
-    plan_item_id: Optional[str] = Field(None, description="Specific plan item being voted on")
+    plan_item_id: Optional[str] = Field(default=None, description="Specific plan item being voted on")
     vote_value: Union[bool, int, str] = Field(..., description="Vote value (yes/no, score, etc.)")
     issued_by: str = Field(..., description="User who issued the command")
 
@@ -323,7 +331,7 @@ class CommandOverrideEvent(BaseEvent):
     type: EventType = EventType.COMMAND_OVERRIDE
     new_plan: List[Dict[str, Any]] = Field(..., description="New plan to replace current one")
     issued_by: str = Field(..., description="User who issued the command")
-    reason: Optional[str] = Field(None, description="Reason for override")
+    reason: Optional[str] = Field(default=None, description="Reason for override")
 
 
 class CommandApprovePlanEvent(BaseEvent):
@@ -331,7 +339,7 @@ class CommandApprovePlanEvent(BaseEvent):
     type: EventType = EventType.COMMAND_APPROVE_PLAN
     plan_item_ids: List[str] = Field(..., description="IDs of plan items to approve")
     issued_by: str = Field(..., description="User who issued the command")
-    approval_note: Optional[str] = Field(None, description="Optional note about approval")
+    approval_note: Optional[str] = Field(default=None, description="Optional note about approval")
 
 
 class CommandEditPlanEvent(BaseEvent):
@@ -354,7 +362,7 @@ class CommandRewindEvent(BaseEvent):
     type: EventType = EventType.COMMAND_REWIND
     target_sequence: int = Field(..., description="Event sequence number to rewind to")
     issued_by: str = Field(..., description="User who issued the command")
-    reason: Optional[str] = Field(None, description="Reason for rewinding")
+    reason: Optional[str] = Field(default=None, description="Reason for rewinding")
     preserve_checkpoint: bool = Field(False, description="Whether to create checkpoint before rewind")
 
 
@@ -362,7 +370,7 @@ class CommandEndSessionEvent(BaseEvent):
     """End session command issued."""
     type: EventType = EventType.COMMAND_END_SESSION
     issued_by: str = Field(..., description="User who issued the command")
-    reason: Optional[str] = Field(None, description="Reason for ending session")
+    reason: Optional[str] = Field(default=None, description="Reason for ending session")
     cleanup_data: bool = Field(True, description="Whether to cleanup temporary data")
 
 
@@ -410,10 +418,12 @@ class FileCreatedEvent(BaseEvent):
     file_id: str = Field(..., description="Unique file identifier")
     path: str = Field(..., description="File path")
     name: str = Field(..., description="File name")
-    content: Optional[str] = Field(None, description="Initial file content")
-    file_type: Optional[str] = Field(None, description="MIME type or file extension")
+    content: Optional[str] = Field(default=None, description="Initial file content")
+    file_type: Optional[str] = Field(default=None, description="MIME type or file extension")
     size: int = Field(0, description="File size in bytes")
     created_by: str = Field(..., description="User who created the file")
+    hash: Optional[str] = Field(default=None, description="Content hash")
+    version: int = Field(0, description="Per-path version after this change (0: not recorded)")
 
 
 class FileUpdatedEvent(BaseEvent):
@@ -421,10 +431,12 @@ class FileUpdatedEvent(BaseEvent):
     type: EventType = EventType.FILE_UPDATED
     file_id: str = Field(..., description="Unique file identifier")
     path: str = Field(..., description="File path")
-    content: Optional[str] = Field(None, description="New file content")
-    content_delta: Optional[Dict[str, Any]] = Field(None, description="Changes made to content")
+    content: Optional[str] = Field(default=None, description="New file content")
+    content_delta: Optional[Dict[str, Any]] = Field(default=None, description="Changes made to content")
     size: int = Field(..., description="New file size in bytes")
     updated_by: str = Field(..., description="User who updated the file")
+    hash: Optional[str] = Field(default=None, description="Content hash")
+    version: int = Field(0, description="Per-path version after this change (0: not recorded)")
 
 
 class FileDeletedEvent(BaseEvent):
@@ -451,7 +463,7 @@ class CheckpointCreatedEvent(BaseEvent):
     """Checkpoint was created."""
     type: EventType = EventType.CHECKPOINT_CREATED
     checkpoint_id: str = Field(..., description="Unique checkpoint identifier")
-    description: Optional[str] = Field(None, description="Description of what the checkpoint saves")
+    description: Optional[str] = Field(default=None, description="Description of what the checkpoint saves")
     created_by: str = Field(..., description="User or system that created the checkpoint")
     includes_files: bool = Field(True, description="Whether file states are included")
     includes_plan: bool = Field(True, description="Whether plan state is included")
@@ -474,7 +486,7 @@ class ConflictDetectedEvent(BaseEvent):
     involved_messages: List[str] = Field(..., description="IDs of messages involved in conflict")
     conflict_type: str = Field(..., description="Type of conflict (content, plan, etc.)")
     detected_by: str = Field(..., description="User or system that detected the conflict")
-    resolution_deadline: Optional[datetime] = Field(None, description="When conflict should be resolved by")
+    resolution_deadline: Optional[datetime] = Field(default=None, description="When conflict should be resolved by")
 
 
 class ConflictResolvedEvent(BaseEvent):
@@ -483,7 +495,7 @@ class ConflictResolvedEvent(BaseEvent):
     conflict_id: str = Field(..., description="ID of the resolved conflict")
     resolution: str = Field(..., description="How the conflict was resolved")
     resolved_by: str = Field(..., description="User who resolved the conflict")
-    resolution_details: Optional[Dict[str, Any]] = Field(None, description="Additional resolution details")
+    resolution_details: Optional[Dict[str, Any]] = Field(default=None, description="Additional resolution details")
 
 
 # Question events
@@ -493,7 +505,7 @@ class QuestionAskedEvent(BaseEvent):
     question_id: str = Field(..., description="Unique question identifier")
     question: str = Field(..., description="The question text")
     asked_by: str = Field(..., description="User who asked the question")
-    context: Optional[str] = Field(None, description="Context in which question was asked")
+    context: Optional[str] = Field(default=None, description="Context in which question was asked")
     requires_answer: bool = Field(True, description="Whether an answer is expected")
 
 
@@ -523,7 +535,7 @@ class GithubSyncCompletedEvent(BaseEvent):
     changes_applied: int = Field(..., description="Number of changes applied")
     initiated_by: str = Field(..., description="User or system that initiated the sync")
     success: bool = Field(..., description="Whether the sync was successful")
-    error_message: Optional[str] = Field(None, description="Error message if sync failed")
+    error_message: Optional[str] = Field(default=None, description="Error message if sync failed")
 
 
 class TavilySearchCompletedEvent(BaseEvent):
@@ -544,7 +556,7 @@ class SystemErrorEvent(BaseEvent):
     error_message: str = Field(..., description="Human-readable error message")
     severity: str = Field(..., description="Error severity (low, medium, high, critical)")
     component: str = Field(..., description="System component where error occurred")
-    details: Optional[Dict[str, Any]] = Field(None, description="Additional error details")
+    details: Optional[Dict[str, Any]] = Field(default=None, description="Additional error details")
 
 
 class SystemWarningEvent(BaseEvent):
@@ -554,7 +566,7 @@ class SystemWarningEvent(BaseEvent):
     warning_message: str = Field(..., description="Human-readable warning message")
     severity: str = Field(..., description="Warning severity (low, medium, high)")
     component: str = Field(..., description="System component where warning occurred")
-    details: Optional[Dict[str, Any]] = Field(None, description="Additional warning details")
+    details: Optional[Dict[str, Any]] = Field(default=None, description="Additional warning details")
 
 
 # Union type for all events (useful for type hints)
@@ -658,5 +670,69 @@ __all__ = [
     "BudgetExceededEvent",
     "TaskStartedEvent",
     "TaskFinishedEvent",
-    "Event"
+    "Event",
+    "RoomId",
+    "EXEMPT_TYPES",
+    "EXEMPT_PREFIXES",
+    "is_exempt",
+    "EventEnvelope",
+    "Payload",
+    "FileChanged",
+    "CheckpointCreated",
+    "RoomRewound",
 ]
+
+
+# --- Postgres event envelope and typed payloads (checkpoints, rewind, room files) ---
+
+RoomId = UUID
+
+EXEMPT_TYPES: frozenset[str] = frozenset({
+    "room.created", "sharing.changed", "budget.updated", "room.paused", "room.resumed",
+    "room.rewound", "checkpoint.created", "message.posted",
+})
+
+EXEMPT_PREFIXES = ("member.", "export.")
+
+def is_exempt(type: str) -> bool:
+    """True if events of this type are never greyed out."""
+    return type in EXEMPT_TYPES or type.startswith(EXEMPT_PREFIXES)
+
+class EventEnvelope(BaseModel):
+    """Wire/storage shape of every event."""
+    seq: int
+    type: str
+    ts: datetime
+    room_id: RoomId
+    actor: str
+    payload: dict
+
+class Payload(BaseModel):
+    """Payload contract: unknown fields are an error, so the Python and TS shapes can't drift silently."""
+    model_config = ConfigDict(extra="forbid")
+
+class FileChanged(Payload):
+    """Payload of 'file.changed'."""
+
+    path: str
+    hash: str | None
+    version: int
+    base_version: int | None
+    deleted: bool
+    actor: str
+    diff_summary: str
+
+class CheckpointCreated(Payload):
+    """Payload of 'checkpoint.created'. The checkpoint's own seq is the envelope seq (R4)."""
+    
+    checkpoint_id: UUID
+    parent_id: UUID | None
+    start_seq: int
+    manifest_id: UUID
+    sandbox_snapshot_uuid: str | None
+
+class RoomRewound(Payload):
+    """Payload of 'room.rewound' (R2): the new version of every path whose content changed, applied as given.
+       Paths missing from the target checkpoint's manifest are removed; they keep their high-water marks."""
+    checkpoint_id: UUID
+    versions: dict[str, int]

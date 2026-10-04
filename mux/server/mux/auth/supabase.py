@@ -198,37 +198,3 @@ def get_current_user_optional(
         )
     except Exception:
         return None
-
-
-# Optional: Function to get Supabase client for server-side operations
-def get_supabase_client():
-    """
-    Get a Supabase client for server-side operations.
-    This would be used when the backend needs to interact with Supabase directly
-    (e.g., for admin operations, database access, etc.).
-
-    Returns:
-        Supabase client instance
-    """
-    try:
-        from supabase import create_client, Client
-
-        supabase_url = settings.supabase_url
-        supabase_key = settings.supabase_service_role_key  # Use service role for backend
-
-        missing = []
-        if not supabase_url:
-            missing.append("SUPABASE_URL")
-        if not supabase_key:
-            missing.append("SUPABASE_SERVICE_ROLE_KEY")
-
-        if missing:
-            raise ValueError(f"Missing environment variables: {', '.join(missing)}")
-
-        return create_client(supabase_url, supabase_key)
-    except ImportError:
-        logger.error("Supabase client not installed. Run: pip install supabase")
-        raise RuntimeError("Supabase client not installed. Run: pip install supabase")
-    except Exception as e:
-        logger.error(f"Failed to create Supabase client: {e}")
-        raise RuntimeError(f"Failed to create Supabase client: {e}")

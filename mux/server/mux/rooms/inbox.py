@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TypedDict, Optional, Literal, List
+from typing import TypedDict, Optional, Literal, List, cast
+
+
+InboxLabel = Literal["merge", "queue", "interrupt", "conflict", "chat"]
 
 
 class InboxMessage(TypedDict, total=False):
     """Type-safe inbox message schema."""
-    label: Literal["merge", "queue", "interrupt", "conflict", "chat"]
+    label: InboxLabel
     content: str
     message_id: Optional[str]
     user_id: Optional[str]
@@ -68,7 +71,7 @@ class Inbox:
 
             self._messages.append(
                 InboxMessage(
-                    label=label,
+                    label=cast(InboxLabel, label),  # checked against VALID_LABELS above
                     content=content,
                     message_id=message_id,
                     user_id=user_id,
@@ -95,9 +98,9 @@ class Inbox:
         interrupt = False
 
         for msg in messages:
-            if msg["label"] == "merge":
-                merges.append(msg["content"])
-            elif msg["label"] == "interrupt":
+            if msg.get("label") == "merge":
+                merges.append(msg.get("content", ""))
+            elif msg.get("label") == "interrupt":
                 interrupt = True
             # Other labels (queue, conflict, chat) are not processed by the coder at turn boundaries.
 

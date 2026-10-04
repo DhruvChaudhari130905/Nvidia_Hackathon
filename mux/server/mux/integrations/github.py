@@ -88,7 +88,7 @@ class GitHubIntegration:
             redirect_uri=redirect_uri,
         )
 
-    def _init_fernet(self, key: Optional[bytes]) -> Optional[Fernet]:
+    def _init_fernet(self, key: Optional[bytes]) -> Fernet:
         """Initialize Fernet for token encryption."""
         if key:
             return Fernet(key)

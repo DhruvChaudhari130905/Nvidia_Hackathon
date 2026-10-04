@@ -2,7 +2,7 @@
 
 **Goal:** Ideate a multiplayer ("Google Docs–style") agent for the Nebius x NVIDIA Global AI Hackathon 2026, then produce `prd.md`.
 **Method:** A structured grilling session (design tree, questions asked in rounds, each with a recommended answer).
-**Output:** [`../prd.md`](../prd.md)
+**Output:** [`../source-of-truth/prd.md`](../source-of-truth/prd.md)
 
 ## 1. Hackathon research (done before questioning)
 

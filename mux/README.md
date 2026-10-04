@@ -8,7 +8,7 @@ Design docs live one level up: [`../source-of-truth/prd.md`](../source-of-truth/
 
 ## Repository layout
 
-Every file currently holds a one-line description of its job. Nothing is implemented yet.
+Setup and run instructions: [`../docs/03-getting-started.md`](../docs/03-getting-started.md). From the repo root, `make help` lists the common commands.
 
 ```
 mux/
