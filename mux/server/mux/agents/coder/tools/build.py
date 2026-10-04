@@ -1,8 +1,8 @@
 """run_build and run_tests for local development only.
 
 These run npm on the machine that calls them. The coder writes the code being built, so
-production must call P-DB's sandbox runner (mux/sandbox/runner.py) instead; never run this on
-the backend server. Error parsing belongs in mux/sandbox/errors.py once P-DB builds it.
+production uses the sandbox runner (mux/sandbox/runner.py) instead: `CoderToolExecutor` only
+calls these when it is given an explicit `build_root`. Never run them on the backend server.
 
 Returns at most 5 deduplicated errors as file:line: message.
 """

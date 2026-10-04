@@ -1,0 +1,51 @@
+{
+  "description": "Shared rewind cases (R4, DB4). Build C0..C4, rewind to C2, build C5 plus work in progress, click C4, add work in progress, rewind to the current head. Each step gives the active seqs for the events up to after_seq with that head. Read by mux/server/tests/test_rewind.py and the web reducer tests.",
+  "checkpoints": {
+    "C0": "00000000-0000-4000-8000-0000000000c0",
+    "C1": "00000000-0000-4000-8000-0000000000c1",
+    "C2": "00000000-0000-4000-8000-0000000000c2",
+    "C3": "00000000-0000-4000-8000-0000000000c3",
+    "C4": "00000000-0000-4000-8000-0000000000c4",
+    "C5": "00000000-0000-4000-8000-0000000000c5"
+  },
+  "manifests": {
+    "00000000-0000-4000-8000-0000000000a0": {"src/App.tsx": {"hash": "h-app-1", "version": 1}},
+    "00000000-0000-4000-8000-0000000000a1": {"src/App.tsx": {"hash": "h-app-2", "version": 2}},
+    "00000000-0000-4000-8000-0000000000a2": {"src/App.tsx": {"hash": "h-app-3", "version": 3}},
+    "00000000-0000-4000-8000-0000000000a3": {"src/App.tsx": {"hash": "h-app-3", "version": 3}, "src/Nav.tsx": {"hash": "h-nav-1", "version": 1}},
+    "00000000-0000-4000-8000-0000000000a4": {"src/App.tsx": {"hash": "h-app-4", "version": 4}, "src/Nav.tsx": {"hash": "h-nav-1", "version": 1}},
+    "00000000-0000-4000-8000-0000000000a5": {"src/App.tsx": {"hash": "h-app-6", "version": 6}}
+  },
+  "events": [
+    {"seq": 1, "type": "room.created", "payload": {}},
+    {"seq": 2, "type": "checkpoint.created", "payload": {"checkpoint_id": "00000000-0000-4000-8000-0000000000c0", "parent_id": null, "start_seq": 0, "manifest_id": "00000000-0000-4000-8000-0000000000a0", "sandbox_snapshot_uuid": null}},
+    {"seq": 3, "type": "task.started", "payload": {}},
+    {"seq": 4, "type": "file.changed", "payload": {"path": "src/App.tsx", "hash": "h-app-2", "version": 2, "base_version": 1, "deleted": false, "actor": "coder", "diff_summary": "+1 −1"}},
+    {"seq": 5, "type": "checkpoint.created", "payload": {"checkpoint_id": "00000000-0000-4000-8000-0000000000c1", "parent_id": "00000000-0000-4000-8000-0000000000c0", "start_seq": 2, "manifest_id": "00000000-0000-4000-8000-0000000000a1", "sandbox_snapshot_uuid": "snap-1"}},
+    {"seq": 6, "type": "task.started", "payload": {}},
+    {"seq": 7, "type": "file.changed", "payload": {"path": "src/App.tsx", "hash": "h-app-3", "version": 3, "base_version": 2, "deleted": false, "actor": "coder", "diff_summary": "+1 −1"}},
+    {"seq": 8, "type": "checkpoint.created", "payload": {"checkpoint_id": "00000000-0000-4000-8000-0000000000c2", "parent_id": "00000000-0000-4000-8000-0000000000c1", "start_seq": 5, "manifest_id": "00000000-0000-4000-8000-0000000000a2", "sandbox_snapshot_uuid": "snap-2"}},
+    {"seq": 9, "type": "file.changed", "payload": {"path": "src/Nav.tsx", "hash": "h-nav-1", "version": 1, "base_version": null, "deleted": false, "actor": "coder", "diff_summary": "+1 −0"}},
+    {"seq": 10, "type": "message.posted", "payload": {}},
+    {"seq": 11, "type": "checkpoint.created", "payload": {"checkpoint_id": "00000000-0000-4000-8000-0000000000c3", "parent_id": "00000000-0000-4000-8000-0000000000c2", "start_seq": 8, "manifest_id": "00000000-0000-4000-8000-0000000000a3", "sandbox_snapshot_uuid": null}},
+    {"seq": 12, "type": "file.changed", "payload": {"path": "src/App.tsx", "hash": "h-app-4", "version": 4, "base_version": 3, "deleted": false, "actor": "coder", "diff_summary": "+1 −1"}},
+    {"seq": 13, "type": "checkpoint.created", "payload": {"checkpoint_id": "00000000-0000-4000-8000-0000000000c4", "parent_id": "00000000-0000-4000-8000-0000000000c3", "start_seq": 11, "manifest_id": "00000000-0000-4000-8000-0000000000a4", "sandbox_snapshot_uuid": "snap-4"}},
+    {"seq": 14, "type": "room.rewound", "payload": {"checkpoint_id": "00000000-0000-4000-8000-0000000000c2", "versions": {"src/App.tsx": 5}}},
+    {"seq": 15, "type": "file.changed", "payload": {"path": "src/App.tsx", "hash": "h-app-6", "version": 6, "base_version": 5, "deleted": false, "actor": "coder", "diff_summary": "+1 −1"}},
+    {"seq": 16, "type": "checkpoint.created", "payload": {"checkpoint_id": "00000000-0000-4000-8000-0000000000c5", "parent_id": "00000000-0000-4000-8000-0000000000c2", "start_seq": 14, "manifest_id": "00000000-0000-4000-8000-0000000000a5", "sandbox_snapshot_uuid": "snap-5"}},
+    {"seq": 17, "type": "file.changed", "payload": {"path": "src/App.tsx", "hash": "h-app-7", "version": 7, "base_version": 6, "deleted": false, "actor": "coder", "diff_summary": "+1 −1"}},
+    {"seq": 18, "type": "room.rewound", "payload": {"checkpoint_id": "00000000-0000-4000-8000-0000000000c4", "versions": {"src/App.tsx": 8, "src/Nav.tsx": 2}}},
+    {"seq": 19, "type": "file.changed", "payload": {"path": "src/App.tsx", "hash": "h-app-9", "version": 9, "base_version": 8, "deleted": false, "actor": "coder", "diff_summary": "+1 −1"}},
+    {"seq": 20, "type": "room.rewound", "payload": {"checkpoint_id": "00000000-0000-4000-8000-0000000000c4", "versions": {"src/App.tsx": 10}}}
+  ],
+  "steps": [
+    {"after_seq": 2, "head": "C0", "active": [1, 2]},
+    {"after_seq": 4, "head": "C0", "active": [1, 2, 3, 4]},
+    {"after_seq": 13, "head": "C4", "active": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]},
+    {"after_seq": 14, "head": "C2", "active": [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13, 14]},
+    {"after_seq": 17, "head": "C5", "active": [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13, 14, 15, 16, 17]},
+    {"after_seq": 18, "head": "C4", "active": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 18]},
+    {"after_seq": 19, "head": "C4", "active": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 18, 19]},
+    {"after_seq": 20, "head": "C4", "active": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 18, 20]}
+  ]
+}

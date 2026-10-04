@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     model_super:str = ""
     model_ultra:str = ""
     tavily_api_key:str = ""
+    database_url:str = ""
+    test_database_url:str = ""
+    sandbox_api_key:str = ""
+    sandbox_base_url:str = ""
+    sandbox_image:str = ""
 
 
 settings = Settings()
