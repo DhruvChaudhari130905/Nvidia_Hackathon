@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from mux.events.models import PlanItem
 from mux.events import log
 from mux.rooms import records
 from mux.rooms.actor import RoomActor
@@ -110,3 +111,28 @@ async def test_post_message(session_factory, publish, published):
     assert published[-1].type == "message.posted"
     assert published[-1].payload == {"id": str(message.id), "user_id": str(owner), "text": "add dark mode", "to": "team"}
 
+
+async def test_plan_changes_are_stored_and_replayed_on_open(session_factory, publish, published):
+    owner = uuid4()
+    actor = await new_room(session_factory, publish, owner)
+    await actor.draft_plan([PlanItem(id="t1", title="Login"), PlanItem(id="t2", title="Todo list")], "coordinator")
+    await actor.approve_plan(str(owner))
+    await actor.start_task("t1")
+    await actor.update_plan_item("t2", {"notes": "use SQLite"}, str(owner))
+    assert [e.type for e in published[1:]] == ["plan.drafted", "plan.approved", "task.started", "plan.item_updated"]
+    assert [(i.id, i.status) for i in actor.plan] == [("t1", "doing"), ("t2", "todo")]
+
+    reopened = await RoomActor.open(actor.room_id, publish, sessionmaker=session_factory)
+    assert reopened is not None
+    assert reopened.plan == actor.plan
+    assert reopened.emitter.seq == actor.emitter.seq == 5
+
+
+async def test_broken_plan_rule_writes_nothing(session_factory, publish, published):
+    actor = await new_room(session_factory, publish)
+    await actor.draft_plan([PlanItem(id="t1", title="Login")], "coordinator")
+    before = actor.plan
+    with pytest.raises(ValueError):
+        await actor.start_task("t1")  # still a draft
+    assert actor.plan == before
+    assert [e.type for e in published] == ["room.created", "plan.drafted"]

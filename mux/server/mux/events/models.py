@@ -3,8 +3,8 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
-from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal, Any
 
 RoomId = UUID
 Permission = Literal["owner", "editor", "viewer"]
@@ -12,6 +12,7 @@ MemberPermission = Literal["editor", "viewer"] #what can be granted: the owner i
 DomainRole = Literal["pm", "design", "eng"]
 LinkAccess = Literal["restricted", "anyone"]
 MessageTo = Literal["agent", "team"]
+PlanStatus = Literal["draft", "todo", "doing", "done", "skipped_conflict", "skipped_question"]
 
 EXEMPT_TYPES: frozenset[str] = frozenset({
     "room.created", "sharing.changed", "budget.updated", "room.paused", "room.resumed",
@@ -97,3 +98,28 @@ class MessagePosted(Payload):
     text: str
     to: MessageTo
     
+class PlanItem(Payload):
+    """One task of the plan. Also the payload of 'plan.item_added'."""
+
+    id: str = Field(min_length=1, max_length=40)
+    title: str = Field(min_length=1, max_length=200)
+    status: PlanStatus = "draft"
+    owner_role: DomainRole | None = None
+    notes: str | None = None
+    merged_notes: list[str] = Field(default_factory=list)
+
+class PlanItems(Payload):
+    """Payload of 'plan.drafted' and 'plan.edited': the whole plan, in order."""
+
+    items: list[PlanItem]
+
+class PlanItemUpdated(Payload):
+    """Payload of 'plan.item_updated'. `changes` holds only the fields that change."""
+
+    id: str
+    changes: dict[str, Any]
+
+class TaskRef(Payload):
+    """Payload of 'task.started' and 'task.finished'."""
+
+    task_id: str

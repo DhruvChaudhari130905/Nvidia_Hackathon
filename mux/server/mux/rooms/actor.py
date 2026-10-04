@@ -6,15 +6,18 @@ transaction, and updates its in-memory state only after the commit. Permission c
 
 import asyncio
 from dataclasses import replace
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from mux.db.session import get_sessionmaker
+from mux.events import log
 from mux.events.models import (
     DomainRole, LinkAccess, MemberJoined, MemberPermission, MemberRoleChanged, MessagePosted, MessageTo,
-    Permission, RoomCreated, SharingChanged,
+    Permission, PlanItem, PlanItems, PlanItemUpdated, RoomCreated, SharingChanged, TaskRef,
 )
+from mux.rooms import plan as plans
 from mux.rooms import records
 from mux.rooms.emitter import Emitter, Publish
 from mux.rooms.records import Member, RoomRecord
@@ -23,9 +26,10 @@ from mux.rooms.records import Member, RoomRecord
 class RoomActor:
     """One room's state. Methods hold the actor lock, so changes apply one at a time."""
 
-    def __init__(self, record: RoomRecord, emitter: Emitter) -> None:
+    def __init__(self, record: RoomRecord, emitter: Emitter, plan: plans.Plan = ()) -> None:
         self.record = record
         self.emitter = emitter
+        self.plan = plan
         self._lock = asyncio.Lock()
 
     @property
@@ -64,9 +68,14 @@ class RoomActor:
         maker = sessionmaker or get_sessionmaker()
         async with maker() as s:
             record = await records.load(room_id, session=s)
-        if record is None:
-            return None
-        return cls(record, await Emitter.resume(room_id, publish, sessionmaker=maker))
+            if record is None:
+                return None
+            events = await log.read_all(room_id, session=s)
+        plan: plans.Plan = ()
+        for event in events:
+            plan = plans.apply(plan, event.type, event.payload)
+        last_seq = events[-1].seq if events else 0
+        return cls(record, Emitter(room_id, last_seq, publish, sessionmaker=maker), plan)
 
     def role_of(self, user_id: UUID) -> Permission | None:
         """The user's permission in this room, or None if they have no access."""
@@ -120,6 +129,39 @@ class RoomActor:
         async with self._lock:
             await self.emitter.emit("message.posted", message, str(user_id))
         return message
+
+    async def draft_plan(self, items: list[PlanItem], by: str) -> None:
+        """The first plan (from the coordinator or the owner). Replaces any plan there was."""
+        await self._change_plan("plan.drafted", PlanItems(items=items).model_dump(mode="json"), by)
+
+    async def edit_plan(self, items: list[PlanItem], by: str) -> None:
+        """Replace the whole plan (the plan editor, or the coordinator inserting a task mid-plan)."""
+        await self._change_plan("plan.edited", PlanItems(items=items).model_dump(mode="json"), by)
+
+    async def approve_plan(self, by: str) -> None:
+        """Draft tasks become todo (the API checks that `by` is the owner)."""
+        await self._change_plan("plan.approved", {}, by)
+
+    async def add_plan_item(self, item: PlanItem, by: str) -> None:
+        """Append one task to the end of the plan."""
+        await self._change_plan("plan.item_added", item.model_dump(mode="json"), by)
+
+    async def update_plan_item(self, task_id: str, changes: dict[str, Any], by: str) -> None:
+        """Change some fields of one task."""
+        await self._change_plan("plan.item_updated", PlanItemUpdated(id=task_id, changes=changes).model_dump(mode="json"), by)
+
+    async def start_task(self, task_id: str, by: str = "agent") -> None:
+        await self._change_plan("task.started", TaskRef(task_id=task_id).model_dump(mode="json"), by)
+
+    async def finish_task(self, task_id: str, by: str = "agent") -> None:
+        await self._change_plan("task.finished", TaskRef(task_id=task_id).model_dump(mode="json"), by)
+
+    async def _change_plan(self, type: str, payload: dict[str, Any], by: str) -> None:
+        """Check the change with plans.apply first (a broken rule raises before anything is written), then store it."""
+        async with self._lock:
+            new = plans.apply(self.plan, type, payload)
+            await self.emitter.emit(type, payload, by)
+            self.plan = new
 
     def _set_members(self, members: dict[UUID, Member]) -> None:
         self.record = replace(self.record, members=members)
