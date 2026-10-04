@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | v1.1, 2026-10-02. Adds team notes (§6.1, proposed) and the open decisions Q40–Q55 (§22) |
+| **Status** | v1.2, 2026-10-04. Database layer built (P-DB): §3, §5, §9, §10, §12 and §19 updated; Q40–Q43, Q46, Q51 and Q52 adopted (§22). v1.1 (2026-10-02) added team notes (§6.1) and the open decisions Q40–Q55 |
 | **Based on** | [`prd.md`](prd.md) v2 and decisions Q1–Q39 in [`../session-log/2026-09-28-architecture-grill.md`](../session-log/2026-09-28-architecture-grill.md) |
 | **Code** | [`../mux/`](../mux/). Every module named here has a stub file there. |
 | **UI reference** | [`../demos/mux-room-demo.html`](../demos/mux-room-demo.html), theme in [`design-theme.md`](design-theme.md) |
@@ -68,7 +68,7 @@ flowchart LR
 - Room settings, members, and roles.
 - The plan: `[{id, title, status, owner_role?, notes?}]`, where status is `draft | todo | doing | done | skipped_conflict | skipped_question`.
 - The inbox of messages waiting for the coder.
-- The current file manifest (path → blob hash) and version counter per file.
+- The live files (`files/room_files.py`): the manifest (path → `{hash, version}`) plus a per-path version high-water mark, so a deleted and re-created file never reuses an old version.
 - Soft locks for manual editing.
 - Open conflicts and questions, with timers.
 - Budget counters.
@@ -77,7 +77,7 @@ flowchart LR
 **How it works:**
 - Every command (from REST) and every agent action goes into the actor's mailbox, an `asyncio.Queue`. The actor handles one item at a time: it validates the item, appends the resulting events to Postgres, updates memory, then publishes the events to the room's sockets (`events/bus.py`).
 - The coordinator and the coder run as child tasks of the actor. They never change state directly. They send actions to the mailbox, like any user.
-- **Crash recovery:** on first access after a restart, `registry.py` replays the room's events from the latest checkpoint forward to rebuild the state.
+- **Crash recovery (Q42):** on first access after a restart, `registry.py` replays every event of the room from seq 0 to rebuild the state. A checkpoint does not hold members, open cards or budget, so starting from one is not enough. Files are rebuilt by `LiveFiles.replay` (`files/manifest.py`). The actor resumes numbering at `events/log.max_seq() + 1`.
 - **Idle rooms:** an actor with no connections and no running coder shuts down after 10 minutes **(default)** and is rebuilt on next access.
 
 **Two pause points for the coder (Q4):**
@@ -120,7 +120,7 @@ Rate limit: 1 message per user every 5 seconds, enforced in the actor.
 
 ### 4.3 Event catalog
 
-Defined as Pydantic models in `events/models.py`, exported to `packages/schema/`.
+Defined as Pydantic models in `events/models.py`, exported to `packages/schema/`. Payload models forbid unknown fields, so the Python and TypeScript shapes cannot drift silently. Typed so far: `file.changed`, `checkpoint.created`, `room.rewound`.
 
 | Group | Types |
 |---|---|
@@ -143,11 +143,11 @@ Postgres tables (`db/tables.py`). Supabase owns `auth.users`.
 |---|---|
 | `rooms` | id, owner_id, title, description, link_access, link_permission, budget_tokens_cap, budget_runs_cap, head_checkpoint_id, created_at |
 | `memberships` | room_id, user_id, permission (owner, editor, viewer), domain_role (pm, design, eng) |
-| `events` | room_id, seq, type, actor_id, payload jsonb, active (false after a rewind greys it out), created_at. Primary key (room_id, seq). |
+| `events` | room_id, seq, type, actor_id, payload jsonb, created_at. Primary key (room_id, seq). Append-only: rows are never updated, and rewind greying is computed (§10, Q40). |
 | `blobs` | hash (sha256), content bytea, size. Shared across rooms, so identical files are stored once. |
 | `manifests` | id, room_id, entries jsonb (path → {hash, version}) |
-| `checkpoints` | id, room_id, seq, manifest_id, sandbox_snapshot_uuid, plan jsonb, task_log_id, parent_id, created_at |
-| `logs` | id, room_id, kind (task, day), body text, pins jsonb, checkpoint_id |
+| `checkpoints` | id, room_id, seq (of its own `checkpoint.created` event), start_seq (the head change before it), manifest_id, sandbox_snapshot_uuid, plan jsonb, parent_id, created_at |
+| `logs` | id, room_id, kind (task, day), body text, pins jsonb, checkpoint_id, created_at (`clock_timestamp()`, so two logs saved in one transaction keep their order) |
 | `conflicts` | id, room_id, task_id, options jsonb, evidence jsonb, domain, status, result, resolved_by |
 | `votes` | conflict_id, user_id, option, weight |
 | `questions` | id, room_id, task_id, text, options jsonb, default_option, answer, status, expires_at |
@@ -155,6 +155,10 @@ Postgres tables (`db/tables.py`). Supabase owns `auth.users`.
 | `github_tokens` | user_id, token_encrypted, scopes, created_at |
 
 The event log is append-only. The plan, conflicts, questions, and budget tables are projections kept for fast reads. They can always be rebuilt from events.
+
+- **Schema:** SQLAlchemy models in `db/tables.py`, Alembic migrations in `server/migrations/` (`alembic upgrade head`). A log points at its checkpoint (`logs.checkpoint_id`); checkpoints do not point back at logs.
+- **Connection (Q43):** `db/session.py` uses asyncpg with a small pool (5 + 5 overflow) and `statement_cache_size=0`, so either Supabase pooler URL works, including the transaction pooler (port 6543).
+- **Writes:** `checkpoint.save` writes the checkpoint, its task log, its `checkpoint.created` event and the room head in one savepoint, so they succeed or fail together.
 
 ## 6. Coordinator
 
@@ -244,12 +248,12 @@ for task in plan (next todo task):
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `read_file` | path, start_line?, end_line? | Content and version stamp |
+| `read_file` | path, start_line?, end_line? | Content and version number |
 | `write_file` | path, content | New version. Only for files that don't exist yet; fails if the file exists |
 | `edit_file` | path, base_version, edits: [{find, replace}] | New version, or `stale: re-read first` if base_version is old, or `no match` |
 | `list_files` | none | Repo map: each path with its exports, React components, and Hono routes |
 | `delete_file` | path, base_version | OK or stale |
-| `run_build` | none | pass or fail, duration, at most 5 deduplicated errors as `file:line: message` |
+| `run_build` | none | pass or fail, duration, at most 5 deduplicated errors as `file:line: message`. Runs in the Nebius sandbox (§12) |
 | `run_tests` | pattern? | pass or fail, counts, at most 5 failures |
 | `web_search` | query | Tavily's short answer plus 2–3 snippets with URLs, cached per room |
 | `ask_room` | question, options, default | Question id. The task is skipped until it's answered or 5 minutes pass |
@@ -288,12 +292,13 @@ Target (Q38): at least 40% fewer tokens per finished task than a naive loop on t
 
 ## 9. Files, versions, and manual editing
 
-- **Store** (`files/store.py`): content-addressed. Each file's bytes are stored once under their sha256 hash.
-- **Manifest** (`files/manifest.py`): maps each path to `{hash, version}`. Each file's version goes up by one on every change, whoever makes it.
-- **Coder edits:** `edit_file` and `delete_file` carry the `base_version` the coder last read. If it doesn't match, the tool returns `stale: re-read first`, and nothing changes.
+- **Store** (`files/store.py`): content-addressed. Each file's bytes are stored once under their sha256 hash. Text is normalised to LF line endings first (binary is untouched), and a blob is at most 1 MB.
+- **Manifest** (`files/manifest.py`): maps each path to `{hash, version}`. Each file's version goes up by one on every change, whoever makes it. Versions are always these numbers, never content hashes (Q52).
+- **One way in (Q52):** every save, by the coder or a person, goes through the room's `RoomFiles` (`files/room_files.py`). A save checks `base_version`, stores the blob, emits `file.changed`, and only then updates the live manifest, so a failed event write changes nothing. Saving identical content creates no new version. The actor supplies the `emit` function that numbers, stores and broadcasts the event.
+- **Coder edits:** the coder's tools (`RoomFileTools` in `agents/coder/tools/files.py`) call `RoomFiles`. `edit_file` and `delete_file` carry the `base_version` the coder last read. If it doesn't match, the tool returns `stale: re-read first`, and nothing changes. `FileTools`, which works on a local folder, is for development and tests only.
 - **Manual edits (Q37):**
   1. An editor opens a file for editing, and `POST /files/lock` takes the soft lock. Others see "Dan is editing" and a read-only view.
-  2. Saving sends `PUT /files` with the base version. The actor checks the lock and version, stores the new blob, bumps the version, and emits `file.changed` with a diff summary.
+  2. Saving sends `PUT /files` with the base version. The actor checks the lock, then calls `RoomFiles.save`, which checks the version, stores the new blob, bumps the version, and emits `file.changed` with a diff summary.
   3. At its next turn boundary, the coder gets a note: "Dan edited `Hero.tsx` (v4 → v5)" plus a short diff.
   4. The lock is released on unlock, on disconnect, or after 2 minutes idle **(default)**.
   5. A person can edit a file the coder is working on. Version checks keep either side from overwriting the other.
@@ -303,17 +308,23 @@ Target (Q38): at least 40% fewer tokens per finished task than a naive loop on t
 
 **Checkpoint** (`checkpoints/checkpoint.py`), written at every task boundary:
 - The file manifest id.
-- The sandbox snapshot UUID from the last successful `run_build` (shown as "built on Nebius").
+- The sandbox snapshot UUID from the last passing `run_build` (shown as "built on Nebius"). The coder's tool executor keeps it in `snapshot_uuid` and clears it when any file changes afterwards, so it always matches the checkpoint's files. It is null if the files were not built.
 - The plan at that moment.
-- The task log written for that task (Q33).
+- The task log written for that task (Q33), stored in `logs` pointing at the checkpoint.
 - Its parent checkpoint.
+- Its own event seq and `start_seq`, the seq of the head change before it.
+
+The first checkpoint, C0, is made from the template files when the room is created (`checkpoint.create_root`).
 
 **Rewind** (`checkpoints/rewind.py`, Q21):
 1. The actor tells the coder to stop. It stops at its next turn boundary.
-2. The head moves to the chosen checkpoint: its manifest, plan, and log become current. No sandbox call is needed, so it is instant.
-3. Events after that checkpoint are marked `active = false` (greyed out, not deleted). Rewinding forward flips them back.
-4. Messages still waiting in the inbox are re-classified against the restored plan.
-5. The browser gets `room.rewound`, reloads files into the WebContainer, and redraws.
+2. The head moves to the chosen checkpoint: its manifest, plan, and log become current (`rewind.head_state`; the log is the newest one on the nearest checkpoint back along the path, so logs of undone work are never used). No sandbox call is needed, so it is instant.
+3. The actor emits `room.rewound{checkpoint_id, versions}`. `versions` gives every path whose content changes a version above any it has had, so a stale `base_version` can never match (`rewind.rewound_payload`).
+4. Events are never edited (Q40). Which ones are greyed out is computed from the checkpoint tree (`rewind.compute_active`): an event is active if a checkpoint on the path from the head to the root owns it (seq in `(start_seq, seq]`), if it came after the latest head change, or if it is a room-level event. Rewinding forward works the same way. The web reducer must give the same answer for the shared cases in `packages/schema/fixtures/rewind_scenario.json`.
+5. Messages still waiting in the inbox are re-classified against the restored plan.
+6. The browser gets `room.rewound`, reloads files into the WebContainer, and redraws.
+
+**Room-level events, never greyed (Q41):** `room.created`, `room.rewound`, `checkpoint.created`, `sharing.changed`, `budget.updated`, `room.paused`, `room.resumed`, `message.posted`, and every `member.*` and `export.*` event (`events/models.is_exempt`). Messages stay visible after a rewind, because the conversation happened; what they changed is greyed out. See Q41 in §22.
 
 ## 11. Memory
 
@@ -327,9 +338,11 @@ Code: `memory/`.
 
 Code: `sandbox/`.
 - **Starter image** (`infra/sandbox-image/`): Node, the full-stack template, and every approved package preinstalled. The coder cannot install anything (Q14).
-- **A run** (`sandbox/runner.py`): upload the current manifest's files onto the starter image, then run `typecheck && build` (for `run_build`) or the test command (for `run_tests`). A successful build is run with `disposable=False`, so its result becomes an image UUID saved as the checkpoint snapshot.
+- **A run** (`sandbox/runner.py`): upload the room's live manifest files under `/app` on the starter image, then run `tsc --noEmit && vite build` (for `run_build`) or `vitest run` (for `run_tests`). A build is run with `disposable=False`, so a passing one becomes an image UUID saved as the checkpoint snapshot. Tests run disposable. Paths are checked so a model-written path cannot leave `/app`, and a test pattern must be a plain path or glob.
+- **Builds run only in the sandbox (Q51):** the coder's executor uses the runner when it is given one. Local `npm` (`agents/coder/tools/build.py`) runs only when a `build_root` is passed explicitly, for development on a laptop. With neither, `run_build` returns an error instead of running code on the server.
+- **Client** (`sandbox/client.py`): a thin wrapper over the Token Factory Sandboxes SDK (`contree-sdk`). A timeout or API error becomes a failed build, not an exception. `replay/fake_sandbox.py` replays recorded results for tests.
 - **Known limits** (from research): each run boots a fresh microVM in about 2–5 s, the default timeout is 30 s, output is truncated at 8 KB, and there are at most 50 concurrent operations. Whether `npm install` has network access is unconfirmed, which is why packages are baked in.
-- **Output** (`sandbox/errors.py`): parses TypeScript, Vite, and test-runner output into at most 5 deduplicated `file:line: message` lines.
+- **Output (Q46):** output is cut at 8 KB, so errors are parsed inside the sandbox by `mux-report` (`infra/sandbox-image/mux-report.mjs`, **not written yet**: the runner already calls it, so builds fail until it is in the image), which prints `file:line: message` lines and a `MUX_SUMMARY {passed, failed}` line for tests. `sandbox/errors.py` dedupes them and keeps at most 5. If none were printed, the last 5 output lines are used.
 
 ## 13. Preview
 
@@ -382,7 +395,7 @@ One backend process is enough for the hackathon, because room actors live in mem
 ## 19. Development and testing
 
 - **Replay mode** (`server/mux/replay/`): a fake LLM and a fake sandbox replay recorded outputs, so P1 can build the whole UI before the agent works, and tests run without API keys.
-- **Tests** (`server/tests/`): room actor ordering, coordinator actions, coder loop with fake tools, tool version checks, rewind.
+- **Tests** (`server/tests/`): room actor ordering, coordinator actions, coder loop with fake tools, tool version checks, rewind, and the database layer (store, manifests, event log, checkpoints, room files, sandbox runner). Database tests need Postgres: `docker compose up` in `server/` starts it on port 5433, and `TEST_DATABASE_URL` must name a database containing "test", because the tests wipe it.
 - **Evals** (`mux/evals/`): coordinator label accuracy (≥ 85% on 50 scenarios), build and test success (≥ 80% on 20 prompts), and tokens against the naive baseline (≥ 40% fewer).
 - **Schema sync:** `server/scripts/export_schema.py` writes JSON Schema to `packages/schema/generated/`, and `web` generates TypeScript types from it in CI.
 
@@ -411,18 +424,18 @@ Found while building P-Agent-A's code and reviewing P-Agent-B's coder. Each has 
 
 | # | Decision | In plain words | Suggestion | Owner |
 |---|---|---|---|---|
-| Q40 | How rewind marks undone events | §10 flips `events.active` to false, which edits old records. An event log should never change, and flipping gets confusing after two rewinds | Keep events immutable. Emit `room.rewound{checkpoint_id}` and compute the active set from the checkpoint tree | P-DB |
-| Q41 | What rewind undoes | Rewinding to 2 pm should not remove a teammate who joined at 3 pm or refund spent budget | Split events into **timeline** events (files, plan, messages, cards, logs), which rewind greys out, and **room-level** events (membership, sharing, budget, export, team notes), which rewind never touches | P-DB, P-API |
-| Q42 | Crash recovery | §3 rebuilds from the latest checkpoint, but a checkpoint does not hold members, open cards, locks, or budget | Replay every event from seq 0. Rooms have a few thousand events at most | P-API, P-DB |
+| Q40 | How rewind marks undone events | §10 flips `events.active` to false, which edits old records. An event log should never change, and flipping gets confusing after two rewinds | Keep events immutable. Emit `room.rewound{checkpoint_id}` and compute the active set from the checkpoint tree. **Adopted 2026-10-04** (§10) | P-DB |
+| Q41 | What rewind undoes | Rewinding to 2 pm should not remove a teammate who joined at 3 pm or refund spent budget | Split events into **timeline** events (files, plan, messages, cards, logs), which rewind greys out, and **room-level** events (membership, sharing, budget, export, team notes), which rewind never touches. **Adopted 2026-10-04 with one change:** `message.posted` is room-level too, so every message stays visible after a rewind and only its effects are greyed (§10). P-API to confirm | P-DB, P-API |
+| Q42 | Crash recovery | §3 rebuilds from the latest checkpoint, but a checkpoint does not hold members, open cards, locks, or budget | Replay every event from seq 0. Rooms have a few thousand events at most. **Adopted 2026-10-04** (§3). P-DB side done (`LiveFiles.replay`, `log.max_seq`); `registry.py` still to build | P-API, P-DB |
 
 ### B. Technical setup
 
 | # | Decision | In plain words | Suggestion | Owner |
 |---|---|---|---|---|
-| Q43 | Database connection | Supabase's transaction pooler breaks asyncpg prepared statements | Use the direct or session connection string, or `statement_cache_size=0` | P-DB |
+| Q43 | Database connection | Supabase's transaction pooler breaks asyncpg prepared statements | Use the direct or session connection string, or `statement_cache_size=0`. **Done 2026-10-04:** `statement_cache_size=0` (§5) | P-DB |
 | Q44 | WebSocket login | Browsers cannot set headers on a WebSocket, and a token in the URL leaks into logs | Send the JWT as the first socket message | P-API |
 | Q45 | Two people editing the plan | `PATCH /plan` sends the whole plan, so the second save wipes out the first | Send plan operations (add, remove, move, rename) by item id | P-API |
-| Q46 | Long build output | Sandbox output is cut at 8 KB, so the useful error is often lost | Parse errors inside the sandbox and return at most 5 `file:line: message` lines as short JSON | P-DB |
+| Q46 | Long build output | Sandbox output is cut at 8 KB, so the useful error is often lost | Parse errors inside the sandbox and return at most 5 `file:line: message` lines as short JSON. **Server side done 2026-10-04:** `sandbox/errors.py` caps the lines (§12). Still to do: the `mux-report` script in the starter image | P-DB |
 | Q47 | Stuck file locks | A lock could outlive its holder after a restart | Keep locks in memory only and clear them when the actor is rebuilt | P-API |
 
 ### C. Coordinator
@@ -437,8 +450,8 @@ Found while building P-Agent-A's code and reviewing P-Agent-B's coder. Each has 
 
 | # | Decision | In plain words | Suggestion | Owner |
 |---|---|---|---|---|
-| Q51 | Where builds run | `agents/coder/tools/build.py` runs `npm` on the machine that calls it. On the backend server, that runs AI-written code on the server | Builds run only in the Nebius sandbox through `sandbox/runner.py`. The local runner is for development on a laptop | P-DB, P-Agent-B |
-| Q52 | How the coder saves files | `agents/coder/tools/files.py` writes straight to disk, so no `file.changed` event is emitted, and rewind, checkpoints, the code view, and locks never see the change. The coder's versions are content hashes, while `PUT /files` uses a version number | Coder file tools go through the actor (`actor.ask`, answered with a new version or `stale`) and the store and manifest (§9). Use one version style everywhere: the manifest's version number | P-API, P-DB, P-Agent-B |
+| Q51 | Where builds run | `agents/coder/tools/build.py` runs `npm` on the machine that calls it. On the backend server, that runs AI-written code on the server | Builds run only in the Nebius sandbox through `sandbox/runner.py`. The local runner is for development on a laptop. **Done 2026-10-04** (§12) | P-DB, P-Agent-B |
+| Q52 | How the coder saves files | `agents/coder/tools/files.py` writes straight to disk, so no `file.changed` event is emitted, and rewind, checkpoints, the code view, and locks never see the change. The coder's versions are content hashes, while `PUT /files` uses a version number | Coder file tools go through the actor (`actor.ask`, answered with a new version or `stale`) and the store and manifest (§9). Use one version style everywhere: the manifest's version number. **Done 2026-10-04,** through `RoomFiles` rather than `actor.ask` (§9); `base_version` is now an integer in the tool schema. Still to do (P-API): the actor creates one `RoomFiles` per room with its `emit`, `PUT /files` calls it, and the coder gets `RoomFileTools` and the sandbox runner | P-API, P-DB, P-Agent-B |
 | Q53 | Who builds the starter template | `templates/fullstack-starter/` is still one-line stubs; only `CONVENTIONS.md` is written. Nothing can be built or demoed without it | P-Agent-B owns it, done early in week 2 | P-Agent-B |
 | Q54 | The naive baseline for the token target | §8 promises at least 40% fewer tokens than a naive agent, but the naive agent is not defined; `evals/tokens/naive_agent.py` only records numbers | Naive means the same tasks with the full history, whole files, and no compaction. Run both on the same 20 prompts | P-Agent-B |
 | Q55 | What `list_files` returns | §7.3 says the repo map; the code returns the file paths under a directory, and the repo map goes into the context (§7.2) | Keep the code: paths from `list_files`, repo map in the context | P-Agent-B |
