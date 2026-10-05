@@ -30,17 +30,27 @@ class Batch:
         self._room_id = room_id
         self._next_seq = first_seq
 
-    async def emit(self, type:str, payload: BaseModel | dict, actor: str) -> EventEnvelope:
-        """Store one event in this transaction. It is broadcast after the commit."""
-        data = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else payload
+    def reserve(self, type: str, actor: str) -> EventEnvelope:
+        """An event with the next seq and an empty payload, for code that stores the event itself
+        (checkpoint.save). Pass the stored version to `stored`, or it is never broadcast."""
         event = EventEnvelope(
-            seq = self._next_seq, type=type, ts=datetime.now(UTC), room_id=self._room_id, actor=actor, payload=data,
+            seq = self._next_seq, type = type, ts=datetime.now(UTC), room_id=self._room_id, actor=actor, payload = {},
         )
-        await log.append(self._room_id, [event], session=self.session)
         self._next_seq += 1
-        self.events.append(event)
         return event
     
+    def stored(self, event: EventEnvelope) -> None:
+        """Broadcast after the commit an event that was stored in this transaction."""
+        self.events.append(event)
+
+    async def emit(self, type: str, payload: BaseModel | dict, actor: str) -> EventEnvelope:
+        """Store one event in this transaction. It is broadcast after the commit."""
+        data = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else payload
+        event = self.reserve(type, actor).model_copy(update={"payload": data})
+        await log.append(self._room_id, [event], session=self.session)
+        self.stored(event)
+        return event
+
 class Emitter:
     """Writes a room's events: next seq, store, then broadcast in seq order."""
 
@@ -77,8 +87,8 @@ class Emitter:
                 yield batch
             #only reached after the commit succeded
             if batch.events:
-                self.seq = batch.events[-1].seq
-            for event in batch.events: #still under the lock, so broadcasts keep seq order
+                self.seq = max(event.seq for event in batch.events)
+            for event in sorted(batch.events, key=lambda event: event.seq): #still under the lock, so broadcasts keep seq order
                 await self._safe_publish(event)
 
     async def emit(self, type:str, payload: BaseModel | dict, actor: str) -> EventEnvelope:

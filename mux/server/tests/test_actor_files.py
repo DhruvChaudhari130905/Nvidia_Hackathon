@@ -24,11 +24,11 @@ def publish(published):
 
 async def new_room(session_factory, publish):
     owner = uuid4()
-    return await RoomActor.create(owner, "r", publish, sessionmaker=session_factory), owner
+    return await RoomActor.create(owner, "r", publish, template={}, sessionmaker=session_factory), owner
 
 
 def types(published):
-    return [e.type for e in published[1:]]  # without room.created
+    return [e.type for e in published[2:]]  # without room.created and C0
 
 
 async def test_locked_save_creates_version_and_event(session_factory, publish, published):
@@ -87,7 +87,7 @@ async def test_idle_lock_expires(session_factory, publish, published):
     actor.locks["a.ts"] = FileLock(owner, time.monotonic() - LOCK_IDLE_S - 1)
     await actor.lock_file("a.ts", other)
     assert types(published) == ["file.locked", "file.unlocked", "file.locked"]
-    assert published[2].actor == "system"
+    assert published[3].actor == "system"
     assert actor.locks["a.ts"].user_id == other
 
 

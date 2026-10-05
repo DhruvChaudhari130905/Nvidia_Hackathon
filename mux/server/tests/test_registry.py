@@ -38,7 +38,7 @@ async def test_new_registry_opens_the_room_from_the_database(session_factory):
     assert reopened is not None
     assert reopened is not actor
     assert reopened.record == actor.record
-    assert reopened.emitter.seq == 2
+    assert reopened.emitter.seq == 3
 
 
 async def test_concurrent_gets_open_one_actor(session_factory):

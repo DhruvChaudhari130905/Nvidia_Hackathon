@@ -4,28 +4,33 @@ Every change is an event. The actor writes the event, plus any rows that go with
 transaction, and updates its in-memory state only after the commit. Permission checks are the API's job.
 """
 
-import time
+
 import asyncio
-from dataclasses import replace, dataclass
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from mux.checkpoints import checkpoint, rewind
+from mux.checkpoints.checkpoint import CheckpointRow, LogRow
 from mux.db.session import get_sessionmaker
 from mux.events import log
 from mux.events.models import (
-    DomainRole, LinkAccess, MemberJoined, MemberPermission, MemberRoleChanged, MessagePosted, MessageTo,
-    Permission, PlanItem, PlanItems, PlanItemUpdated, RoomCreated, SharingChanged, TaskRef, FileLockChanged,
+    DomainRole, FileLockChanged, LinkAccess, MemberJoined, MemberPermission, MemberRoleChanged, MessagePosted,
+    MessageTo, Permission, PlanItem, PlanItems, PlanItemUpdated, RoomCreated, SharingChanged, TaskRef,
 )
+from mux.files import manifest, store
+from mux.files.manifest import LiveFiles
+from mux.files.room_files import RoomFiles, SaveResult, check_path
+from mux.files.template import load_template
 from mux.rooms import plan as plans
 from mux.rooms import records
 from mux.rooms.emitter import Emitter, Publish
 from mux.rooms.records import Member, RoomRecord
 
-from mux.files import manifest, store
-from mux.files.manifest import LiveFiles
-from mux.files.room_files import RoomFiles, SaveResult, check_path
 
 LOCK_IDLE_S = 120
 
@@ -42,13 +47,25 @@ class FileLock:
 class RoomActor:
     """One room's state. Methods hold the actor lock, so changes apply one at a time."""
 
-    def __init__(self, record: RoomRecord, emitter: Emitter, plan: plans.Plan = (), live: LiveFiles | None = None) -> None:
+    def __init__(
+        self,
+        record: RoomRecord,
+        emitter: Emitter,
+        plan: plans.Plan = (),
+        live: LiveFiles | None = None,
+        *,
+        checkpoints: dict[UUID, CheckpointRow] | None = None,
+        head_seq: int = 0,
+    ) -> None:
         self.record = record
         self.emitter = emitter
         self.plan = plan
-        self.files = RoomFiles(live or LiveFiles(), self._emit_file, put_blob= self._put_blob, get_blob=self._get_blob)
-        self.locks : dict[str, FileLock] = {}
-        self.edit_notes: list[str] = []  # manual edits the coder hears about at its next turn boundary (part F)
+        self.files = RoomFiles(live or LiveFiles(), self._emit_file, put_blob=self._put_blob, get_blob = self._get_blob)
+        self.locks: dict[str, FileLock] = {}
+        self.edit_notes: list[str] = [] # manual edits the coder hears about at its next turn boundary (part F)
+        self.checkpoints: dict[UUID, CheckpointRow] = checkpoints or {}
+        # Seq of the latest head change (checkpoint.created or room.rewound): the next checkpoint's start_seq (R4)
+        self.head_seq = head_seq
         self._lock = asyncio.Lock()
 
     @property
@@ -64,10 +81,13 @@ class RoomActor:
         *,
         description: str = "",
         domain_role: DomainRole | None = None,
+        template: Mapping[str, bytes] | None = None,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     ) -> "RoomActor":
-        """Create a room: its row, the owner's membership and 'room.created', in one transaction."""
+        """Create a room in one transaction: its row, the owner's membership, 'room.created', and checkpoint C0
+        from the starter template (tests pass `template` instead)."""
         maker = sessionmaker or get_sessionmaker()
+        files = load_template() if template is None else template
         room_id = uuid4()
         emitter = Emitter(room_id, 0, publish, sessionmaker=maker)
         async with emitter.transaction() as tx:
@@ -77,26 +97,36 @@ class RoomActor:
             await tx.emit(
                 "room.created", RoomCreated(owner_id=owner_id, title=title, description=description), str(owner_id)
             )
-        return cls(record, emitter)
+            event = tx.reserve("checkpoint.created", str(owner_id))
+            c0 = await checkpoint.create_root(room_id, files, event, session=tx.session)
+            tx.stored(event.model_copy(update={"payload": checkpoint.created_payload(c0)}))
+            root = await manifest.load(c0.manifest_id, session=tx.session)
+        live = LiveFiles(manifest=dict(root), high_water={path: entry.version for path, entry in root.items()})
+        actor = cls(record, emitter, live=live)
+        actor._new_head(c0)
+        return actor
 
     @classmethod
     async def open(
         cls, room_id: UUID, publish: Publish, *, sessionmaker: async_sessionmaker[AsyncSession] | None = None
     ) -> "RoomActor | None":
-        """Load an existing room, or None if it does not exist. Replaying its plan and files comes in step 5."""
+        """Load an existing room and replay its plan and files, or None if it does not exist."""
         maker = sessionmaker or get_sessionmaker()
         async with maker() as s:
             record = await records.load(room_id, session=s)
             if record is None:
                 return None
             events = await log.read_all(room_id, session=s)
+            checkpoints = await checkpoint.load_all(room_id, session=s)
             live = await LiveFiles.replay(events, lambda manifest_id: manifest.load(manifest_id, session=s))
         plan: plans.Plan = ()
         for event in events:
             plan = plans.apply(plan, event.type, event.payload)
         last_seq = events[-1].seq if events else 0
-        return cls(record, Emitter(room_id, last_seq, publish, sessionmaker=maker), plan, live)
-
+        head_seq = max((e.seq for e in events if e.type in rewind.HEAD_CHANGES), default=0)
+        return cls(record, Emitter(room_id, last_seq, publish, sessionmaker=maker), plan, live,
+                   checkpoints=checkpoints, head_seq=head_seq)
+    
     def role_of(self, user_id: UUID) -> Permission | None:
         """The user's permission in this room, or None if they have no access."""
         return self.record.role_of(user_id)
@@ -256,6 +286,34 @@ class RoomActor:
             new = plans.apply(self.plan, type, payload)
             await self.emitter.emit(type, payload, by)
             self.plan = new
+
+    async def save_checkpoint(
+        self, by: str, *, snapshot_uuid: str | None = None, log_body: str | None = None, pins: list | None = None
+    ) -> CheckpointRow:
+        """Checkpoint the live files and plan as a child of the head, with the task log if given.
+        It becomes the new head (called after every finished task)."""
+        async with self._lock:
+            async with self.emitter.transaction() as tx:
+                manifest_id = await manifest.save(self.room_id, self.files.manifest, session=tx.session)
+                event = tx.reserve("checkpoint.created", by)
+                cp = CheckpointRow(
+                    id=uuid4(), room_id=self.room_id, seq=event.seq, start_seq=self.head_seq,
+                    parent_id=self.record.head_checkpoint_id, manifest_id=manifest_id,
+                    sandbox_snapshot_uuid=snapshot_uuid, plan=[item.model_dump(mode="json") for item in self.plan],
+                )
+                task_log = None
+                if log_body is not None:
+                    task_log = LogRow(id=uuid4(), kind="task", body=log_body, pins=pins or [], checkpoint_id =cp.id)
+                row = await checkpoint.save(cp, task_log, event, session=tx.session)
+                tx.stored(event.model_copy(update={"payload": checkpoint.created_payload(row)}))
+            self._new_head(row)
+            return row
+    
+    def _new_head(self, cp: CheckpointRow) -> None:
+        """`cp` is the new head: remember it and start the next span after its seq."""
+        self.record = replace(self.record, head_checkpoint_id=cp.id)
+        self.checkpoints[cp.id] = cp
+        self.head_seq = cp.seq
 
     def _set_members(self, members: dict[UUID, Member]) -> None:
         self.record = replace(self.record, members=members)
