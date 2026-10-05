@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # Database (empty database_url: mux.dbsession falls back to local SQLite)
+    # Database: required, e.g. postgresql+asyncpg://mux:mux@localhost:5433/mux (the docker-compose Postgres)
     database_url: str = ""
     test_database_url: str = ""
     debug: bool = False
