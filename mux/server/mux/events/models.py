@@ -123,3 +123,9 @@ class TaskRef(Payload):
     """Payload of 'task.started' and 'task.finished'."""
 
     task_id: str
+
+class FileLockChanged(Payload):
+    """Payload of 'file.locked' and 'file.unlocked'. `user_id` is the lock's holder."""
+
+    path: str
+    user_id: UUID

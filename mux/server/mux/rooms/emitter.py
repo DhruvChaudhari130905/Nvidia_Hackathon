@@ -55,7 +55,7 @@ class Emitter:
         self.room_id = room_id
         self.seq = last_seq # highest commited seq
         self._publish = publish
-        self._sessionmaker = sessionmaker or get_sessionmaker()
+        self.sessionmaker = sessionmaker or get_sessionmaker()
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -72,7 +72,7 @@ class Emitter:
     async def transaction(self) -> AsyncIterator[Batch]:
         """A transaction for events and the writes that go with them. An exception inside stores nothing."""
         async with self._lock:
-            async with self._sessionmaker() as s, s.begin():
+            async with self.sessionmaker() as s, s.begin():
                 batch = Batch(self.room_id, self.seq + 1, s)
                 yield batch
             #only reached after the commit succeded

@@ -4,8 +4,9 @@ Every change is an event. The actor writes the event, plus any rows that go with
 transaction, and updates its in-memory state only after the commit. Permission checks are the API's job.
 """
 
+import time
 import asyncio
-from dataclasses import replace
+from dataclasses import replace, dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -15,21 +16,39 @@ from mux.db.session import get_sessionmaker
 from mux.events import log
 from mux.events.models import (
     DomainRole, LinkAccess, MemberJoined, MemberPermission, MemberRoleChanged, MessagePosted, MessageTo,
-    Permission, PlanItem, PlanItems, PlanItemUpdated, RoomCreated, SharingChanged, TaskRef,
+    Permission, PlanItem, PlanItems, PlanItemUpdated, RoomCreated, SharingChanged, TaskRef, FileLockChanged,
 )
 from mux.rooms import plan as plans
 from mux.rooms import records
 from mux.rooms.emitter import Emitter, Publish
 from mux.rooms.records import Member, RoomRecord
 
+from mux.files import manifest, store
+from mux.files.manifest import LiveFiles
+from mux.files.room_files import RoomFiles, SaveResult, check_path
+
+LOCK_IDLE_S = 120
+
+class FileLockError(PermissionError):
+    """Someone else holds the file's lock, or the saver does not hold it."""
+
+@dataclass
+class FileLock:
+    """A soft lock for manual editing. Kept in memory only (Q47): a rebuilt actor starts with none."""
+
+    user_id: UUID
+    touched: float # time.monotonic() of the last lock or save
 
 class RoomActor:
     """One room's state. Methods hold the actor lock, so changes apply one at a time."""
 
-    def __init__(self, record: RoomRecord, emitter: Emitter, plan: plans.Plan = ()) -> None:
+    def __init__(self, record: RoomRecord, emitter: Emitter, plan: plans.Plan = (), live: LiveFiles | None = None) -> None:
         self.record = record
         self.emitter = emitter
         self.plan = plan
+        self.files = RoomFiles(live or LiveFiles(), self._emit_file, put_blob= self._put_blob, get_blob=self._get_blob)
+        self.locks : dict[str, FileLock] = {}
+        self.edit_notes: list[str] = []  # manual edits the coder hears about at its next turn boundary (part F)
         self._lock = asyncio.Lock()
 
     @property
@@ -71,15 +90,90 @@ class RoomActor:
             if record is None:
                 return None
             events = await log.read_all(room_id, session=s)
+            live = await LiveFiles.replay(events, lambda manifest_id: manifest.load(manifest_id, session=s))
         plan: plans.Plan = ()
         for event in events:
             plan = plans.apply(plan, event.type, event.payload)
         last_seq = events[-1].seq if events else 0
-        return cls(record, Emitter(room_id, last_seq, publish, sessionmaker=maker), plan)
+        return cls(record, Emitter(room_id, last_seq, publish, sessionmaker=maker), plan, live)
 
     def role_of(self, user_id: UUID) -> Permission | None:
         """The user's permission in this room, or None if they have no access."""
         return self.record.role_of(user_id)
+    
+    async def lock_file(self, path: str, user_id: UUID) -> None:
+        """Take (or refresh) the soft lock on a file. Raises FileLockError if someone else holds it."""
+        check_path(path)
+        async with self._lock:
+            await self._expire_locks()
+            held = self.locks.get(path)
+            if held and held.user_id != user_id:
+                raise FileLockError(f"{path} is being edited by {held.user_id}")
+            if held is None:
+                await self.emitter.emit("file.locked", FileLockChanged(path=path, user_id=user_id), str(user_id))
+            self.locks[path] = FileLock(user_id, time.monotonic())
+
+    async def unlock_file(self, path: str, user_id: UUID, *, force: bool = False) -> bool:
+        """Release a lock. Only its holder can, unless `force` (the API sets it for the owner).
+        False if the file was not locked."""
+        async with self._lock:
+            held = self.locks.get(path)
+            if held is None:
+                return False
+            if held.user_id != user_id and not force:
+                raise FileLockError(f"{path} is locked by {held.user_id}")
+            await self._release(path, held, str(user_id))
+            return True
+    
+    async def release_user_locks(self, user_id: UUID) -> None:
+        """Release every lock the user holds (their last connection closed)."""
+        async with self._lock:
+            for path, held in list(self.locks.items()):
+                if held.user_id == user_id:
+                    await self._release(path, held, str(user_id))
+
+    async def save_file(self, path: str, content: bytes | None, base_version: int | None, user_id: UUID) -> SaveResult:
+        """Save a manual edit (None deletes). The saver must hold the lock. A stale base_version changes nothing:
+    the result then has ok=False and the current version."""
+        async with self._lock:
+            await self._expire_locks()
+            held = self.locks.get(path)
+            if held is None or held.user_id != user_id:
+                raise FileLockError(f"take the lock on {path} before saving")
+            self.locks[path] = FileLock(user_id, time.monotonic())
+            result = await self.files.save(path, content, base_version, str(user_id))
+            if result.changed:
+                before = f"v{base_version}" if base_version is not None else "new"
+                after = f"v{result.version}" if result.version is not None else "deleted"
+                self.edit_notes.append(f"{user_id} edited {path} ({before} -> {after})")
+            return result
+        
+    async def read_file(self, path: str) -> tuple[bytes, int]:
+        """A live file's bytes and version. Raises KeyError if it does not exist."""
+        return await self.files.read(path)
+    
+    async def _expire_locks(self) -> None:
+        """Release locks idle longer than LOCK_IDLE_S. The caller holds the actor lock."""
+        now = time.monotonic()
+        for path, held in list(self.locks.items()):
+            if now - held.touched > LOCK_IDLE_S:
+                await self._release(path, held, "system")
+
+    async def _release(self, path: str, held: FileLock, by: str) -> None:
+        await self.emitter.emit("file.unlocked", FileLockChanged(path = path, user_id=held.user_id), by)
+        del self.locks[path]
+
+    async def _emit_file(self, type: str, payload: dict) -> None:
+        """RoomFiles' emit. The saver recorded in the payload is the event's actor."""
+        await self.emitter.emit(type, payload, payload["actor"])
+
+    async def _put_blob(self, data: bytes) -> str:
+        async with self.emitter.sessionmaker() as s, s.begin():
+            return await store.put(data, session=s)
+
+    async def _get_blob(self, hash: str) -> bytes:
+        async with self.emitter.sessionmaker() as s:
+            return await store.get(hash, session=s)
 
     async def set_member(
         self, user_id: UUID, permission: MemberPermission, by: UUID, domain_role: DomainRole | None = None
