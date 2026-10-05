@@ -11,6 +11,7 @@ from mux.events.models import PlanItem, PlanItems, PlanItemUpdated, PlanStatus, 
 
 Plan = tuple[PlanItem, ...]
 
+
 def apply(plan: Plan, type: str, payload: dict[str, Any]) -> Plan:
     """The plan after one event; other event types leave it unchanged. Raises ValueError when a rule is broken."""
     if type in ("plan.drafted", "plan.edited"):
@@ -31,6 +32,11 @@ def apply(plan: Plan, type: str, payload: dict[str, Any]) -> Plan:
     if type == "task.finished":
         return _move(plan, TaskRef.model_validate(payload).task_id, "doing", "done")
     return plan
+
+
+def load(items: list[dict[str, Any]]) -> Plan:
+    """A plan as stored in a checkpoint, back as models."""
+    return _unique(tuple(PlanItem.model_validate(item) for item in items))
 
 
 def _unique(items: Plan) -> Plan:

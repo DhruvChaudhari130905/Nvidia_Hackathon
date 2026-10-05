@@ -14,12 +14,14 @@ from mux.db.tables import Membership, Room
 from mux.events.log import scoped
 from mux.events.models import DomainRole, LinkAccess, MemberPermission, Permission
 
+
 @dataclass(frozen=True)
 class Member:
     """One person's access to a room."""
 
     permission: Permission
     domain_role: DomainRole  | None
+
 
 @dataclass(frozen=True)
 class RoomRecord:
@@ -42,7 +44,8 @@ class RoomRecord:
         if self.link_access == "anyone":
             return self.link_permission or "viewer"
         return None
-    
+
+
 @dataclass(frozen=True)
 class RoomSummary:
     """One row of user's room list."""
@@ -52,6 +55,7 @@ class RoomSummary:
     description: str
     permission: Permission
     created_at: datetime
+
 
 async def create(
         owner_id: UUID,
@@ -75,6 +79,7 @@ async def create(
         members={owner_id: Member("owner", domain_role)},
     )
 
+
 async def load(room_id: UUID, *, session: AsyncSession | None = None) -> RoomRecord | None:
     """The room with its members, or None if it does not exist"""
     async with scoped(session) as s:
@@ -94,6 +99,7 @@ async def load(room_id: UUID, *, session: AsyncSession | None = None) -> RoomRec
             link_permission= cast(MemberPermission | None, room.link_permission),
             head_checkpoint_id= room.head_checkpoint_id, members=members,
         )
+
 
 async def set_member(
         room_id: UUID,
@@ -123,6 +129,7 @@ async def set_member(
             },
         ))
 
+
 async def set_sharing(
         room_id: UUID,
         link_access: LinkAccess,
@@ -147,7 +154,8 @@ async def set_sharing(
         )
         if updated is None:
             raise KeyError(room_id)
-        
+
+
 async def list_for_user(user_id: UUID, *, session: AsyncSession | None = None) -> list[RoomSummary]:
     """Rooms the user is a member of, newest first. A room open by link shows up once the user joins it."""
     async with scoped(session) as s:
@@ -160,5 +168,9 @@ async def list_for_user(user_id: UUID, *, session: AsyncSession | None = None) -
         return [
             RoomSummary(r.id, r.title, r.description, cast(Permission, r.permission), r.created_at) for r in rows
         ]
-    
 
+
+async def set_head(room_id: UUID, checkpoint_id: UUID, *, session: AsyncSession | None = None) -> None:
+    """Move the room's head checkpoint (a rewind). New checkpoints move it in checkpoint.save."""
+    async with scoped(session) as s:
+        await s.execute(update(Room).where(Room.id == room_id).values(head_checkpoint_id=checkpoint_id))

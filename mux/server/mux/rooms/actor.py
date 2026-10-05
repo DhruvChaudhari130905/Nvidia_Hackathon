@@ -62,7 +62,7 @@ class RoomActor:
         self.plan = plan
         self.files = RoomFiles(live or LiveFiles(), self._emit_file, put_blob=self._put_blob, get_blob = self._get_blob)
         self.locks: dict[str, FileLock] = {}
-        self.edit_notes: list[str] = [] # manual edits the coder hears about at its next turn boundary (part F)
+        self.edit_notes: list[str] = []  # manual edits the coder hears about at its next turn boundary (part F)
         self.checkpoints: dict[UUID, CheckpointRow] = checkpoints or {}
         # Seq of the latest head change (checkpoint.created or room.rewound): the next checkpoint's start_seq (R4)
         self.head_seq = head_seq
@@ -121,16 +121,19 @@ class RoomActor:
             live = await LiveFiles.replay(events, lambda manifest_id: manifest.load(manifest_id, session=s))
         plan: plans.Plan = ()
         for event in events:
-            plan = plans.apply(plan, event.type, event.payload)
+            if event.type == "room.rewound":  # the plan jumps to the checkpoint's, like the files do
+                plan = plans.load(checkpoints[UUID(event.payload["checkpoint_id"])].plan)
+            else:
+                plan = plans.apply(plan, event.type, event.payload)
         last_seq = events[-1].seq if events else 0
         head_seq = max((e.seq for e in events if e.type in rewind.HEAD_CHANGES), default=0)
         return cls(record, Emitter(room_id, last_seq, publish, sessionmaker=maker), plan, live,
                    checkpoints=checkpoints, head_seq=head_seq)
-    
+
     def role_of(self, user_id: UUID) -> Permission | None:
         """The user's permission in this room, or None if they have no access."""
         return self.record.role_of(user_id)
-    
+
     async def lock_file(self, path: str, user_id: UUID) -> None:
         """Take (or refresh) the soft lock on a file. Raises FileLockError if someone else holds it."""
         check_path(path)
@@ -154,7 +157,7 @@ class RoomActor:
                 raise FileLockError(f"{path} is locked by {held.user_id}")
             await self._release(path, held, str(user_id))
             return True
-    
+
     async def release_user_locks(self, user_id: UUID) -> None:
         """Release every lock the user holds (their last connection closed)."""
         async with self._lock:
@@ -177,11 +180,11 @@ class RoomActor:
                 after = f"v{result.version}" if result.version is not None else "deleted"
                 self.edit_notes.append(f"{user_id} edited {path} ({before} -> {after})")
             return result
-        
+
     async def read_file(self, path: str) -> tuple[bytes, int]:
         """A live file's bytes and version. Raises KeyError if it does not exist."""
         return await self.files.read(path)
-    
+
     async def _expire_locks(self) -> None:
         """Release locks idle longer than LOCK_IDLE_S. The caller holds the actor lock."""
         now = time.monotonic()
@@ -303,12 +306,31 @@ class RoomActor:
                 )
                 task_log = None
                 if log_body is not None:
-                    task_log = LogRow(id=uuid4(), kind="task", body=log_body, pins=pins or [], checkpoint_id =cp.id)
+                    task_log = LogRow(id=uuid4(), kind="task", body=log_body, pins=pins or [], checkpoint_id=cp.id)
                 row = await checkpoint.save(cp, task_log, event, session=tx.session)
                 tx.stored(event.model_copy(update={"payload": checkpoint.created_payload(row)}))
             self._new_head(row)
             return row
-    
+
+    async def rewind_to(self, checkpoint_id: UUID, by: str) -> rewind.HeadState:
+        """Move the head to a checkpoint (back or forward): its files, plan and log become current at once.
+        Later events stay in the log and the UI greys them out. Raises KeyError for an unknown checkpoint."""
+        async with self._lock:
+            target = self.checkpoints[checkpoint_id]
+            async with self.files.lock:  # no save may land between computing the versions and applying them
+                async with self.emitter.transaction() as tx:
+                    logs = await checkpoint.load_logs(self.room_id, session=tx.session)
+                    state = rewind.head_state(target.id, self.checkpoints, logs)
+                    files = await manifest.load(state.manifest_id, session=tx.session)
+                    payload = rewind.rewound_payload(self.files.live, target.id, files)
+                    event = await tx.emit("room.rewound", payload, by)
+                    await records.set_head(self.room_id, target.id, session=tx.session)
+                self.files.live.apply_rewound(payload, files)
+            self.plan = plans.load(target.plan)
+            self.record = replace(self.record, head_checkpoint_id=target.id)
+            self.head_seq = event.seq
+            return state
+
     def _new_head(self, cp: CheckpointRow) -> None:
         """`cp` is the new head: remember it and start the next span after its seq."""
         self.record = replace(self.record, head_checkpoint_id=cp.id)

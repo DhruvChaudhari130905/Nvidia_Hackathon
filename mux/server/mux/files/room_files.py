@@ -65,7 +65,7 @@ class RoomFiles:
         self._emit = emit
         self._put_blob = put_blob
         self._get_blob = get_blob
-        self._lock = asyncio.Lock()  # check-then-write must not interleave between the coder and a person
+        self.lock = asyncio.Lock()  # check-then-write must not interleave between the coder and a person
 
     @property
     def manifest(self) -> Manifest:
@@ -85,7 +85,7 @@ class RoomFiles:
     async def save(self, path: str, data: bytes | None, base_version: int | None, actor: str) -> SaveResult:
         """Write `data` (None deletes) if `base_version` is current (None: the file must not exist yet)."""
         check_path(path)
-        async with self._lock:
+        async with self.lock:
             current = self.live.manifest.get(path)
             current_version = current.version if current else None
             if base_version != current_version:
