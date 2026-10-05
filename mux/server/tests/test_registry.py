@@ -1,5 +1,4 @@
-
-"""RoomRegistry: one actor per room, opened from the database after a restart."""
+"""RoomRegistry: one actor per room, opened from the database after a restart, ticks stopped on close."""
 
 import asyncio
 from uuid import uuid4
@@ -19,6 +18,7 @@ async def test_create_then_get_returns_the_same_actor(session_factory):
     actor = await registry.create(uuid4(), "r")
     assert await registry.get(actor.room_id) is actor
     assert registry.open_rooms() == [actor.room_id]
+    await registry.close()
 
 
 async def test_unknown_room_is_none_and_not_kept(session_factory):
@@ -32,6 +32,7 @@ async def test_new_registry_opens_the_room_from_the_database(session_factory):
     before_restart = RoomRegistry(publish, sessionmaker=session_factory)
     actor = await before_restart.create(owner, "r")
     await actor.post_message(owner, "hi")
+    await before_restart.close()
 
     after_restart = RoomRegistry(publish, sessionmaker=session_factory)
     reopened = await after_restart.get(actor.room_id)
@@ -39,14 +40,27 @@ async def test_new_registry_opens_the_room_from_the_database(session_factory):
     assert reopened is not actor
     assert reopened.record == actor.record
     assert reopened.emitter.seq == 3
+    await after_restart.close()
 
 
 async def test_concurrent_gets_open_one_actor(session_factory):
-    actor = await RoomRegistry(publish, sessionmaker=session_factory).create(uuid4(), "r")
+    first = RoomRegistry(publish, sessionmaker=session_factory)
+    actor = await first.create(uuid4(), "r")
+    await first.close()
     fresh = RoomRegistry(publish, sessionmaker=session_factory)
     opened = await asyncio.gather(*(fresh.get(actor.room_id) for _ in range(5)))
     assert opened[0] is not None
     assert all(a is opened[0] for a in opened)
+    await fresh.close()
+
+
+async def test_close_stops_every_tick(session_factory):
+    registry = RoomRegistry(publish, sessionmaker=session_factory)
+    actor = await registry.create(uuid4(), "r")
+    assert actor._ticker is not None
+    await registry.close()
+    assert actor._ticker is None
+    assert registry.open_rooms() == []
 
 
 def test_get_registry_needs_init(monkeypatch):
@@ -55,4 +69,3 @@ def test_get_registry_needs_init(monkeypatch):
         get_registry()
     registry = init_registry(publish)
     assert get_registry() is registry
-    

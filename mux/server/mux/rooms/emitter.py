@@ -38,7 +38,7 @@ class Batch:
         )
         self._next_seq += 1
         return event
-    
+
     def stored(self, event: EventEnvelope) -> None:
         """Broadcast after the commit an event that was stored in this transaction."""
         self.events.append(event)
@@ -77,7 +77,7 @@ class Emitter:
         async with maker() as s:
             last = await log.max_seq(room_id, session=s)
         return cls(room_id, last, publish, sessionmaker=maker)
-    
+
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Batch]:
         """A transaction for events and the writes that go with them. An exception inside stores nothing."""
@@ -95,10 +95,19 @@ class Emitter:
         """One event in its own transaction."""
         async with self.transaction() as tx:
             return await tx.emit(type, payload, actor)
-        
+
+    async def broadcast(self, type: str, payload: BaseModel, actor: str) -> None:
+        """Send an event that is never stored (presence). It carries the last stored seq,
+        so it does not move a client's ?since."""
+        event = EventEnvelope(
+            seq=self.seq, type=type, ts=datetime.now(UTC), room_id=self.room_id, actor=actor,
+            payload=payload.model_dump(mode="json"),
+        )
+        await self._safe_publish(event)
+
     async def _safe_publish(self, event: EventEnvelope) -> None:
         # The event is stored, so a client that missed it gets it back on reconnect with ?since
-        try: 
+        try:
             await self._publish(event)
         except Exception:
             logger.exception("Publishing event %s of room %s failed", event.seq, self.room_id)

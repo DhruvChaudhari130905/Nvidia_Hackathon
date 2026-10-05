@@ -4,12 +4,15 @@ Every change is an event. The actor writes the event, plus any rows that go with
 transaction, and updates its in-memory state only after the commit. Permission checks are the API's job.
 """
 
+import contextlib
+import logging
+from collections.abc import Awaitable, Callable, Mapping   # Awaitable and Callable are new
 
 import asyncio
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -21,6 +24,7 @@ from mux.events import log
 from mux.events.models import (
     DomainRole, FileLockChanged, LinkAccess, MemberJoined, MemberPermission, MemberRoleChanged, MessagePosted,
     MessageTo, Permission, PlanItem, PlanItems, PlanItemUpdated, RoomCreated, SharingChanged, TaskRef,
+    PresenceJoined, PresenceLeft, PresenceTab, PresenceTyping, RoomPaused, SittingEnded, Tab,
 )
 from mux.files import manifest, store
 from mux.files.manifest import LiveFiles
@@ -28,11 +32,16 @@ from mux.files.room_files import RoomFiles, SaveResult, check_path
 from mux.files.template import load_template
 from mux.rooms import plan as plans
 from mux.rooms import records
-from mux.rooms.emitter import Emitter, Publish
+from mux.rooms import budget as budgets
+from mux.rooms.emitter import Batch, Emitter, Publish
 from mux.rooms.records import Member, RoomRecord
 
 
 LOCK_IDLE_S = 120
+SITTING_IDLE_S = 30 * 60  # a sitting ends when nobody has been connected for 30 minutes
+TICK_S = 10  # how often the background tick runs
+
+logger = logging.getLogger(__name__)
 
 class FileLockError(PermissionError):
     """Someone else holds the file's lock, or the saver does not hold it."""
@@ -43,6 +52,15 @@ class FileLock:
 
     user_id: UUID
     touched: float # time.monotonic() of the last lock or save
+
+@dataclass(frozen=True)
+class Presence:
+    """Who is connected. Never stored: it is rebuilt from live connections."""
+    user_id: UUID
+    name: str | None
+    connections: int = 1 # open sockets; a user with two tabs leaves when the last one closes
+    tab: Tab | None = None
+    typing: bool = False
 
 class RoomActor:
     """One room's state. Methods hold the actor lock, so changes apply one at a time."""
@@ -56,11 +74,18 @@ class RoomActor:
         *,
         checkpoints: dict[UUID, CheckpointRow] | None = None,
         head_seq: int = 0,
+        budget: budgets.Budget | None = None,
     ) -> None:
         self.record = record
         self.emitter = emitter
         self.plan = plan
         self.files = RoomFiles(live or LiveFiles(), self._emit_file, put_blob=self._put_blob, get_blob = self._get_blob)
+        self.budget = budget or budgets.Budget()
+        self.presence: dict[UUID, Presence] = {}
+        self.sitting_active = False  # a sitting starts when someone connects
+        self.empty_since: float | None = None  # monotonic time the last person left, while a sitting is on
+        self.on_sitting_end: Callable[[str], Awaitable[None]] | None = None  # part F: writes the day log
+        self._ticker: asyncio.Task[None] | None = None
         self.locks: dict[str, FileLock] = {}
         self.edit_notes: list[str] = []  # manual edits the coder hears about at its next turn boundary (part F)
         self.checkpoints: dict[UUID, CheckpointRow] = checkpoints or {}
@@ -118,6 +143,7 @@ class RoomActor:
                 return None
             events = await log.read_all(room_id, session=s)
             checkpoints = await checkpoint.load_all(room_id, session=s)
+            budget = await budgets.load(room_id, session=s)
             live = await LiveFiles.replay(events, lambda manifest_id: manifest.load(manifest_id, session=s))
         plan: plans.Plan = ()
         for event in events:
@@ -128,7 +154,7 @@ class RoomActor:
         last_seq = events[-1].seq if events else 0
         head_seq = max((e.seq for e in events if e.type in rewind.HEAD_CHANGES), default=0)
         return cls(record, Emitter(room_id, last_seq, publish, sessionmaker=maker), plan, live,
-                   checkpoints=checkpoints, head_seq=head_seq)
+                   checkpoints=checkpoints, head_seq=head_seq, budget=budget)
 
     def role_of(self, user_id: UUID) -> Permission | None:
         """The user's permission in this room, or None if they have no access."""
@@ -159,11 +185,15 @@ class RoomActor:
             return True
 
     async def release_user_locks(self, user_id: UUID) -> None:
-        """Release every lock the user holds (their last connection closed)."""
+        """Release every lock the user holds"""
         async with self._lock:
-            for path, held in list(self.locks.items()):
-                if held.user_id == user_id:
-                    await self._release(path, held, str(user_id))
+            await self._release_locks_of(user_id)
+
+    async def _release_locks_of(self, user_id:UUID) -> None:
+        """release_user_locks for a caller that holds the actor lock."""
+        for path, held in list(self.locks.items()):
+            if held.user_id == user_id:
+                await self._release(path, held, str(user_id))
 
     async def save_file(self, path: str, content: bytes | None, base_version: int | None, user_id: UUID) -> SaveResult:
         """Save a manual edit (None deletes). The saver must hold the lock. A stale base_version changes nothing:
@@ -330,6 +360,156 @@ class RoomActor:
             self.record = replace(self.record, head_checkpoint_id=target.id)
             self.head_seq = event.seq
             return state
+
+
+    # ---- budget ----
+
+    @property
+    def paused(self) -> bool:
+        """True while a budget cap is reached. The coder does not start work then (part F)."""
+        return self.budget.over is not None
+
+    async def charge(self, tokens: int = 0, runs: int = 0, by: str = "agent") -> None:
+        """Record spent tokens and sandbox runs. They are already spent, so they always count;
+        reaching a cap pauses the room."""
+        if tokens < 0 or runs < 0:
+            raise ValueError("usage cannot be negative")
+        if tokens == 0 and runs == 0:
+            return
+        async with self._lock:
+            new = replace(self.budget, tokens_used=self.budget.tokens_used + tokens, runs_used=self.budget.runs_used + runs)
+            async with self.emitter.transaction() as tx:
+                await budgets.add_usage(self.room_id, tokens, runs, session=tx.session)
+                await self._emit_budget(tx, new, by)
+            self.budget = new
+
+    async def set_budget_caps(self, tokens_cap: int, runs_cap: int, by: str) -> None:
+        """New caps (the API checks that `by` is the owner). Caps above the usage resume a paused room;
+        caps below it pause the room."""
+        if tokens_cap < 1 or runs_cap < 1:
+            raise ValueError("caps must be at least 1")
+        async with self._lock:
+            new = replace(self.budget, tokens_cap=tokens_cap, runs_cap=runs_cap)
+            async with self.emitter.transaction() as tx:
+                await budgets.set_caps(self.room_id, tokens_cap, runs_cap, session=tx.session)
+                await self._emit_budget(tx, new, by)
+            self.budget = new
+
+    async def _emit_budget(self, tx: Batch, new: budgets.Budget, by: str) -> None:
+        """'budget.updated', plus 'room.paused' or 'room.resumed' when the room crosses a cap."""
+        await tx.emit("budget.updated", new.payload(), by)
+        if new.over and not self.budget.over:
+            await tx.emit("room.paused", RoomPaused(reason=new.over), by)
+        elif self.budget.over and not new.over:
+            await tx.emit("room.resumed", {}, by)
+
+    # ---- presence ----
+
+    async def connect(self, user_id: UUID, name: str | None = None) -> None:
+        """A socket opened. A user's first connection announces them and starts a sitting if none is on."""
+        async with self._lock:
+            current = self.presence.get(user_id)
+            if current is not None:
+                self.presence[user_id] = replace(current, connections=current.connections + 1)
+                return
+            self.presence[user_id] = Presence(user_id, name)
+            self.sitting_active = True
+            self.empty_since = None
+            joined = PresenceJoined(user_id=user_id, name=name, tab=None, typing=False)
+            await self.emitter.broadcast("presence.join", joined, str(user_id))
+
+    async def disconnect(self, user_id: UUID) -> None:
+        """A socket closed. When the user's last connection is gone they leave, and their file locks are released."""
+        async with self._lock:
+            current = self.presence.get(user_id)
+            if current is None:
+                return
+            if current.connections > 1:
+                self.presence[user_id] = replace(current, connections=current.connections - 1)
+                return
+            del self.presence[user_id]
+            await self.emitter.broadcast("presence.leave", PresenceLeft(user_id=user_id), str(user_id))
+            await self._release_locks_of(user_id)
+            if not self.presence and self.sitting_active:
+                self.empty_since = time.monotonic()
+
+    async def set_tab(self, user_id: UUID, tab: Tab) -> None:
+        """The user switched tabs. Ignored for users who are not connected, and for no change."""
+        async with self._lock:
+            current = self.presence.get(user_id)
+            if current is None or current.tab == tab:
+                return
+            self.presence[user_id] = replace(current, tab=tab)
+            await self.emitter.broadcast("presence.tab", PresenceTab(user_id=user_id, tab=tab), str(user_id))
+
+    async def set_typing(self, user_id: UUID, typing: bool) -> None:
+        """The user started or stopped typing. Ignored for users who are not connected, and for no change."""
+        async with self._lock:
+            current = self.presence.get(user_id)
+            if current is None or current.typing == typing:
+                return
+            self.presence[user_id] = replace(current, typing=typing)
+            await self.emitter.broadcast("presence.typing", PresenceTyping(user_id=user_id, typing=typing), str(user_id))
+
+    # ---- sitting and the background tick ----
+
+    async def end_session(self, by: UUID) -> bool:
+        """The owner ends the sitting (the API checks it is the owner). False if no sitting is on."""
+        async with self._lock:
+            ended = await self._end_sitting("owner", str(by))
+        if ended:
+            await self._sitting_ended("owner")
+        return ended
+
+    async def tick(self) -> None:
+        """Housekeeping, every TICK_S: expire idle locks, and end the sitting once nobody has been
+        connected for SITTING_IDLE_S."""
+        async with self._lock:
+            await self._expire_locks()
+            idle = self.empty_since is not None and time.monotonic() - self.empty_since > SITTING_IDLE_S
+            ended = idle and await self._end_sitting("idle", "system")
+        if ended:
+            await self._sitting_ended("idle")
+
+    def start(self) -> None:
+        """Start the background tick (the registry calls this). Calling it twice is harmless."""
+        if self._ticker is None:
+            self._ticker = asyncio.create_task(self._tick_forever(), name=f"room-{self.room_id}-tick")
+
+    async def stop(self) -> None:
+        """Stop the background tick (app shutdown)."""
+        if self._ticker is not None:
+            self._ticker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._ticker
+            self._ticker = None
+
+    async def _tick_forever(self) -> None:
+        while True:
+            await asyncio.sleep(TICK_S)
+            try:
+                await self.tick()
+            except Exception:
+                logger.exception("Tick failed in room %s", self.room_id)
+
+    async def _end_sitting(self, reason: Literal["idle", "owner"], by: str) -> bool:
+        """Store 'sitting.ended'. The caller holds the actor lock. False if no sitting is on."""
+        if not self.sitting_active:
+            return False
+        await self.emitter.emit("sitting.ended", SittingEnded(reason=reason), by)
+        self.sitting_active = False
+        self.empty_since = None
+        return True
+
+    async def _sitting_ended(self, reason: Literal["idle", "owner"]) -> None:
+        """Run the sitting-end hook outside the actor lock: part F's day log calls the model, which takes seconds."""
+        if self.on_sitting_end is None:
+            return
+        try:
+            await self.on_sitting_end(reason)
+        except Exception:
+            logger.exception("Sitting-end hook failed in room %s", self.room_id)
+
 
     def _new_head(self, cp: CheckpointRow) -> None:
         """`cp` is the new head: remember it and start the next span after its seq."""
