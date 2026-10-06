@@ -11,6 +11,7 @@ Versions are the manifest's numbers (v1, v2, ...) everywhere (Q52):
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -87,10 +88,12 @@ def _list_under(paths: Iterable[str], path: str) -> dict[str, Any]:
 
 
 class RoomFileTools:
-    """Coder file tools over the room's live files (production)."""
+    """Coder file tools over the room's live files (production). A file a person has locked for editing
+    is read-only for the coder until they let go."""
 
-    def __init__(self, files: RoomFiles) -> None:
+    def __init__(self, files: RoomFiles, locked_by: Callable[[str], str | None] = lambda path: None) -> None:
         self.files = files
+        self._locked_by = locked_by
 
     async def _text(self, path: str) -> tuple[str, int]:
         try:
@@ -105,6 +108,9 @@ class RoomFileTools:
             raise FileToolError(f"binary file: {path}") from exc
 
     async def _save(self, path: str, data: bytes | None, base_version: int | None) -> Any:
+        holder = self._locked_by(path)
+        if holder is not None:
+            raise FileToolError(f"{path} is being edited by {holder}; work on other files and come back later")
         try:
             return await self.files.save(path, data, base_version, CODER)
         except InvalidPath as exc:

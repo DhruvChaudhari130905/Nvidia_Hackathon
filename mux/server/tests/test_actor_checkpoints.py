@@ -64,8 +64,9 @@ async def test_save_checkpoint_after_an_edit(session_factory, publish, published
     assert (cp.parent_id, cp.start_seq, cp.sandbox_snapshot_uuid) == (c0_id, 2, "snap-1")
     assert actor.record.head_checkpoint_id == cp.id
     assert actor.head_seq == cp.seq
-    assert (published[-1].type, published[-1].seq) == ("checkpoint.created", cp.seq)
-    assert published[-1].payload["checkpoint_id"] == str(cp.id)
+    assert (published[-2].type, published[-2].seq) == ("checkpoint.created", cp.seq)
+    assert published[-2].payload["checkpoint_id"] == str(cp.id)
+    assert (published[-1].type, published[-1].payload["checkpoint_id"]) == ("log.task_written", str(cp.id))
     assert cp.plan == [actor.plan[0].model_dump(mode="json")]
     async with session_factory() as s:
         saved = await manifest.load(cp.manifest_id, session=s)

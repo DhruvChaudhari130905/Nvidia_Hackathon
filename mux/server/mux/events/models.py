@@ -12,7 +12,8 @@ MemberPermission = Literal["editor", "viewer"] #what can be granted: the owner i
 DomainRole = Literal["pm", "design", "eng"]
 LinkAccess = Literal["restricted", "anyone"]
 MessageTo = Literal["agent", "team"]
-PlanStatus = Literal["draft", "todo", "doing", "done", "skipped_conflict", "skipped_question"]
+# blocked: the coder gave up on the task (turn limit, a loop, a repeated error); a person sets it back to todo
+PlanStatus = Literal["draft", "todo", "doing", "done", "skipped_conflict", "skipped_question", "blocked"]
 Tab = Literal["feed", "preview", "code", "cards"]
 BudgetLimit = Literal["tokens", "runs"]
 # The coordinator's labels, plus "plan": the first message to a room with no plan drafts one
@@ -225,6 +226,53 @@ class PlanItemUpdated(Payload):
 
     id: str
     changes: dict[str, Any]
+
+
+class AgentText(Payload):
+    """Payload of 'agent.text' (stored, the full text of one coder turn) and 'agent.text.delta' (broadcast only)."""
+
+    task_id: str
+    text: str
+
+
+class ToolCalled(Payload):
+    """Payload of 'tool.called'. Long string arguments (file contents) are cut short."""
+
+    task_id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+class ToolResult(Payload):
+    """Payload of 'tool.result': whether the call worked, and a one-line summary."""
+
+    task_id: str
+    name: str
+    ok: bool
+    summary: str
+
+
+class BuildResult(Payload):
+    """Payload of 'build.result' and 'test.result': at most 5 errors, and the snapshot of a passing build."""
+
+    task_id: str
+    passed: bool
+    errors: list[str] = Field(default_factory=list)
+    snapshot_uuid: str | None = None
+
+
+class TurnInterrupted(Payload):
+    """Payload of 'turn.interrupted': the coder stopped at a turn boundary and starts the task again."""
+
+    task_id: str
+    reason: str
+
+
+class LogWritten(Payload):
+    """Payload of 'log.task_written' and 'log.day_written'."""
+
+    log_id: UUID
+    checkpoint_id: UUID
 
 
 class TaskRef(Payload):

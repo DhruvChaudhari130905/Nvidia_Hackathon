@@ -115,8 +115,7 @@ class RoomCoordinator:
             current = plans.current(self.actor.plan)
             if current is None:  # nothing in progress to merge into, so it becomes a task of its own
                 return await self._queue(AddPlanItem(title=message.text[:80]))
-            notes = [*current.merged_notes, message.text]
-            await self.actor.update_plan_item(current.id, {"merged_notes": notes}, "agent")
+            await self.actor.add_note(current.id, message.text)
             if action.label == "interrupt":
                 self.actor.interrupt_requested = True
             return current.id

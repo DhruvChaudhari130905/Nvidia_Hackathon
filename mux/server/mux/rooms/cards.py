@@ -34,6 +34,7 @@ class Conflict:
     votes: dict[UUID, str] = field(default_factory=dict)  # user -> option
     result: str | None = None  # set when closed
     resolved_by: str | None = None
+    totals: dict[str, int] = field(default_factory=dict)
     owner_asked: bool = False  # a tie was reported to the owner (memory only: asked again after a restart)
 
     @property
@@ -77,7 +78,7 @@ class Cards:
         elif type == "conflict.closed":
             closed = ConflictClosed.model_validate(payload)
             c = self.conflicts[closed.conflict_id]
-            c.result, c.resolved_by = closed.result, closed.resolved_by
+            c.result, c.resolved_by, c.totals = closed.result, closed.resolved_by, closed.totals
         elif type == "question.opened":
             q = QuestionOpened.model_validate(payload)
             self.questions[q.id] = Question(q.id, q.task_id, q.text, q.options, q.default, q.expires_at)

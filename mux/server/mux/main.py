@@ -15,6 +15,7 @@ from tavily import AsyncTavilyClient
 
 from mux.agents.llm import TokenFactoryLLM
 from mux.integrations.tavily import TavilySearch
+from mux.sandbox.client import TokenFactorySandboxClient
 from mux.api import rooms, ws
 from mux.config import settings
 from mux.events.bus import event_bus
@@ -36,7 +37,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         search = lambda: TavilySearch(client)  # noqa: E731
     else:
         logger.warning("TAVILY_API_KEY is not set: conflict votes open without research")
-    registry = init_registry(event_bus.publish, llm=llm, search=search)
+    sandbox = None
+    if settings.sandbox_api_key:
+        sandbox = TokenFactorySandboxClient(settings.sandbox_api_key, settings.sandbox_base_url)
+    else:
+        logger.warning("SANDBOX_API_KEY is not set: the coder cannot build or test")
+    registry = init_registry(
+        event_bus.publish, llm=llm, search=search, sandbox=sandbox, sandbox_image=settings.sandbox_image
+    )
     yield
     await registry.close()
 

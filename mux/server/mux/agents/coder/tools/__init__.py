@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 from typing import Any, Awaitable, Callable
 
@@ -11,10 +10,9 @@ from mux.integrations.tavily import WebSearch
 from mux.sandbox.runner import Runner
 
 from .ask import ask_room
-from .build import run_build, run_tests
 from .files import FileTools, RoomFileTools
 from .finish import finish_task
-from .plan import PlanTool, update_plan
+from .plan import PlanTool
 from .search import web_search
 
 QuestionCallback = Callable[[dict[str, Any]], Awaitable[Any] | Any]
@@ -166,15 +164,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "update_plan",
-            "description": "Update or split the current plan task.",
+            "description": "Split the current task into 2 to 5 smaller tasks. You keep working on the first one.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task_id": {"type": "string"},
-                    "status": {"type": ["string", "null"], "enum": ["todo", "doing", "done", None]},
-                    "split": {"type": ["array", "null"], "items": {"type": "string"}},
+                    "split": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["task_id"],
+                "required": ["task_id", "split"],
             },
         },
     },
@@ -198,9 +195,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 class CoderToolExecutor:
     """Dispatch model tool calls to coder tools. Tool errors come back as {"ok": False, "error": ...}.
 
-    Production passes `RoomFileTools` and a sandbox `runner`: builds and tests then run in the Nebius
-    sandbox on the room's live manifest (Q51). Local npm runs only when `build_root` is given explicitly,
-    for development on a laptop; with neither, run_build and run_tests return an error.
+    Production passes `RoomFileTools` and a sandbox `runner`: builds and tests run in the Nebius sandbox on
+    the room's live manifest (Q51), never on the server. Without a runner, run_build and run_tests return an error.
     """
 
     def __init__(
@@ -208,7 +204,6 @@ class CoderToolExecutor:
         files: FileTools | RoomFileTools,
         *,
         runner: Runner | None = None,
-        build_root: str | None = None,
         search: WebSearch | None = None,
         plan: PlanTool | None = None,
         on_question: QuestionCallback | None = None,
@@ -217,7 +212,6 @@ class CoderToolExecutor:
             raise TypeError("a sandbox runner builds the room's files, so it needs RoomFileTools")
         self.files = files
         self.runner = runner
-        self.build_root = build_root
         self.search = search
         self.plan = plan
         self.on_question = on_question
@@ -236,7 +230,7 @@ class CoderToolExecutor:
             "run_tests": self._run_tests,
             "web_search": lambda query: web_search(self.search, query),
             "ask_room": self._ask_room,
-            "update_plan": lambda **kwargs: update_plan(**kwargs, plan=self.plan),
+            "update_plan": self._update_plan,
             "finish_task": finish_task,
         }
         handler = handlers.get(name)
@@ -258,10 +252,7 @@ class CoderToolExecutor:
             self.snapshot_uuid = res.snapshot_uuid
             return {"ok": res.passed, "passed": res.passed, "operation": "build", "errors": res.errors,
                     "duration_s": res.duration_s}
-        if self.build_root is None:
-            return {"ok": False, "passed": False, "operation": "build", "errors": ["builds are not configured"]}
-        # builds block for minutes, so they run in a thread instead of stalling every room
-        return await asyncio.to_thread(run_build, self.build_root)
+        return {"ok": False, "passed": False, "operation": "build", "errors": ["builds are not configured"]}
 
     async def _run_tests(self, pattern: str | None = None) -> dict[str, Any]:
         if self.runner is not None:
@@ -269,9 +260,12 @@ class CoderToolExecutor:
             res = await self.runner.test(self.files.files.manifest, pattern)
             return {"ok": res.passed, "passed": res.passed, "operation": "tests", "errors": res.failures,
                     "passed_count": res.passed_count, "failed_count": res.failed_count}
-        if self.build_root is None:
-            return {"ok": False, "passed": False, "operation": "tests", "errors": ["tests are not configured"]}
-        return await asyncio.to_thread(run_tests, self.build_root, pattern)
+        return {"ok": False, "passed": False, "operation": "tests", "errors": ["tests are not configured"]}
+
+    async def _update_plan(self, task_id: str, split: list[str]) -> dict[str, Any]:
+        if self.plan is None:
+            return {"ok": False, "error": "plan is not available"}
+        return await self.plan.split(task_id, split)
 
     async def _ask_room(self, **arguments: Any) -> dict[str, Any]:
         card = ask_room(**arguments)

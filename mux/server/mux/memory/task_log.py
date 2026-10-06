@@ -12,6 +12,7 @@ from mux.agents.llm import LLM, ModelRole, Usage
 from mux.memory.pins import Pin, merge_pins, render_pins
 
 LOG_CHAR_LIMIT = 2400 # about 600 tokens, not counting pins
+PINS_HEADING = "Pinned team decisions (do not change these):"
 
 TASK_LOG_SYSTEM = """You keep the memory of a coding agent that builds a web app for a team. After each task you rewrite the room log. The next task starts from this log alone, so it must hold everything that still matters.
 
@@ -39,6 +40,13 @@ class Log:
     @property
     def body(self) -> str:
         return render_log(self.draft, self.pins)
+
+    @classmethod
+    def stored(cls, body: str, pins: list[dict]) -> Log:
+        """A log back from its stored body and pins. The sections are not split again: the whole text goes in
+        `app`, which is enough for the next log to roll it forward."""
+        text = body.split(PINS_HEADING)[0].strip()
+        return cls(LogDraft(app=text.removeprefix("App: ")), [Pin(**pin) for pin in pins])
 
 @dataclass
 class LogResult:
@@ -91,7 +99,7 @@ def render_log(draft: LogDraft, pins: list[Pin]) -> str:
         if items:
             parts.append(f"{heading}:\n" + "\n".join(f"- {item}" for item in items))
     if pins:
-            parts.append("Pinned team decisions (do not change these):\n" + render_pins(pins))
+            parts.append(f"{PINS_HEADING}\n" + render_pins(pins))
     return "\n\n".join(parts)
 
 def _too_long(draft: LogDraft) -> str:

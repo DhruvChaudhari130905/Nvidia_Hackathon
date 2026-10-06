@@ -25,7 +25,7 @@ from mux.db.session import get_sessionmaker
 from mux.events import log
 from mux.events.models import (
     ConflictClosed, ConflictDomain, ConflictEvidence, ConflictOpened, ConflictVote, CoordinatorReply, DomainRole,
-    EventEnvelope, EvidenceCitation, FileLockChanged, LinkAccess, MemberJoined, MemberPermission,
+    AgentText, EventEnvelope, EvidenceCitation, FileLockChanged, LinkAccess, LogWritten, MemberJoined, MemberPermission,
     MemberRoleChanged, MessageLabel, MessageLabeled, MessagePosted, MessageTo, Permission, PlanItem, PlanItems,
     PlanItemUpdated, PlanStatus, QuestionAnswered, QuestionDefaulted, QuestionOpened, RoomCreated,
     SharingChanged, TaskRef,
@@ -94,8 +94,11 @@ class RoomActor:
     ) -> None:
         self.record = record
         self.emitter = emitter
+        self.wakeup = asyncio.Event()  # set when the plan or the budget changes, so the coder looks for work
         self.plan = plan
-        self.files = RoomFiles(live or LiveFiles(), self._emit_file, put_blob=self._put_blob, get_blob = self._get_blob)
+        self.files = RoomFiles(
+            live or LiveFiles(), self._emit_file, put_blob=self._put_blob, get_blob=self.get_blob
+        )
         self.budget = budget or budgets.Budget()
         self.presence: dict[UUID, Presence] = {}
         self.sitting_active = False  # a sitting starts when someone connects
@@ -116,6 +119,15 @@ class RoomActor:
     @property
     def room_id(self) -> UUID:
         return self.record.id
+
+    @property
+    def plan(self) -> plans.Plan:
+        return self._plan
+
+    @plan.setter
+    def plan(self, value: plans.Plan) -> None:
+        self._plan = value
+        self.wakeup.set()
 
     @classmethod
     async def create(
@@ -256,7 +268,7 @@ class RoomActor:
         async with self.emitter.sessionmaker() as s, s.begin():
             return await store.put(data, session=s)
 
-    async def _get_blob(self, hash: str) -> bytes:
+    async def get_blob(self, hash: str) -> bytes:
         async with self.emitter.sessionmaker() as s:
             return await store.get(hash, session=s)
 
@@ -355,6 +367,55 @@ class RoomActor:
         """Change some fields of one task."""
         await self._change_plan("plan.item_updated", PlanItemUpdated(id=task_id, changes=changes).model_dump(mode="json"), by)
 
+    async def add_note(self, task_id: str, note: str, by: str = "agent") -> None:
+        """Append a merged note to a task, reading and writing under the lock so no other note is lost."""
+        async with self._lock:
+            item = self._task(task_id)
+            notes = PlanItemUpdated(id=task_id, changes={"merged_notes": [*item.merged_notes, note]})
+            await self._write([("plan.item_updated", notes)], by)
+
+    async def split_task(self, task_id: str, titles: list[str], by: str = "agent") -> list[str]:
+        """The coder splits its task: the task keeps its id and takes the first title, and the others
+        follow it as new todo tasks. Returns the ids in order."""
+        async with self._lock:
+            item = self._task(task_id)
+            first = int(plans.next_id(self.plan)[1:])
+            ids = [task_id, *(f"t{first + n}" for n in range(len(titles) - 1))]
+            new = [PlanItem(id=i, title=t[:200], status="todo") for i, t in zip(ids[1:], titles[1:])]
+            at = self.plan.index(item)
+            items = [*self.plan[:at], item.model_copy(update={"title": titles[0][:200]}), *new, *self.plan[at + 1:]]
+            await self._write([("plan.edited", PlanItems(items=items))], by)
+            return ids
+
+    async def block_task(self, task_id: str, reason: str) -> None:
+        """The coder gave up on its task. It waits as 'blocked' until a person sets it back to todo."""
+        async with self._lock:
+            item = self._task(task_id)
+            changes = {"status": "blocked", "merged_notes": [*item.merged_notes, f"Blocked: {reason}"]}
+            text = f'I stopped working on "{item.title}": {reason}. Set the task back to todo to try again.'
+            await self._write([("plan.item_updated", PlanItemUpdated(id=task_id, changes=changes)),
+                               ("coordinator.reply", CoordinatorReply(text=text))], "agent")
+
+    def take_edit_notes(self) -> list[str]:
+        """The manual-edit notes since the last call (the coder hears about them at its turn boundary)."""
+        notes, self.edit_notes = self.edit_notes, []
+        return notes
+
+    async def log_event(self, type: str, payload: BaseModel, by: str = "agent") -> None:
+        """Store one event that changes no state: the coder's text, tool calls and build results."""
+        async with self._lock:
+            await self.emitter.emit(type, payload, by)
+
+    async def broadcast_text(self, task_id: str, text: str) -> None:
+        """Stream a piece of the coder's text ('agent.text.delta', never stored)."""
+        await self.emitter.broadcast("agent.text.delta", AgentText(task_id=task_id, text=text), "agent")
+
+    def _task(self, task_id: str) -> PlanItem:
+        item = next((item for item in self.plan if item.id == task_id), None)
+        if item is None:
+            raise ValueError(f"no task {task_id!r} in the plan")
+        return item
+
     async def start_task(self, task_id: str, by: str = "agent") -> None:
         await self._change_plan("task.started", TaskRef(task_id=task_id).model_dump(mode="json"), by)
 
@@ -387,8 +448,32 @@ class RoomActor:
                     task_log = LogRow(id=uuid4(), kind="task", body=log_body, pins=pins or [], checkpoint_id=cp.id)
                 row = await checkpoint.save(cp, task_log, event, session=tx.session)
                 tx.stored(event.model_copy(update={"payload": checkpoint.created_payload(row)}))
+                if task_log is not None:
+                    await tx.emit("log.task_written", LogWritten(log_id=task_log.id, checkpoint_id=cp.id), by)
             self._new_head(row)
             return row
+
+    async def save_day_log(self, body: str, pins: list) -> LogRow:
+        """Store the day log on the head checkpoint (the sitting-end hook writes it)."""
+        async with self._lock:
+            head = self.record.head_checkpoint_id
+            if head is None:
+                raise ValueError("the room has no checkpoint")
+            async with self.emitter.transaction() as tx:
+                row = await checkpoint.save_log(
+                    LogRow(id=uuid4(), kind="day", body=body, pins=pins, checkpoint_id=head), self.room_id,
+                    session=tx.session,
+                )
+                await tx.emit("log.day_written", LogWritten(log_id=row.id, checkpoint_id=head), "agent")
+            return row
+
+    async def logs(self) -> tuple[LogRow | None, list[LogRow]]:
+        """The head's log (the nearest on the path to the root, task or day), and every log of the room."""
+        async with self.emitter.sessionmaker() as s:
+            logs = await checkpoint.load_logs(self.room_id, session=s)
+        head = self.record.head_checkpoint_id
+        current = rewind.head_state(head, self.checkpoints, logs).log if head is not None else None
+        return current, logs
 
     async def rewind_to(self, checkpoint_id: UUID, by: str) -> rewind.HeadState:
         """Move the head to a checkpoint (back or forward): its files, plan and log become current at once.
@@ -601,6 +686,7 @@ class RoomActor:
                 await budgets.set_caps(self.room_id, tokens_cap, runs_cap, session=tx.session)
                 await self._emit_budget(tx, new, by)
             self.budget = new
+            self.wakeup.set()  # a resumed room has work for the coder again
 
     async def _emit_budget(self, tx: Batch, new: budgets.Budget, by: str) -> None:
         """'budget.updated', plus 'room.paused' or 'room.resumed' when the room crosses a cap."""

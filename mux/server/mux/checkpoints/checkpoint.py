@@ -99,6 +99,15 @@ async def save(
     return _to_row(row)
 
 
+async def save_log(lg: LogRow, room_id: RoomId, *, session: AsyncSession) -> LogRow:
+    """Store a log on an existing checkpoint (the day log goes on the head). The caller commits."""
+    row = Log(id=lg.id, room_id=room_id, kind=lg.kind, body=lg.body, pins=lg.pins, checkpoint_id=lg.checkpoint_id)
+    session.add(row)
+    await session.flush()
+    await session.refresh(row, ["created_at"])
+    return _to_log(row)
+
+
 async def create_root(
     room_id: RoomId, template_files: Mapping[str, bytes], event: EventEnvelope, *, session: AsyncSession
 ) -> CheckpointRow:

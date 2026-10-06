@@ -247,7 +247,7 @@ async def test_team_messages_skip_the_coordinator(session_factory, publish):
 
 async def test_unlabeled_messages_run_when_the_room_reopens(session_factory, publish, published):
     owner = uuid4()
-    actor = await new_room(session_factory, publish, owner, tasks("todo"))
+    actor = await new_room(session_factory, publish, owner, tasks("draft"))  # a draft plan keeps the coder idle
     done = await actor.post_message(owner, "hi")
     await actor.label_message(done.id, "chat", "small talk")
     lost = await actor.post_message(owner, "add login")  # the server stopped before the coordinator got to it

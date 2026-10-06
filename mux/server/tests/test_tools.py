@@ -11,7 +11,7 @@ from mux.agents.coder.compaction import compact
 from mux.agents.coder.context import CoderContext, RelevantFile, build_context
 from mux.agents.coder.tools import TOOL_SCHEMAS, CoderToolExecutor
 from mux.agents.coder.tools.files import FileTools
-from mux.agents.coder.tools.plan import PlanTask, PlanTool
+from mux.agents.coder.tools.plan import PlanTool
 from mux.files.repo_map import format_repo_map, map_files
 from mux.integrations.tavily import SearchResult, Source
 
@@ -26,7 +26,7 @@ def repo(tmp_path: Path) -> Path:
 
 
 def executor(repo: Path, **kwargs) -> CoderToolExecutor:
-    return CoderToolExecutor(FileTools(repo), build_root=str(repo), **kwargs)
+    return CoderToolExecutor(FileTools(repo), **kwargs)
 
 
 # files
@@ -105,11 +105,27 @@ async def test_ask_room_sends_the_card_to_the_room(repo: Path):
 
 
 @pytest.mark.asyncio
-async def test_update_plan_uses_the_room_plan(repo: Path):
-    plan = PlanTool([PlanTask("t2", "Admin list")])
-    result = await executor(repo, plan=plan).execute("update_plan", {"task_id": "t2", "split": ["Table", "Filters"]})
-    assert [t["id"] for t in result["tasks"]] == ["t2.1", "t2.2"]
-    assert (await executor(repo).execute("update_plan", {"task_id": "t2", "status": "done"}))["error"] == "plan is not available"
+async def test_update_plan_splits_only_the_current_task(repo: Path):
+    calls = []
+
+    async def split_task(task_id, titles):
+        calls.append((task_id, titles))
+        return [task_id, "t7"]
+
+    tools = executor(repo, plan=PlanTool("t2", split_task))
+    result = await tools.execute("update_plan", {"task_id": "t2", "split": ["Table", " Filters "]})
+    assert result["tasks"] == [{"id": "t2", "title": "Table"}, {"id": "t7", "title": "Filters"}]
+    assert calls == [("t2", ["Table", "Filters"])]
+    assert (await tools.execute("update_plan", {"task_id": "t1", "split": ["a", "b"]}))["ok"] is False
+    assert (await tools.execute("update_plan", {"task_id": "t2", "split": ["only one"]}))["ok"] is False
+    no_plan = await executor(repo).execute("update_plan", {"task_id": "t2", "split": ["a", "b"]})
+    assert no_plan["error"] == "plan is not available"
+
+
+@pytest.mark.asyncio
+async def test_builds_never_run_without_a_sandbox(repo: Path):
+    assert (await executor(repo).execute("run_build", {}))["errors"] == ["builds are not configured"]
+    assert (await executor(repo).execute("run_tests", {}))["errors"] == ["tests are not configured"]
 
 
 def test_schemas_are_valid_for_the_api():
