@@ -13,8 +13,12 @@ from pydantic import BaseModel, Field
 
 from mux.api.deps import Actor, Editor, Owner, RoomAccess, User, Viewer
 from mux.checkpoints.checkpoint import CheckpointRow
-from mux.events.models import DomainRole, LinkAccess, MemberPermission, MessagePosted, MessageTo, Permission, PlanItem
+from mux.events.models import (
+    ConflictDomain, DomainRole, EvidenceCitation, LinkAccess, MemberPermission, MessagePosted, MessageTo, Permission,
+    PlanItem,
+)
 from mux.rooms import records
+from mux.rooms.cards import Conflict, Question
 from mux.rooms.registry import get_registry
 
 router = APIRouter()
@@ -168,6 +172,88 @@ async def add_plan_item(item: PlanItem, access: Editor) -> None:
 @router.patch("/{room_id}/plan/items/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def update_plan_item(task_id: str, changes: dict[str, Any], access: Editor) -> None:
     await access.actor.update_plan_item(task_id, changes, str(access.user.id))
+
+
+# ---- conflict and question cards ----
+
+class ConflictOut(BaseModel):
+    id: UUID
+    message_ids: list[UUID]
+    summary: str
+    options: list[str]
+    domain: ConflictDomain
+    task_ids: list[str]
+    opened_at: datetime
+    expires_at: datetime | None  # None while the research runs
+    evidence: str | None
+    citations: list[EvidenceCitation]
+    votes: dict[UUID, str]
+    result: str | None
+    resolved_by: str | None
+
+
+class QuestionOut(BaseModel):
+    id: UUID
+    task_id: str | None
+    text: str
+    options: list[str]
+    default: str
+    expires_at: datetime
+    answer: str | None
+    defaulted: bool
+
+
+class CardsOut(BaseModel):
+    conflicts: list[ConflictOut]
+    questions: list[QuestionOut]
+
+
+def conflict_out(c: Conflict) -> ConflictOut:
+    return ConflictOut(
+        id=c.id, message_ids=c.message_ids, summary=c.summary, options=c.options, domain=c.domain,
+        task_ids=c.task_ids, opened_at=c.opened_at, expires_at=c.expires_at, evidence=c.evidence,
+        citations=c.citations, votes=c.votes, result=c.result, resolved_by=c.resolved_by,
+    )
+
+
+def question_out(q: Question) -> QuestionOut:
+    return QuestionOut(
+        id=q.id, task_id=q.task_id, text=q.text, options=q.options, default=q.default,
+        expires_at=q.expires_at, answer=q.answer, defaulted=q.defaulted,
+    )
+
+
+class OptionIn(BaseModel):
+    option: str
+
+
+class AnswerIn(BaseModel):
+    answer: str
+
+
+@router.get("/{room_id}/cards")
+async def list_cards(access: Viewer) -> CardsOut:
+    """Every conflict and question of the room, oldest first; open ones have no result or answer yet."""
+    cards = access.actor.cards
+    return CardsOut(
+        conflicts=[conflict_out(c) for c in cards.conflicts.values()],
+        questions=[question_out(q) for q in cards.questions.values()],
+    )
+
+
+@router.post("/{room_id}/conflicts/{conflict_id}/vote", status_code=status.HTTP_204_NO_CONTENT)
+async def vote(conflict_id: UUID, body: OptionIn, access: Editor) -> None:
+    await access.actor.vote(conflict_id, access.user.id, body.option)
+
+
+@router.post("/{room_id}/conflicts/{conflict_id}/override", status_code=status.HTTP_204_NO_CONTENT)
+async def override(conflict_id: UUID, body: OptionIn, access: Owner) -> None:
+    await access.actor.override(conflict_id, body.option, access.user.id)
+
+
+@router.post("/{room_id}/questions/{question_id}/answer", status_code=status.HTTP_204_NO_CONTENT)
+async def answer_question(question_id: UUID, body: AnswerIn, access: Editor) -> None:
+    await access.actor.answer_question(question_id, body.answer, access.user.id)
 
 
 # ---- files and locks ----

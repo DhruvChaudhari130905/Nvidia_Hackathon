@@ -10,19 +10,25 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from mux.agents.coordinator.conflicts import Tally, Vote, tally, vote_weight
 
 from mux.checkpoints import checkpoint, rewind
 from mux.checkpoints.checkpoint import CheckpointRow, LogRow
 from mux.db.session import get_sessionmaker
 from mux.events import log
 from mux.events.models import (
-    ConflictDomain, CoordinatorReply, DomainRole, EventEnvelope, FileLockChanged, LinkAccess, MemberJoined,
-    MemberPermission, MemberRoleChanged, MessageLabel, MessageLabeled, MessagePosted, MessageTo, Permission,
-    PlanItem, PlanItems, PlanItemUpdated, RoomCreated, SharingChanged, TaskRef,
+    ConflictClosed, ConflictDomain, ConflictEvidence, ConflictOpened, ConflictVote, CoordinatorReply, DomainRole,
+    EventEnvelope, EvidenceCitation, FileLockChanged, LinkAccess, MemberJoined, MemberPermission,
+    MemberRoleChanged, MessageLabel, MessageLabeled, MessagePosted, MessageTo, Permission, PlanItem, PlanItems,
+    PlanItemUpdated, PlanStatus, QuestionAnswered, QuestionDefaulted, QuestionOpened, RoomCreated,
+    SharingChanged, TaskRef,
     PresenceJoined, PresenceLeft, PresenceTab, PresenceTyping, RoomPaused, SittingEnded, Tab,
 )
 from mux.files import manifest, store
@@ -32,6 +38,7 @@ from mux.files.template import load_template
 from mux.rooms import plan as plans
 from mux.rooms import records
 from mux.rooms import budget as budgets
+from mux.rooms.cards import QUESTION_S, RESEARCH_TIMEOUT_S, VOTE_S, Cards, Conflict, Question
 from mux.rooms.emitter import Batch, Emitter, Publish
 from mux.rooms.records import Member, RoomRecord
 
@@ -67,6 +74,7 @@ class RecentMessage:
     """A recent chat message and the coordinator's label for it (None until labeled, and for team messages)."""
     message: MessagePosted
     label: MessageLabel | None = None
+    task_id: str | None = None  # the task it was queued or merged into
 
 class RoomActor:
     """One room's state. Methods hold the actor lock, so changes apply one at a time."""
@@ -82,6 +90,7 @@ class RoomActor:
         head_seq: int = 0,
         budget: budgets.Budget | None = None,
         recent: dict[UUID, RecentMessage] | None = None,
+        cards: Cards | None = None,
     ) -> None:
         self.record = record
         self.emitter = emitter
@@ -96,6 +105,7 @@ class RoomActor:
         self.locks: dict[str, FileLock] = {}
         self.edit_notes: list[str] = []  # manual edits the coder hears about at its next turn boundary (part F)
         self.recent: dict[UUID, RecentMessage] = recent or {}
+        self.cards = cards or Cards()
         self.on_agent_message: Callable[[MessagePosted], None] | None = None  # the coordinator's queue
         self.interrupt_requested = False  # set by an 'interrupt' message; the coder stops at its next turn boundary (F3)
         self.checkpoints: dict[UUID, CheckpointRow] = checkpoints or {}
@@ -156,15 +166,17 @@ class RoomActor:
             budget = await budgets.load(room_id, session=s)
             live = await LiveFiles.replay(events, lambda manifest_id: manifest.load(manifest_id, session=s))
         plan: plans.Plan = ()
+        cards = Cards()
         for event in events:
             if event.type == "room.rewound":  # the plan jumps to the checkpoint's, like the files do
                 plan = plans.load(checkpoints[UUID(event.payload["checkpoint_id"])].plan)
             else:
                 plan = plans.apply(plan, event.type, event.payload)
+            cards.apply(event.type, event.payload, event.ts)
         last_seq = events[-1].seq if events else 0
         head_seq = max((e.seq for e in events if e.type in rewind.HEAD_CHANGES), default=0)
         return cls(record, Emitter(room_id, last_seq, publish, sessionmaker=maker), plan, live,
-                   checkpoints=checkpoints, head_seq=head_seq, budget=budget, recent=_recent_messages(events))
+                   checkpoints=checkpoints, head_seq=head_seq, budget=budget, recent=_recent_messages(events), cards=cards)
 
     def role_of(self, user_id: UUID) -> Permission | None:
         """The user's permission in this room, or None if they have no access."""
@@ -302,14 +314,17 @@ class RoomActor:
 
     async def label_message(
         self, message_id: UUID, label: MessageLabel, rationale: str,
-        domain: ConflictDomain | None = None, *, fallback: bool = False,
+        domain: ConflictDomain | None = None, *, fallback: bool = False, task_id: str | None = None,
     ) -> None:
-        """Store the coordinator's decision on a message."""
-        payload = MessageLabeled(message_id=message_id, label=label, rationale=rationale, domain=domain, fallback=fallback)
+        """Store the coordinator's decision on a message, and the task it went into."""
+        payload = MessageLabeled(
+            message_id=message_id, label=label, rationale=rationale, domain=domain, fallback=fallback, task_id=task_id
+        )
         async with self._lock:
             await self.emitter.emit("message.labeled", payload, "agent")
             if message_id in self.recent:
                 self.recent[message_id].label = label
+                self.recent[message_id].task_id = task_id
 
     async def reply(self, text: str, message_id: UUID | None = None) -> None:
         """The coordinator answers in the chat."""
@@ -394,6 +409,165 @@ class RoomActor:
             self.head_seq = event.seq
             return state
 
+
+    # ---- conflict and question cards ----
+
+    async def open_conflict(
+        self, message_ids: list[UUID], summary: str, options: list[str], domain: ConflictDomain, title: str
+    ) -> Conflict:
+        """Open a conflict card. The todo tasks of the clashing messages wait (skipped_conflict) for the vote;
+        when there are none, a new waiting task named `title` carries the result."""
+        async with self._lock:
+            linked = {self.recent[m].task_id for m in message_ids if m in self.recent}
+            held = [item.id for item in self.plan if item.id in linked and item.status == "todo"]
+            changes: list[tuple[str, BaseModel]] = [
+                ("plan.item_updated", PlanItemUpdated(id=task_id, changes={"status": "skipped_conflict"}))
+                for task_id in held
+            ]
+            if not held:
+                new = PlanItem(id=plans.next_id(self.plan), title=title[:200], status="skipped_conflict")
+                changes.append(("plan.item_added", new))
+                held = [new.id]
+            opened = ConflictOpened(
+                id=uuid4(), message_ids=message_ids, summary=summary, options=options, domain=domain, task_ids=held
+            )
+            await self._write([("conflict.opened", opened), *changes], "agent")
+            return self.cards.conflicts[opened.id]
+
+    async def start_vote(
+        self, conflict_id: UUID, summary: str | None = None, citations: list[EvidenceCitation] | None = None,
+        queries: list[str] | None = None, *, now: datetime | None = None,
+    ) -> None:
+        """Attach the research (if any) and open the vote for VOTE_S. Ignored if the vote is already open."""
+        async with self._lock:
+            conflict = self.cards.open_conflict(conflict_id)
+            if conflict.expires_at is None:
+                await self._start_vote(conflict, summary, citations or [], queries or [], now or _now())
+
+    async def vote(self, conflict_id: UUID, user_id: UUID, option: str) -> None:
+        """Vote (again) on an open conflict. Once every editor and the owner has voted, the vote closes."""
+        async with self._lock:
+            conflict = self.cards.open_conflict(conflict_id)
+            if option not in conflict.options:
+                raise ValueError(f"{option!r} is not one of the options")
+            weight = vote_weight(self._domain_role(user_id), conflict.domain)
+            payload = ConflictVote(conflict_id=conflict_id, user_id=user_id, option=option, weight=weight)
+            await self._write([("conflict.vote", payload)], str(user_id))
+            voters = {uid for uid, m in self.record.members.items() if m.permission in ("owner", "editor")}
+            if voters <= set(conflict.votes):
+                await self._settle(conflict)
+
+    async def override(self, conflict_id: UUID, option: str, by: UUID) -> None:
+        """The owner picks the result (the API checks that `by` is the owner)."""
+        async with self._lock:
+            conflict = self.cards.open_conflict(conflict_id)
+            if option not in conflict.options:
+                raise ValueError(f"{option!r} is not one of the options")
+            await self._close_conflict(conflict, option, "override", self._tally(conflict).totals, str(by))
+
+    async def open_question(
+        self, task_id: str | None, text: str, options: list[str], default: str, *, now: datetime | None = None
+    ) -> Question:
+        """The coder asks the room. Its task waits (skipped_question) until an answer or QUESTION_S pass."""
+        if default not in options:
+            raise ValueError("the default must be one of the options")
+        async with self._lock:
+            task = next((item for item in self.plan if item.id == task_id), None)
+            if task_id is not None and task is None:
+                raise ValueError(f"no task {task_id!r} in the plan")
+            changes: list[tuple[str, BaseModel]] = []
+            if task is not None and task.status in ("todo", "doing"):
+                changes.append(("plan.item_updated", PlanItemUpdated(id=task.id, changes={"status": "skipped_question"})))
+            expires_at = (now or _now()) + timedelta(seconds=QUESTION_S)
+            opened = QuestionOpened(
+                id=uuid4(), task_id=task_id, text=text, options=options, default=default, expires_at=expires_at
+            )
+            await self._write([("question.opened", opened), *changes], "agent")
+            return self.cards.questions[opened.id]
+
+    async def answer_question(self, question_id: UUID, answer: str, user_id: UUID) -> None:
+        """An editor or the owner answers; the task goes back to the plan with the answer as a note."""
+        async with self._lock:
+            question = self.cards.open_question(question_id)
+            if answer not in question.options:
+                raise ValueError(f"{answer!r} is not one of the options")
+            note = f'The room answered "{question.text}": {answer}'
+            payload = QuestionAnswered(question_id=question_id, answer=answer, user_id=user_id)
+            await self._write([("question.answered", payload), *self._resume_tasks(question, note)], str(user_id))
+
+    async def _start_vote(
+        self, conflict: Conflict, summary: str | None, citations: list[EvidenceCitation], queries: list[str],
+        now: datetime,
+    ) -> None:
+        payload = ConflictEvidence(
+            conflict_id=conflict.id, summary=summary, citations=citations, queries=queries,
+            expires_at=now + timedelta(seconds=VOTE_S),
+        )
+        await self._write([("conflict.evidence", payload)], "agent")
+
+    async def _settle(self, conflict: Conflict) -> None:
+        """Close the vote by the tally. A tie stays open, and the owner is asked once to override (Q48)."""
+        result = self._tally(conflict)
+        if result.winner is not None:
+            await self._close_conflict(conflict, result.winner, result.decided_by, result.totals, "system")
+        elif not conflict.owner_asked:
+            conflict.owner_asked = True
+            text = f'The vote on "{conflict.summary}" is tied. The owner can pick an option to settle it.'
+            await self._write([("coordinator.reply", CoordinatorReply(text=text))], "agent")
+
+    async def _close_conflict(
+        self, conflict: Conflict, result: str, resolved_by: str, totals: dict[str, int], by: str
+    ) -> None:
+        note = f'The team chose "{result}" for: {conflict.summary}'
+        closed = ConflictClosed(conflict_id=conflict.id, result=result, resolved_by=resolved_by, totals=totals)
+        await self._write([("conflict.closed", closed), *self._resume_tasks(conflict, note)], by)
+
+    def _tally(self, conflict: Conflict) -> Tally:
+        votes = [Vote(str(user_id), option, self._domain_role(user_id)) for user_id, option in conflict.votes.items()]
+        return tally(conflict.options, votes, conflict.domain, str(self.record.owner_id))
+
+    def _resume_tasks(self, card: Conflict | Question, note: str) -> list[tuple[str, BaseModel]]:
+        """Plan changes that put a card's waiting tasks back, with the outcome as a merged note.
+        They go back as drafts while the plan awaits approval."""
+        waiting: PlanStatus = "skipped_conflict" if isinstance(card, Conflict) else "skipped_question"
+        task_ids = card.task_ids if isinstance(card, Conflict) else [card.task_id]
+        back: PlanStatus = "draft" if any(item.status == "draft" for item in self.plan) else "todo"
+        return [
+            ("plan.item_updated", PlanItemUpdated(
+                id=item.id, changes={"status": back, "merged_notes": [*item.merged_notes, note]}
+            ))
+            for item in self.plan if item.id in task_ids and item.status == waiting
+        ]
+
+    async def _expire_cards(self, now: datetime) -> None:
+        """Open votes whose research never came, close expired votes, default unanswered questions.
+        The caller holds the actor lock."""
+        for conflict in [c for c in self.cards.conflicts.values() if c.open]:
+            if conflict.expires_at is None:
+                if now - conflict.opened_at > timedelta(seconds=RESEARCH_TIMEOUT_S):
+                    await self._start_vote(conflict, None, [], [], now)
+            elif now >= conflict.expires_at:
+                await self._settle(conflict)
+        for question in [q for q in self.cards.questions.values() if q.open and now >= q.expires_at]:
+            note = f'Nobody answered "{question.text}" in time, so the default is used: {question.default}'
+            payload = QuestionDefaulted(question_id=question.id, answer=question.default)
+            await self._write([("question.defaulted", payload), *self._resume_tasks(question, note)], "system")
+
+    def _domain_role(self, user_id: UUID) -> DomainRole | None:
+        member = self.record.members.get(user_id)
+        return member.domain_role if member else None
+
+    async def _write(self, changes: list[tuple[str, BaseModel]], by: str) -> None:
+        """Store events in one transaction, then apply them to the plan and the cards. The caller holds the
+        actor lock. Plan rules are checked first, so a broken rule raises before anything is written."""
+        plan = self.plan
+        for type, payload in changes:
+            plan = plans.apply(plan, type, payload.model_dump(mode="json"))
+        async with self.emitter.transaction() as tx:
+            stored = [await tx.emit(type, payload, by) for type, payload in changes]
+        self.plan = plan
+        for event in stored:
+            self.cards.apply(event.type, event.payload, event.ts)
 
     # ---- budget ----
 
@@ -494,11 +668,12 @@ class RoomActor:
             await self._sitting_ended("owner")
         return ended
 
-    async def tick(self) -> None:
-        """Housekeeping, every TICK_S: expire idle locks, and end the sitting once nobody has been
-        connected for SITTING_IDLE_S."""
+    async def tick(self, now: datetime | None = None) -> None:
+        """Housekeeping, every TICK_S: expire idle locks, close expired votes and questions, and end the
+        sitting once nobody has been connected for SITTING_IDLE_S."""
         async with self._lock:
             await self._expire_locks()
+            await self._expire_cards(now or _now())
             idle = self.empty_since is not None and time.monotonic() - self.empty_since > SITTING_IDLE_S
             ended = idle and await self._end_sitting("idle", "system")
         if ended:
@@ -554,6 +729,10 @@ class RoomActor:
         self.record = replace(self.record, members=members)
 
 
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
 def _remember(recent: dict[UUID, RecentMessage], message: MessagePosted) -> None:
     """Add a message to `recent`, dropping the oldest past RECENT_MESSAGES (dicts keep insertion order)."""
     recent[message.id] = RecentMessage(message)
@@ -571,4 +750,5 @@ def _recent_messages(events: list[EventEnvelope]) -> dict[UUID, RecentMessage]:
             labeled = MessageLabeled.model_validate(event.payload)
             if labeled.message_id in recent:
                 recent[labeled.message_id].label = labeled.label
+                recent[labeled.message_id].task_id = labeled.task_id
     return recent

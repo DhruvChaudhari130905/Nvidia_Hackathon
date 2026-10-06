@@ -123,6 +123,7 @@ class MessageLabeled(Payload):
     rationale: str
     domain: ConflictDomain | None = None
     fallback: bool = False  # True when the model failed twice and the message was queued as is
+    task_id: str | None = None  # the task a queue, merge or interrupt went into
 
 
 class CoordinatorReply(Payload):
@@ -130,6 +131,76 @@ class CoordinatorReply(Payload):
 
     text: str
     message_id: UUID | None = None  # the message it answers
+
+
+class ConflictOpened(Payload):
+    """Payload of 'conflict.opened'. `task_ids` are the tasks held (skipped_conflict) until the vote closes."""
+
+    id: UUID
+    message_ids: list[UUID]
+    summary: str
+    options: list[str] = Field(min_length=2, max_length=4)
+    domain: ConflictDomain
+    task_ids: list[str]
+
+
+class EvidenceCitation(Payload):
+    title: str
+    url: str
+
+
+class ConflictEvidence(Payload):
+    """Payload of 'conflict.evidence': the research (None when there was none), and the vote opens until expires_at."""
+
+    conflict_id: UUID
+    summary: str | None = None
+    citations: list[EvidenceCitation] = Field(default_factory=list)
+    queries: list[str] = Field(default_factory=list)
+    expires_at: datetime
+
+
+class ConflictVote(Payload):
+    """Payload of 'conflict.vote'. A later vote by the same user replaces the earlier one."""
+
+    conflict_id: UUID
+    user_id: UUID
+    option: str
+    weight: int
+
+
+class ConflictClosed(Payload):
+    """Payload of 'conflict.closed'. resolved_by: "votes", "owner" or "domain" (the tie rules), or "override"."""
+
+    conflict_id: UUID
+    result: str
+    resolved_by: str
+    totals: dict[str, int]
+
+
+class QuestionOpened(Payload):
+    """Payload of 'question.opened': the coder asks the room. Its task is skipped_question until an answer."""
+
+    id: UUID
+    task_id: str | None
+    text: str
+    options: list[str] = Field(min_length=2)
+    default: str
+    expires_at: datetime
+
+
+class QuestionAnswered(Payload):
+    """Payload of 'question.answered'."""
+
+    question_id: UUID
+    answer: str
+    user_id: UUID
+
+
+class QuestionDefaulted(Payload):
+    """Payload of 'question.defaulted': nobody answered in time, so the default is the answer."""
+
+    question_id: UUID
+    answer: str
 
 
 class PlanItem(Payload):

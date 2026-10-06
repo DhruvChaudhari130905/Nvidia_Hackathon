@@ -5,7 +5,10 @@ from uuid import uuid4
 
 import pytest
 
-from mux.agents.coordinator.schema import AddPlanItem, CoordinatorAction, OpenConflict, PlanDraft, PlanItemDraft
+from mux.agents.coordinator.schema import (
+    AddPlanItem, Citation, CoordinatorAction, OpenConflict, PlanDraft, PlanItemDraft, ResearchSummary,
+)
+from mux.integrations.tavily import SearchResult, Source
 from mux.events.models import PlanItem
 from mux.replay.fake_llm import FakeLLM
 from mux.rooms.actor import RoomActor
@@ -52,8 +55,8 @@ async def test_chat_is_labeled_answered_and_charged(session_factory, publish, pu
     message = await actor.post_message(owner, "Is this React?")
     start = len(published)
     await RoomCoordinator(actor, llm).handle(message)
-    assert types(published, start) == ["budget.updated", "message.labeled", "coordinator.reply"]
-    labeled, reply = published[-2].payload, published[-1].payload
+    assert types(published, start) == ["budget.updated", "coordinator.reply", "message.labeled"]
+    reply, labeled = published[-2].payload, published[-1].payload
     assert labeled["message_id"] == str(message.id) and labeled["label"] == "chat"
     assert reply == {"text": "Yes, it uses React.", "message_id": str(message.id)}
     assert actor.budget.tokens_used > 0
@@ -116,16 +119,64 @@ async def test_merge_with_nothing_in_progress_becomes_a_task(session_factory, pu
     assert [p.title for p in actor.plan] == ["Task 1", "make the button blue"]
 
 
-async def test_conflict_is_answered_until_cards_exist(session_factory, publish, published):
+async def test_queue_and_merge_labels_name_their_task(session_factory, publish):
     owner = uuid4()
     actor = await new_room(session_factory, publish, owner, tasks("todo"))
+    await actor.start_task("t1")
+    llm = FakeLLM([action("queue", add_plan_item=AddPlanItem(title="Login")), action("merge")])
+    coordinator = RoomCoordinator(actor, llm)
+    queued = await actor.post_message(owner, "add login")
+    await coordinator.handle(queued)
+    merged = await actor.post_message(owner, "blue button")
+    await coordinator.handle(merged)
+    assert (actor.recent[queued.id].task_id, actor.recent[merged.id].task_id) == ("t2", "t1")
+
+
+class FakeSearch:
+    def __init__(self, sources):
+        self.sources = sources
+        self.queries = []
+
+    async def search(self, query):
+        self.queries.append(query)
+        return SearchResult(query, "Both work.", self.sources)
+
+
+async def test_conflict_opens_a_card_holds_the_task_and_researches(session_factory, publish, published):
+    owner = uuid4()
+    actor = await new_room(session_factory, publish, owner, tasks("done"))
     first = await actor.post_message(owner, "use a sidebar")
-    await actor.label_message(first.id, "queue", "new work")
-    conflict = OpenConflict(with_message_ids=["m1"], summary="Sidebar or top bar?", options=["Sidebar", "Top bar"])
-    llm = FakeLLM([action("conflict", domain="ui", open_conflict=conflict)])
-    await RoomCoordinator(actor, llm).handle(await actor.post_message(owner, "use a top bar"))
-    assert published[-2].payload["domain"] == "ui"
-    assert "Sidebar or top bar?" in published[-1].payload["text"]
+    await actor.label_message(first.id, "queue", "new work", task_id="t2")
+    await actor.add_plan_item(PlanItem(id="t2", title="Sidebar", status="todo"), "agent")
+    conflict = OpenConflict(with_message_ids=["m1"], summary="Sidebar or top bar?", options=["Sidebar", "Top bar"],
+                            research_queries=["sidebar vs top bar navigation"])
+    summary = ResearchSummary(summary="Sidebars suit many sections [1].",
+                              citations=[Citation(title="Nav", url="https://nav.example")])
+    llm = FakeLLM([action("conflict", domain="ui", open_conflict=conflict), summary])
+    search = FakeSearch([Source("Nav", "https://nav.example", "...")])
+    second = await actor.post_message(owner, "use a top bar")
+    await RoomCoordinator(actor, llm, search).handle(second)
+
+    [card] = actor.cards.conflicts.values()
+    assert card.message_ids == [first.id] and card.task_ids == ["t2"] and card.domain == "ui"
+    assert actor.plan[1].status == "skipped_conflict"
+    assert search.queries == ["sidebar vs top bar navigation"]
+    assert card.evidence == "Sidebars suit many sections [1]." and card.expires_at is not None
+    assert [c.url for c in card.citations] == ["https://nav.example"]
+    assert types(published)[-3:] == ["budget.updated", "conflict.evidence", "message.labeled"]
+
+
+async def test_conflict_without_search_opens_the_vote_at_once(session_factory, publish):
+    owner = uuid4()
+    actor = await new_room(session_factory, publish, owner, tasks("todo"))
+    conflict = OpenConflict(with_message_ids=["m1"], summary="Auth or not?", options=["Google login", "Anonymous"])
+    llm = FakeLLM([action("conflict", domain="scope", open_conflict=conflict)])
+    message = await actor.post_message(owner, "keep it anonymous")
+    await RoomCoordinator(actor, llm).handle(message)
+    [card] = actor.cards.conflicts.values()
+    assert card.evidence is None and card.expires_at is not None
+    # nothing linked was waiting, so a new held task carries the result
+    assert [(p.title, p.status) for p in actor.plan][-1] == ("keep it anonymous", "skipped_conflict")
 
 
 async def test_view_uses_short_ids_pending_requests_and_team_notes(session_factory, publish):
@@ -144,6 +195,11 @@ async def test_view_uses_short_ids_pending_requests_and_team_notes(session_facto
     assert (message.id, message.author, message.role) == ("m2", "Ana", "design")
     assert ids == {"m1": asked.id, "m2": new.id}
     assert [n.text for n in view.team_notes] == ["I prefer dark colors"]
+    assert view.open_cards == []
+    await actor.open_conflict([], "Dark or light?", ["Dark", "Light"], "ui", "make it dark")
+    await actor.open_question("t1", "Serif?", ["Yes", "No"], "No")
+    view, _, _ = room_view(actor, new)
+    assert view.open_cards == ["vote: Dark or light? (Dark / Light)", "question: Serif? (Yes / No)"]
 
 
 async def test_paused_room_answers_without_the_model(session_factory, publish, published):

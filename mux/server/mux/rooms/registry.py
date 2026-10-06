@@ -5,6 +5,7 @@ Actors live in this one server process. Each room's seqs need a single writer (D
 """
 
 import asyncio
+from collections.abc import Callable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from mux.agents.llm import LLM
 from mux.db.session import get_sessionmaker
 from mux.events.models import DomainRole
+from mux.integrations.tavily import WebSearch
 from mux.rooms.actor import RoomActor
 from mux.rooms.coordination import RoomCoordinator
 from mux.rooms.emitter import Publish
@@ -21,11 +23,13 @@ class RoomRegistry:
     """The rooms this process has open."""
 
     def __init__(
-        self, publish: Publish, *, sessionmaker: async_sessionmaker[AsyncSession] | None = None, llm: LLM | None = None
+        self, publish: Publish, *, sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+        llm: LLM | None = None, search: Callable[[], WebSearch] | None = None,
     ) -> None:
         self._publish = publish
         self._sessionmaker = sessionmaker
         self._llm = llm  # None: messages to the agent are stored but nobody answers them
+        self._search = search  # makes one WebSearch per room (its cache is per room); None: no research
         self._actors: dict[UUID, RoomActor] = {}
         self._coordinators: dict[UUID, RoomCoordinator] = {}
         # Two requests for an unopened room must get one actor: two would hand out the same seqs
@@ -60,7 +64,8 @@ class RoomRegistry:
         self._actors[actor.room_id] = actor
         actor.start()
         if self._llm is not None:
-            coordinator = RoomCoordinator(actor, self._llm)
+            search = self._search() if self._search is not None else None
+            coordinator = RoomCoordinator(actor, self._llm, search)
             self._coordinators[actor.room_id] = coordinator
             coordinator.start()
         
@@ -86,11 +91,12 @@ _registry: RoomRegistry | None = None
 
 
 def init_registry(
-    publish: Publish, *, sessionmaker: async_sessionmaker[AsyncSession] | None = None, llm: LLM | None = None
+    publish: Publish, *, sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    llm: LLM | None = None, search: Callable[[], WebSearch] | None = None,
 ) -> RoomRegistry:
     """Create the process-wide registry (called once, in the app lifespan)."""
     global _registry
-    _registry = RoomRegistry(publish, sessionmaker=sessionmaker, llm=llm)
+    _registry = RoomRegistry(publish, sessionmaker=sessionmaker, llm=llm, search=search)
     return _registry
 
 

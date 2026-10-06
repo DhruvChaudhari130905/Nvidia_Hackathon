@@ -1,4 +1,4 @@
-"""REST API: sign-in, rooms, join and sharing, permission checks, messages, plan, files, checkpoints, budget."""
+"""REST API: sign-in, rooms, join and sharing, permission checks, messages, plan, cards, files, checkpoints, budget."""
 
 import time
 from collections.abc import AsyncIterator
@@ -11,8 +11,9 @@ from jose import jwt
 from mux.api.deps import user_from_token
 from mux.config import settings
 from mux.events.bus import event_bus
+from mux.events.models import PlanItem
 from mux.main import create_app
-from mux.rooms.registry import init_registry
+from mux.rooms.registry import get_registry, init_registry
 
 SECRET = "test-secret"
 
@@ -177,3 +178,34 @@ async def test_budget_caps_and_end_session(client):
     r = await client.put(f"/api/rooms/{room}/budget", json={"tokens_cap": 0, "runs_cap": 10}, headers=auth(owner))
     assert r.status_code == 422
     assert (await client.post(f"/api/rooms/{room}/session/end", headers=auth(owner))).json() == {"ended": False}
+
+
+async def test_cards_vote_override_and_answer(client):
+    owner, mate, viewer = uuid4(), uuid4(), uuid4()
+    room_id = await new_room(client, owner)
+    for user, permission in ((mate, "editor"), (viewer, "viewer")):
+        r = await client.put(f"/api/rooms/{room_id}/members/{user}", json={"permission": permission}, headers=auth(owner))
+        assert r.status_code == 204
+    actor = await get_registry().get(UUID(room_id))
+    assert actor is not None
+    await actor.draft_plan([PlanItem(id="t1", title="Checkout", status="todo")], "owner")
+    card = await actor.open_conflict([], "A or B?", ["A", "B"], "ui", "use B")
+    await actor.start_vote(card.id)
+    question = await actor.open_question("t1", "Stripe?", ["Yes", "No"], "No")
+
+    vote = f"/api/rooms/{room_id}/conflicts/{card.id}/vote"
+    assert (await client.post(vote, json={"option": "A"}, headers=auth(viewer))).status_code == 403
+    assert (await client.post(vote, json={"option": "C"}, headers=auth(mate))).status_code == 400
+    assert (await client.post(vote, json={"option": "A"}, headers=auth(mate))).status_code == 204
+    missing = f"/api/rooms/{room_id}/conflicts/{uuid4()}/vote"
+    assert (await client.post(missing, json={"option": "A"}, headers=auth(mate))).status_code == 404
+    override = f"/api/rooms/{room_id}/conflicts/{card.id}/override"
+    assert (await client.post(override, json={"option": "B"}, headers=auth(mate))).status_code == 403
+    assert (await client.post(override, json={"option": "B"}, headers=auth(owner))).status_code == 204
+    answer = f"/api/rooms/{room_id}/questions/{question.id}/answer"
+    assert (await client.post(answer, json={"answer": "Yes"}, headers=auth(mate))).status_code == 204
+
+    cards = (await client.get(f"/api/rooms/{room_id}/cards", headers=auth(viewer))).json()
+    [conflict], [asked] = cards["conflicts"], cards["questions"]
+    assert (conflict["result"], conflict["resolved_by"], conflict["votes"]) == ("B", "override", {str(mate): "A"})
+    assert (asked["answer"], asked["defaulted"]) == ("Yes", False)

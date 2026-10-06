@@ -11,10 +11,12 @@ from uuid import UUID
 
 from mux.agents.coordinator import prompts
 from mux.agents.coordinator.agent import Coordinator
+from mux.agents.coordinator.conflicts import research_conflict
 from mux.agents.coordinator.planner import create_plan
-from mux.agents.coordinator.schema import AddPlanItem, CoordinatorAction
+from mux.agents.coordinator.schema import AddPlanItem, CoordinatorAction, Domain, OpenConflict
 from mux.agents.llm import LLM
-from mux.events.models import MessagePosted, PlanItem, PlanStatus
+from mux.events.models import EvidenceCitation, MessagePosted, PlanItem, PlanStatus
+from mux.integrations.tavily import WebSearch
 from mux.rooms import plan as plans
 from mux.rooms.actor import RoomActor
 
@@ -26,9 +28,10 @@ logger = logging.getLogger(__name__)
 class RoomCoordinator:
     """The coordinator worker of one room. The registry starts one per actor when a model is configured."""
 
-    def __init__(self, actor: RoomActor, llm: LLM) -> None:
+    def __init__(self, actor: RoomActor, llm: LLM, search: WebSearch | None = None) -> None:
         self.actor = actor
         self.llm = llm
+        self.search = search  # None: conflict votes open without research
         self.coordinator = Coordinator(llm)
         self.queue: asyncio.Queue[MessagePosted] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
@@ -75,12 +78,15 @@ class RoomCoordinator:
         if not actor.plan:
             await self._draft_plan(message)
             return
-        view, new, _ = room_view(actor, message)
+        view, new, ids = room_view(actor, message)
         decision = await self.coordinator.classify(view, new)
         await actor.charge(tokens=decision.usage.total)
         action = decision.action
-        await actor.label_message(message.id, action.label, action.rationale, action.domain, fallback=decision.fallback)
-        await self._apply(action, message)
+        # carried out before the label, so the label can name the task the message went into
+        task_id = await self._apply(action, message, ids)
+        await actor.label_message(
+            message.id, action.label, action.rationale, action.domain, fallback=decision.fallback, task_id=task_id
+        )
 
     async def _draft_plan(self, message: MessagePosted) -> None:
         """The first message to a room with no plan: draft one from the room's description and the message."""
@@ -99,29 +105,46 @@ class RoomCoordinator:
             f"I drafted a plan of {len(items)} tasks. Edit it if you like; the owner approves it to start.", message.id
         )
 
-    async def _apply(self, action: CoordinatorAction, message: MessagePosted) -> None:
+    async def _apply(self, action: CoordinatorAction, message: MessagePosted, ids: dict[str, UUID]) -> str | None:
+        """Carry out the decision. Returns the task the message went into, if any."""
         if action.label == "chat":
             await self.actor.reply(action.reply or "", message.id)
         elif action.label == "queue" and action.add_plan_item is not None:
-            await self._queue(action.add_plan_item)
+            return await self._queue(action.add_plan_item)
         elif action.label in ("merge", "interrupt"):
             current = plans.current(self.actor.plan)
             if current is None:  # nothing in progress to merge into, so it becomes a task of its own
-                await self._queue(AddPlanItem(title=message.text[:80]))
-                return
+                return await self._queue(AddPlanItem(title=message.text[:80]))
             notes = [*current.merged_notes, message.text]
             await self.actor.update_plan_item(current.id, {"merged_notes": notes}, "agent")
             if action.label == "interrupt":
                 self.actor.interrupt_requested = True
-        elif action.label == "conflict" and action.open_conflict is not None:
-            # F2 turns this into a conflict card with research and a vote
-            conflict = action.open_conflict
-            await self.actor.reply(
-                f"This clashes with an earlier request: {conflict.summary} Options: {'; '.join(conflict.options)}.",
-                message.id,
-            )
+            return current.id
+        elif action.label == "conflict" and action.open_conflict is not None and action.domain is not None:
+            await self._conflict(action.open_conflict, action.domain, message, ids)
+        return None
 
-    async def _queue(self, item: AddPlanItem) -> None:
+    async def _conflict(
+        self, conflict: OpenConflict, domain: Domain, message: MessagePosted, ids: dict[str, UUID]
+    ) -> None:
+        """Open the card, then research it (1 to 3 Tavily queries and a cited summary) and open the vote."""
+        message_ids = [ids[m] for m in conflict.with_message_ids if m in ids]
+        card = await self.actor.open_conflict(message_ids, conflict.summary, conflict.options, domain, message.text)
+        if self.search is None:
+            await self.actor.start_vote(card.id)
+            return
+        try:
+            research = await research_conflict(self.llm, self.search, conflict)
+        except Exception:
+            logger.exception("Research failed for conflict %s in room %s", card.id, self.actor.room_id)
+            await self.actor.start_vote(card.id)
+            return
+        await self.actor.charge(tokens=research.usage.total)
+        evidence = research.evidence
+        citations = [EvidenceCitation(title=c.title, url=c.url) for c in evidence.citations] if evidence else []
+        await self.actor.start_vote(card.id, evidence.summary if evidence else None, citations, research.queries)
+
+    async def _queue(self, item: AddPlanItem) -> str:
         """Add a task after `after_task_id`, or at the end. It is a draft while the plan awaits approval."""
         plan = self.actor.plan
         status: PlanStatus = "draft" if any(p.status == "draft" for p in plan) else "todo"
@@ -132,6 +155,7 @@ class RoomCoordinator:
             await self.actor.edit_plan([*plan[:at], new, *plan[at:]], "agent")
         else:
             await self.actor.add_plan_item(new, "agent")
+        return new.id
 
 
 def room_view(actor: RoomActor, message: MessagePosted) -> tuple[prompts.RoomView, prompts.Message, dict[str, UUID]]:
@@ -147,9 +171,16 @@ def room_view(actor: RoomActor, message: MessagePosted) -> tuple[prompts.RoomVie
         plan=[prompts.PlanItem(p.id, p.title, p.status, p.owner_role, p.notes) for p in actor.plan],
         current_task_id=current.id if current else None,
         pending=[_prompt_message(actor, m, short[m.id]) for m in pending],
+        open_cards=_open_cards(actor),
         team_notes=[_prompt_message(actor, m, "") for m in team],
     )
     return view, _prompt_message(actor, message, short[message.id]), ids
+
+
+def _open_cards(actor: RoomActor) -> list[str]:
+    conflicts = [f"vote: {c.summary} ({' / '.join(c.options)})" for c in actor.cards.conflicts.values() if c.open]
+    questions = [f"question: {q.text} ({' / '.join(q.options)})" for q in actor.cards.questions.values() if q.open]
+    return conflicts + questions
 
 
 def _prompt_message(actor: RoomActor, message: MessagePosted, short_id: str) -> prompts.Message:

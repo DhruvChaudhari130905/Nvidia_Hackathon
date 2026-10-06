@@ -11,7 +11,10 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from tavily import AsyncTavilyClient
+
 from mux.agents.llm import TokenFactoryLLM
+from mux.integrations.tavily import TavilySearch
 from mux.api import rooms, ws
 from mux.config import settings
 from mux.events.bus import event_bus
@@ -27,7 +30,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     llm = TokenFactoryLLM() if settings.token_factory_api_key else None
     if llm is None:
         logger.warning("TOKEN_FACTORY_API_KEY is not set: messages to the agent will get no answer")
-    registry = init_registry(event_bus.publish, llm=llm)
+    search = None
+    if settings.tavily_api_key:
+        client = AsyncTavilyClient(api_key=settings.tavily_api_key)  # one client, one cache per room
+        search = lambda: TavilySearch(client)  # noqa: E731
+    else:
+        logger.warning("TAVILY_API_KEY is not set: conflict votes open without research")
+    registry = init_registry(event_bus.publish, llm=llm, search=search)
     yield
     await registry.close()
 
