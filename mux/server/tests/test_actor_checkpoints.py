@@ -96,4 +96,5 @@ def test_load_template_skips_build_folders(tmp_path):
 
 
 def test_real_template_loads():
-    assert "client/src/App.tsx" in load_template()
+    template = load_template()
+    assert {"package.json", "package-lock.json", "src/App.tsx", "src/server/app.ts", "CONVENTIONS.md"} <= set(template)

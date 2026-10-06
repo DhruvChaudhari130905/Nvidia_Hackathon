@@ -17,7 +17,8 @@ PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 DOMAIN="${DOMAIN:-api.example.com}"  # Set via env or change default
 EMAIL="${EMAIL:-admin@example.com}"  # Set via env or change default
 
-# Database
+# Database: the Supabase Postgres URL (postgresql+asyncpg://...). Left empty, a local Postgres is installed.
+DATABASE_URL="${DATABASE_URL:-}"
 POSTGRES_VERSION="16"
 DB_NAME="mux"
 DB_USER="mux"
@@ -27,7 +28,10 @@ DB_PASSWORD="${DB_PASSWORD:-$(openssl rand -hex 24)}"
 # GitHub OAuth (optional)
 GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:-}"
 GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:-}"
-GITHUB_REDIRECT_URI="https://${DOMAIN}/api/export/github/callback"
+GITHUB_REDIRECT_URI="https://${DOMAIN}/api/github/callback"
+
+# The web app (Vercel): browser origin allowed by CORS, and where GitHub connect returns to
+WEB_URL="${WEB_URL:-https://mux.vercel.app}"
 
 # Encryption key for GitHub tokens (Fernet needs 32 bytes, URL-safe base64)
 GITHUB_TOKEN_ENCRYPTION_KEY="${GITHUB_TOKEN_ENCRYPTION_KEY:-$(openssl rand -base64 32 | tr '+/' '-_')}"
@@ -46,6 +50,11 @@ MODEL_ULTRA="${MODEL_ULTRA:-}"
 
 # Tavily
 TAVILY_API_KEY="${TAVILY_API_KEY:-}"
+
+# Nebius Sandboxes (SANDBOX_IMAGE: the uuid printed by scripts/import_sandbox_image.py)
+SANDBOX_API_KEY="${SANDBOX_API_KEY:-}"
+SANDBOX_BASE_URL="${SANDBOX_BASE_URL:-}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-}"
 
 # =============================================================================
 # Helper functions
@@ -98,8 +107,15 @@ main() {
     # 3. Install Python
     install_python
 
-    # 4. Install and configure PostgreSQL
-    setup_postgresql
+    # 4. Install and configure PostgreSQL, unless DATABASE_URL points at Supabase
+    if [[ -z "$DATABASE_URL" ]]; then
+        setup_postgresql
+        DATABASE_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@localhost:5432/${DB_NAME}"
+        LOCAL_POSTGRES=1
+    else
+        log "Using the database in DATABASE_URL (no local Postgres)"
+        LOCAL_POSTGRES=0
+    fi
 
     # 5. Deploy application (must come before Caddy: the Caddyfile is in the repo)
     deploy_application
@@ -212,8 +228,7 @@ setup_postgresql() {
     PG_HBA="/etc/postgresql/${POSTGRES_VERSION}/main/pg_hba.conf"
 
     if [[ -f "$PG_CONF" ]]; then
-        # Tune for production
-        sed -i "s/^#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
+        # Tune for production (the server connects over localhost only; the firewall keeps 5432 closed anyway)
         sed -i "s/^#max_connections = 100/max_connections = 200/" "$PG_CONF"
         sed -i "s/^#shared_buffers = 128MB/shared_buffers = 256MB/" "$PG_CONF"
         sed -i "s/^#effective_cache_size = 4GB/effective_cache_size = 1GB/" "$PG_CONF"
@@ -306,12 +321,12 @@ deploy_application() {
     log "Creating environment file..."
     cat > "$SERVER_DIR/.env" <<EOF
 # Database
-DATABASE_URL=postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@localhost:5432/${DB_NAME}
+DATABASE_URL=${DATABASE_URL}
 
 # Server
 DEBUG=false
-HOST=0.0.0.0
-PORT=8000
+CORS_ORIGINS=["${WEB_URL}"]
+WEB_URL=${WEB_URL}
 
 # Supabase
 SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
@@ -333,13 +348,19 @@ MODEL_ULTRA=${MODEL_ULTRA}
 
 # Tavily
 TAVILY_API_KEY=${TAVILY_API_KEY}
+
+# Nebius Sandboxes
+SANDBOX_API_KEY=${SANDBOX_API_KEY}
+SANDBOX_BASE_URL=${SANDBOX_BASE_URL}
+SANDBOX_IMAGE=${SANDBOX_IMAGE}
 EOF
 
     chown "$APP_USER:$APP_USER" "$SERVER_DIR/.env"
     chmod 600 "$SERVER_DIR/.env"
 
-    # No migrations yet: the server does not create or use database tables
-    # (event logs are in memory). Add an Alembic step here once persistence lands.
+    # Create or upgrade the database tables
+    log "Running database migrations..."
+    (cd "$SERVER_DIR" && sudo -u "$APP_USER" "$APP_DIR/venv/bin/alembic" upgrade head)
 
     log "Application deployed"
 }
@@ -350,8 +371,8 @@ setup_systemd() {
     cat > /etc/systemd/system/${APP_NAME}.service <<EOF
 [Unit]
 Description=MUX API Server
-After=network.target postgresql.service
-Requires=postgresql.service
+After=network-online.target postgresql.service
+Wants=network-online.target
 
 [Service]
 Type=exec
@@ -359,8 +380,8 @@ User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${SERVER_DIR}
 EnvironmentFile=${SERVER_DIR}/.env
-# Single worker: rooms, event logs and WebSocket connections live in process
-# memory, so multiple workers would each see a different set of rooms.
+# Single worker: each room's actor (and so its event seqs), its coder and its
+# WebSocket connections live in this one process.
 ExecStart=${APP_DIR}/venv/bin/uvicorn mux.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
@@ -430,7 +451,9 @@ final_steps() {
     # Check service status
     systemctl is-active --quiet "${APP_NAME}" && log "✓ ${APP_NAME} service is running" || warn "✗ ${APP_NAME} service failed"
     systemctl is-active --quiet caddy && log "✓ Caddy is running" || warn "✗ Caddy failed"
-    systemctl is-active --quiet postgresql && log "✓ PostgreSQL is running" || warn "✗ PostgreSQL failed"
+    if [[ "$LOCAL_POSTGRES" == 1 ]]; then
+        systemctl is-active --quiet postgresql && log "✓ PostgreSQL is running" || warn "✗ PostgreSQL failed"
+    fi
 
     # Test health endpoint
     if curl -sf "http://localhost:8000/health" >/dev/null; then
@@ -458,7 +481,7 @@ Application:     ${APP_NAME}
 Directory:       ${APP_DIR}
 User:            ${APP_USER}
 Domain:          ${DOMAIN}
-Database:        postgresql://${DB_USER}:****@localhost:5432/${DB_NAME}
+Database:        $([[ "$LOCAL_POSTGRES" == 1 ]] && echo "local Postgres ${DB_NAME}" || echo "DATABASE_URL (Supabase)")
 
 Services:
   - ${APP_NAME}.service  (FastAPI on port 8000)
@@ -477,7 +500,9 @@ Logs:
 Useful commands:
   - Restart app:     systemctl restart ${APP_NAME}
   - View app logs:   journalctl -u ${APP_NAME} -f
-  - Update app:      cd ${APP_DIR} && sudo -u ${APP_USER} git pull && systemctl restart ${APP_NAME}
+  - Update app:      cd ${APP_DIR} && sudo -u ${APP_USER} git pull \\
+                       && (cd ${SERVER_DIR} && sudo -u ${APP_USER} ${APP_DIR}/venv/bin/alembic upgrade head) \\
+                       && systemctl restart ${APP_NAME}
   - Backup DB:       pg_dump -U ${DB_USER} ${DB_NAME} > backup_\$(date +%F).sql
 
 Next steps:

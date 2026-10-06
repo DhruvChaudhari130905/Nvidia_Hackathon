@@ -7,6 +7,15 @@
 - Do not add dependencies unless the task explicitly requires them.
 - Do not generate boilerplate that already exists in the starter template.
 
+## Layout
+
+- `src/App.tsx`, `src/main.tsx`: the React frontend (Vite, Tailwind).
+- `src/server/app.ts`: the Hono API routes, all under `/api`. `src/server/index.ts` only starts the server.
+- `src/server/db.ts`: SQLite through sql.js (`all`, `run`). Add tables in its `CREATE TABLE IF NOT EXISTS` block.
+- Tests: `src/**/*.test.ts` with Vitest. Test routes with `app.request(...)`; no server needs to run.
+- `npm run build` type-checks and builds; `npm test` runs the tests. Only the packages in
+  `approved-packages.json` are installed.
+
 ## Files
 
 - Read a file before editing it.

@@ -13,6 +13,8 @@ class Settings(BaseSettings):
 
     # Browser origins allowed to call the API. In .env as a JSON list: CORS_ORIGINS='["https://mux.example"]'
     cors_origins: list[str] = ["http://localhost:3000"]  # the Next.js dev server (mux/web)
+    # The web app's address: GitHub connect sends the browser back here
+    web_url: str = "http://localhost:3000"
 
     # Token Factory
     token_factory_api_key: str = ""

@@ -1,4 +1,8 @@
 {
-  "note": "Packages baked into the starter image. The coder cannot install anything else.",
-  "packages": []
+  "note": "Packages baked into the starter image (infra/sandbox-image). The coder cannot install anything else.",
+  "packages": [
+    "@hono/node-server", "hono", "react", "react-dom", "sql.js", "zod",
+    "@types/node", "@types/react", "@types/react-dom", "@types/sql.js", "@vitejs/plugin-react",
+    "autoprefixer", "concurrently", "postcss", "tailwindcss", "tsx", "typescript", "vite", "vitest"
+  ]
 }

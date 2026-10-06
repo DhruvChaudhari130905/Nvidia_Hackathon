@@ -1,0 +1,5 @@
+# The build context is mux/; only these files go into the image
+*
+!templates/fullstack-starter/package.json
+!templates/fullstack-starter/package-lock.json
+!infra/sandbox-image/mux-report.mjs
