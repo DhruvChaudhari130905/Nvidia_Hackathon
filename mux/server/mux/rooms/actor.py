@@ -4,13 +4,11 @@ Every change is an event. The actor writes the event, plus any rows that go with
 transaction, and updates its in-memory state only after the commit. Permission checks are the API's job.
 """
 
+import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Mapping   # Awaitable and Callable are new
-
-import asyncio
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -22,8 +20,9 @@ from mux.checkpoints.checkpoint import CheckpointRow, LogRow
 from mux.db.session import get_sessionmaker
 from mux.events import log
 from mux.events.models import (
-    DomainRole, FileLockChanged, LinkAccess, MemberJoined, MemberPermission, MemberRoleChanged, MessagePosted,
-    MessageTo, Permission, PlanItem, PlanItems, PlanItemUpdated, RoomCreated, SharingChanged, TaskRef,
+    ConflictDomain, CoordinatorReply, DomainRole, EventEnvelope, FileLockChanged, LinkAccess, MemberJoined,
+    MemberPermission, MemberRoleChanged, MessageLabel, MessageLabeled, MessagePosted, MessageTo, Permission,
+    PlanItem, PlanItems, PlanItemUpdated, RoomCreated, SharingChanged, TaskRef,
     PresenceJoined, PresenceLeft, PresenceTab, PresenceTyping, RoomPaused, SittingEnded, Tab,
 )
 from mux.files import manifest, store
@@ -40,6 +39,7 @@ from mux.rooms.records import Member, RoomRecord
 LOCK_IDLE_S = 120
 SITTING_IDLE_S = 30 * 60  # a sitting ends when nobody has been connected for 30 minutes
 TICK_S = 10  # how often the background tick runs
+RECENT_MESSAGES = 20  # chat messages kept for the coordinator's view of the room
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,12 @@ class Presence:
     tab: Tab | None = None
     typing: bool = False
 
+@dataclass
+class RecentMessage:
+    """A recent chat message and the coordinator's label for it (None until labeled, and for team messages)."""
+    message: MessagePosted
+    label: MessageLabel | None = None
+
 class RoomActor:
     """One room's state. Methods hold the actor lock, so changes apply one at a time."""
 
@@ -75,6 +81,7 @@ class RoomActor:
         checkpoints: dict[UUID, CheckpointRow] | None = None,
         head_seq: int = 0,
         budget: budgets.Budget | None = None,
+        recent: dict[UUID, RecentMessage] | None = None,
     ) -> None:
         self.record = record
         self.emitter = emitter
@@ -88,6 +95,9 @@ class RoomActor:
         self._ticker: asyncio.Task[None] | None = None
         self.locks: dict[str, FileLock] = {}
         self.edit_notes: list[str] = []  # manual edits the coder hears about at its next turn boundary (part F)
+        self.recent: dict[UUID, RecentMessage] = recent or {}
+        self.on_agent_message: Callable[[MessagePosted], None] | None = None  # the coordinator's queue
+        self.interrupt_requested = False  # set by an 'interrupt' message; the coder stops at its next turn boundary (F3)
         self.checkpoints: dict[UUID, CheckpointRow] = checkpoints or {}
         # Seq of the latest head change (checkpoint.created or room.rewound): the next checkpoint's start_seq (R4)
         self.head_seq = head_seq
@@ -154,7 +164,7 @@ class RoomActor:
         last_seq = events[-1].seq if events else 0
         head_seq = max((e.seq for e in events if e.type in rewind.HEAD_CHANGES), default=0)
         return cls(record, Emitter(room_id, last_seq, publish, sessionmaker=maker), plan, live,
-                   checkpoints=checkpoints, head_seq=head_seq, budget=budget)
+                   checkpoints=checkpoints, head_seq=head_seq, budget=budget, recent=_recent_messages(events))
 
     def role_of(self, user_id: UUID) -> Permission | None:
         """The user's permission in this room, or None if they have no access."""
@@ -281,11 +291,34 @@ class RoomActor:
             self.record = replace(self.record, link_access=link_access, link_permission=stored)
 
     async def post_message(self, user_id: UUID, text: str, to: MessageTo = "agent") -> MessagePosted:
-        """Store and broadcast a chat message. Routing it to the coordinator comes later (part F)."""
+        """Store and broadcast a chat message. A message to the agent goes on to the coordinator."""
         message = MessagePosted(id=uuid4(), user_id=user_id, text=text, to=to)
         async with self._lock:
             await self.emitter.emit("message.posted", message, str(user_id))
+            _remember(self.recent, message)
+        if to == "agent" and self.on_agent_message is not None:
+            self.on_agent_message(message)
         return message
+
+    async def label_message(
+        self, message_id: UUID, label: MessageLabel, rationale: str,
+        domain: ConflictDomain | None = None, *, fallback: bool = False,
+    ) -> None:
+        """Store the coordinator's decision on a message."""
+        payload = MessageLabeled(message_id=message_id, label=label, rationale=rationale, domain=domain, fallback=fallback)
+        async with self._lock:
+            await self.emitter.emit("message.labeled", payload, "agent")
+            if message_id in self.recent:
+                self.recent[message_id].label = label
+
+    async def reply(self, text: str, message_id: UUID | None = None) -> None:
+        """The coordinator answers in the chat."""
+        async with self._lock:
+            await self.emitter.emit("coordinator.reply", CoordinatorReply(text=text, message_id=message_id), "agent")
+
+    def unhandled(self) -> list[MessagePosted]:
+        """Messages to the agent with no label yet: the server stopped before the coordinator got to them."""
+        return [r.message for r in self.recent.values() if r.message.to == "agent" and r.label is None]
 
     async def draft_plan(self, items: list[PlanItem], by: str) -> None:
         """The first plan (from the coordinator or the owner). Replaces any plan there was."""
@@ -519,3 +552,23 @@ class RoomActor:
 
     def _set_members(self, members: dict[UUID, Member]) -> None:
         self.record = replace(self.record, members=members)
+
+
+def _remember(recent: dict[UUID, RecentMessage], message: MessagePosted) -> None:
+    """Add a message to `recent`, dropping the oldest past RECENT_MESSAGES (dicts keep insertion order)."""
+    recent[message.id] = RecentMessage(message)
+    while len(recent) > RECENT_MESSAGES:
+        del recent[next(iter(recent))]
+
+
+def _recent_messages(events: list[EventEnvelope]) -> dict[UUID, RecentMessage]:
+    """The recent messages and their labels, rebuilt from the log."""
+    recent: dict[UUID, RecentMessage] = {}
+    for event in events:
+        if event.type == "message.posted":
+            _remember(recent, MessagePosted.model_validate(event.payload))
+        elif event.type == "message.labeled":
+            labeled = MessageLabeled.model_validate(event.payload)
+            if labeled.message_id in recent:
+                recent[labeled.message_id].label = labeled.label
+    return recent

@@ -34,6 +34,17 @@ def apply(plan: Plan, type: str, payload: dict[str, Any]) -> Plan:
     return plan
 
 
+def next_id(plan: Plan) -> str:
+    """An id for a new task: t1, t2, ... after the highest number in use."""
+    numbers = [int(item.id[1:]) for item in plan if item.id[:1] == "t" and item.id[1:].isdigit()]
+    return f"t{max(numbers, default=0) + 1}"
+
+
+def current(plan: Plan) -> PlanItem | None:
+    """The task in progress, if any."""
+    return next((item for item in plan if item.status == "doing"), None)
+
+
 def load(items: list[dict[str, Any]]) -> Plan:
     """A plan as stored in a checkpoint, back as models."""
     return _unique(tuple(PlanItem.model_validate(item) for item in items))

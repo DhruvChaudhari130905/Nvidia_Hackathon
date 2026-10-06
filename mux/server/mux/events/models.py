@@ -15,6 +15,9 @@ MessageTo = Literal["agent", "team"]
 PlanStatus = Literal["draft", "todo", "doing", "done", "skipped_conflict", "skipped_question"]
 Tab = Literal["feed", "preview", "code", "cards"]
 BudgetLimit = Literal["tokens", "runs"]
+# The coordinator's labels, plus "plan": the first message to a room with no plan drafts one
+MessageLabel = Literal["merge", "queue", "interrupt", "conflict", "chat", "plan"]
+ConflictDomain = Literal["ui", "architecture", "scope"]
 
 EXEMPT_TYPES: frozenset[str] = frozenset({
     "room.created", "sharing.changed", "budget.updated", "room.paused", "room.resumed",
@@ -110,6 +113,23 @@ class MessagePosted(Payload):
     user_id: UUID
     text: str
     to: MessageTo
+
+
+class MessageLabeled(Payload):
+    """Payload of 'message.labeled': what the coordinator decided for one message to the agent."""
+
+    message_id: UUID
+    label: MessageLabel
+    rationale: str
+    domain: ConflictDomain | None = None
+    fallback: bool = False  # True when the model failed twice and the message was queued as is
+
+
+class CoordinatorReply(Payload):
+    """Payload of 'coordinator.reply'."""
+
+    text: str
+    message_id: UUID | None = None  # the message it answers
 
 
 class PlanItem(Payload):

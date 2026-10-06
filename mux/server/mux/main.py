@@ -11,18 +11,23 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from mux.agents.llm import TokenFactoryLLM
 from mux.api import rooms, ws
 from mux.config import settings
 from mux.events.bus import event_bus
 from mux.rooms.registry import init_registry
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """One registry for the process; on shutdown every room's background tick stops."""
-    registry = init_registry(event_bus.publish)
+    """One registry for the process; on shutdown every room's coordinator and background tick stop."""
+    llm = TokenFactoryLLM() if settings.token_factory_api_key else None
+    if llm is None:
+        logger.warning("TOKEN_FACTORY_API_KEY is not set: messages to the agent will get no answer")
+    registry = init_registry(event_bus.publish, llm=llm)
     yield
     await registry.close()
 
