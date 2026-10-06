@@ -44,11 +44,11 @@ export function ShareDialog({ isOpen, onClose, room }: ShareDialogProps) {
     if (!inviteEmail.trim()) return;
     setSaving(true);
     try {
-      await api.updateSharing(room.id, {
-        link_access: linkAccess,
-        link_permission: linkPermission,
-        invites: [inviteEmail],
-      });
+      // The server adds people by account, not email: open the link and send it to them instead
+      await api.updateSharing(room.id, { link_access: 'anyone', link_permission: linkPermission });
+      setLinkAccess('anyone');
+      await navigator.clipboard?.writeText(window.location.href).catch(() => undefined);
+      alert(`Email invites are not available yet. Anyone with the link can now join as ${linkPermission}; the link is copied, send it to ${inviteEmail}.`);
       setInviteEmail('');
     } catch (error) {
       console.error('Failed to invite:', error);

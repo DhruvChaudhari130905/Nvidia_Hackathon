@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "gen:types": "json2ts -i ../packages/schema/generated -o src/types"
+    "gen:types": "json2ts -i ../packages/schema/generated/events.schema.json -o src/types/server.ts --no-additionalProperties --unreachableDefinitions --maxItems -1 --bannerComment \"/* Generated from packages/schema/generated/events.schema.json by npm run gen:types. Do not edit. */\"",
+    "check:rewind": "node --experimental-strip-types scripts/check-rewind.ts"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
@@ -33,6 +34,7 @@
     "autoprefixer": "^10.4.0",
     "eslint": "^9.0.0",
     "eslint-config-next": "15.0.0",
+    "json-schema-to-typescript": "^15.0.4",
     "postcss": "^8.4.0",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.6.0"

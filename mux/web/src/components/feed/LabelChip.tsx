@@ -13,6 +13,7 @@ const labelStyles: Record<MessageLabel, string> = {
   interrupt: 'chip interrupt',
   conflict: 'chip conflict',
   chat: 'chip chat',
+  plan: 'chip queue',
 };
 
 const labelLabels: Record<MessageLabel, string> = {
@@ -21,6 +22,7 @@ const labelLabels: Record<MessageLabel, string> = {
   interrupt: 'interrupt',
   conflict: 'conflict',
   chat: 'chat',
+  plan: 'plan',
 };
 
 export function LabelChip({ label }: LabelChipProps) {

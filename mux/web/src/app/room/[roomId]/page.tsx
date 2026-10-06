@@ -12,7 +12,7 @@ import { CenterTabs } from '@/components/center';
 import { SidePanel } from '@/components/side';
 import { Timeline } from '@/components/timeline';
 import { ShaderBackground } from '@/components/shell';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import { getDemoFiles, isDemoMode, isSampleRoom } from '@/lib/demo';
 import { loadRoomFiles, saveRoomFiles } from '@/lib/roomFiles';
 import { takeStashedImport } from '@/lib/projectImport';
@@ -41,8 +41,6 @@ export default function RoomPage() {
   const filesRoom = useRef<string | null>(null);
   const [files, setFiles] = useState<Map<string, { content: string }>>(new Map());
   const [fileVersions, setFileVersions] = useState<Map<string, number>>(new Map());
-  const [lockedFiles, setLockedFiles] = useState<Set<string>>(new Set());
-  const [lockingUser, setLockingUser] = useState<Map<string, string>>(new Map());
   const [isRewound, setIsRewound] = useState(false);
   const [currentCheckpoint, setCurrentCheckpoint] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -74,53 +72,30 @@ export default function RoomPage() {
         };
         setCurrentUser(userData);
 
-        // Fetch room data
-        const roomData = await api.getRoom(roomId);
+        // Fetch room data. Someone who opened the room's link becomes a member first.
+        let roomData = await api.getRoom(roomId, userData);
+        let membership = roomData.members.find(m => m.user_id === user.id);
+        if (!membership && !isDemoMode()) {
+          await api.joinRoom(roomId).catch(() => undefined); // a private room stays read-only (viewer)
+          roomData = await api.getRoom(roomId, userData);
+          membership = roomData.members.find(m => m.user_id === user.id);
+        }
         setRoom(roomData);
         setLastRoom(roomData);
+        setCurrentUserMembership(membership ?? {
+          user_id: user.id, room_id: roomId, permission: roomData.my_permission ?? 'viewer', domain_role: 'eng', user: userData,
+        });
 
-        const membership = roomData.members.find(m => m.user_id === user.id);
-        if (membership) {
-          setCurrentUserMembership(membership);
-        }
-
-        // Connect to WebSocket
-        const socket = getSocket(roomId);
+        // Connect to WebSocket; it replays the room's events, then streams live ones
+        const socket = getSocket(roomId, roomData, userData);
         socketRef.current = socket;
-
+        socket.onState(setState);
         await socket.connect();
 
-        // Subscribe to state updates
-        const unsubState = socket.onState((newState) => {
-          setState(newState);
-          // files may arrive as a Map or as a plain object after JSON transport
-          const entries: [string, { hash: string; version: number }][] =
-            newState.files instanceof Map ? Array.from(newState.files.entries()) : Object.entries(newState.files ?? {});
-          setFiles(prev => {
-            const next = new Map(prev);
-            for (const [path] of entries) {
-              if (!next.has(path)) next.set(path, { content: '' });
-            }
-            return next;
-          });
-          setFileVersions(new Map(entries.map(([path, v]) => [path, v.version])));
-        });
-
-        const unsubPresence = socket.onPresence((presence) => {
-          if (state) {
-            setState(prev => prev ? { ...prev, presence } : null);
-          }
-        });
-
-        // Load initial files (starter template)
+        // Load the room's files
         await loadInitialFiles();
 
         setLoading(false);
-
-        return () => {
-          unsubState();
-          unsubPresence();
-        };
       } catch (error) {
         console.error('Failed to load room:', error);
         router.push('/dashboard');
@@ -136,10 +111,28 @@ export default function RoomPage() {
     };
   }, [roomId, router]);
 
-  // A room opens with the files it had last time in this browser. New rooms start empty (the Explorer offers
-  // import, the starter template or a new file); sample demo rooms start from the starter plus their own files.
-  // TODO: load from the backend files API once it exists.
+  // The room's live files from the server. Binary files (415) are left out of the editor.
+  const loadServerFiles = useCallback(async () => {
+    const entries = await api.listFiles(roomId);
+    const read = await Promise.all(entries.map(e => api.readFile(roomId, e.path).catch(() => null)));
+    const loaded = read.filter((f): f is NonNullable<typeof f> => f !== null);
+    return {
+      files: new Map(loaded.map(f => [f.path, { content: f.content }])),
+      versions: new Map(loaded.map(f => [f.path, f.version])),
+    };
+  }, [roomId]);
+
+  // Demo rooms open with the files they had last time in this browser; sample rooms start from the starter plus
+  // their own files. Real rooms load the server's files (every room starts from the template, checkpoint C0).
   const loadInitialFiles = async () => {
+    if (!isDemoMode()) {
+      const { files: initial, versions } = await loadServerFiles();
+      setFiles(initial);
+      setFileVersions(versions);
+      setActiveFile(['README.md', 'src/App.tsx', 'package.json', 'index.html'].find(p => initial.has(p)) ?? null);
+      filesRoom.current = roomId;
+      return;
+    }
     let initial = await loadRoomFiles(roomId);
     if (!initial) {
       initial = new Map();
@@ -164,7 +157,7 @@ export default function RoomPage() {
   // pending save is flushed (never dropped) when leaving the room or hiding/closing the tab.
   const pendingSave = useRef<(() => void) | null>(null);
   useEffect(() => {
-    if (filesRoom.current !== roomId) return;
+    if (filesRoom.current !== roomId || !isDemoMode()) return; // real rooms keep their files on the server
     const snapshot = files;
     const flush = () => {
       clearTimeout(t);
@@ -232,38 +225,67 @@ export default function RoomPage() {
     });
   }, []);
 
+  // Every write holds the file's soft lock for the save, so the coder and other people wait for it (§9).
+  // base null creates the file, content null deletes it. Returns the new version (null once deleted).
+  const versionsRef = useRef(fileVersions);
+  versionsRef.current = fileVersions;
+  const writeFile = useCallback(async (path: string, content: string | null, base: number | null) => {
+    await api.lockFile(roomId, path);
+    try {
+      return (await api.saveFile(roomId, path, content, base)).version;
+    } finally {
+      await api.unlockFile(roomId, path).catch(() => undefined);
+    }
+  }, [roomId]);
+
+  const reportWriteError = (what: string, error: unknown) => {
+    console.error(`Failed to ${what}:`, error);
+    if (error instanceof ApiError && error.status === 409) alert(`Could not ${what}: ${error.message}. Reload the file and try again.`);
+  };
+
   const handleFileSave = useCallback(async (path: string, content: string, baseVersion: number) => {
     if (!roomId) return;
     try {
-      await api.saveFile(roomId, path, content, baseVersion);
-      writeLocal([{ path, content, version: baseVersion + 1 }]);
+      const version = await writeFile(path, content, baseVersion);
+      writeLocal([{ path, content, version: version ?? baseVersion + 1 }]);
     } catch (error) {
-      console.error('Failed to save file:', error);
-      alert('Failed to save file. Version may have changed.');
+      reportWriteError('save the file', error);
       throw error; // keep the unsaved draft in the editor
     }
-  }, [roomId, writeLocal]);
+  }, [roomId, writeLocal, writeFile]);
 
   const handleCreateFile = useCallback((path: string, content = starterContent(path), open = true) => {
     writeLocal([{ path, content, version: 1 }]);
     if (open) setActiveFile(path);
-    api.saveFile(roomId, path, content, 0).catch(error => console.error('Failed to create file:', error));
-  }, [roomId, writeLocal]);
+    writeFile(path, content, null)
+      .then(version => version && writeLocal([{ path, content, version }]))
+      .catch(error => reportWriteError('create the file', error));
+  }, [writeLocal, writeFile]);
 
   const handleUploadFiles = useCallback((uploaded: { path: string; content: string }[]) => {
     if (!uploaded.length) return;
     writeLocal(uploaded.map(f => ({ ...f, version: 1 })));
     setActiveFile(uploaded[uploaded.length - 1].path);
-    uploaded.forEach(f => api.saveFile(roomId, f.path, f.content, 0).catch(error => console.error('Failed to upload file:', error)));
-  }, [roomId, writeLocal]);
+    uploaded.forEach(f => {
+      const base = versionsRef.current.get(f.path) ?? null; // an upload over an existing file replaces it
+      writeFile(f.path, f.content, base)
+        .then(version => version && writeLocal([{ ...f, version }]))
+        .catch(error => reportWriteError('upload the file', error));
+    });
+  }, [writeLocal, writeFile]);
+
+  const deleteOnServer = useCallback((path: string) => {
+    if (isDemoMode()) return Promise.resolve(null);
+    return writeFile(path, null, versionsRef.current.get(path) ?? null);
+  }, [writeFile]);
 
   const handleDeleteFile = useCallback((path: string, isDirectory: boolean) => {
     const targets = isDirectory
       ? Array.from(filesRef.current.keys()).filter(p => p.startsWith(path + '/'))
       : [path];
+    targets.forEach(p => deleteOnServer(p).catch(error => reportWriteError('delete the file', error)));
     removeLocal(targets);
-    targets.forEach(p => api.deleteFile(roomId, p).catch(error => console.error('Failed to delete file:', error)));
-  }, [roomId, removeLocal]);
+  }, [removeLocal, deleteOnServer]);
 
   const handleRenameFile = useCallback((from: string, to: string, isDirectory: boolean) => {
     const moves = (isDirectory
@@ -274,11 +296,11 @@ export default function RoomPage() {
     removeLocal(moves.map(m => m.oldPath));
     setActiveFile(current => moves.find(m => m.oldPath === current)?.newPath ?? current);
     moves.forEach(m =>
-      api.saveFile(roomId, m.newPath, m.content, 0)
-        .then(() => api.deleteFile(roomId, m.oldPath))
-        .catch(error => console.error('Failed to rename file:', error)),
+      writeFile(m.newPath, m.content, null)
+        .then(() => deleteOnServer(m.oldPath))
+        .catch(error => reportWriteError('rename the file', error)),
     );
-  }, [roomId, writeLocal, removeLocal]);
+  }, [writeLocal, removeLocal, writeFile, deleteOnServer]);
 
   const handleVote = useCallback(async (conflictId: string, option: string) => {
     if (!roomId) return;
@@ -336,7 +358,8 @@ export default function RoomPage() {
     }
   }, [roomId]);
 
-  // Live events (not the history replayed on connect) become notifications
+  // Live events (not the history replayed on connect) become notifications, and keep the editor's files current:
+  // a file someone else (or the coder) changed is read again, and a rewind reloads them all
   const stateRef = useRef(state);
   stateRef.current = state;
   useEffect(() => {
@@ -346,12 +369,22 @@ export default function RoomPage() {
       notifyForEvent(event, {
         roomTitle: room.title,
         currentUser,
-        nameOf: id => room.members.find(m => m.user_id === id)?.user?.name ?? (id ? id.charAt(0).toUpperCase() + id.slice(1) : 'Someone'),
+        nameOf: id => stateRef.current?.people[id]?.name ?? 'Someone',
         planItem: id => stateRef.current?.plan.find(p => p.id === id),
       });
+      if (isDemoMode()) return;
+      if (event.type === 'file.changed') {
+        const { path, version, deleted } = event.payload;
+        if (deleted) removeLocal([path]);
+        else if (versionsRef.current.get(path) !== version) {
+          api.readFile(roomId, path).then(f => writeLocal([f])).catch(() => undefined);
+        }
+      } else if (event.type === 'room.rewound') {
+        loadServerFiles().then(({ files: fresh, versions }) => { setFiles(fresh); setFileVersions(versions); }).catch(() => undefined);
+      }
     });
     return () => { unsubscribe(); };
-  }, [room, currentUser]);
+  }, [room, currentUser, roomId, writeLocal, removeLocal, loadServerFiles]);
 
   const handleReturnToLatest = useCallback(() => {
     setIsRewound(false);
@@ -365,6 +398,10 @@ export default function RoomPage() {
       </div>
     );
   }
+
+  // Files someone else is editing by hand are read-only here (the server's soft locks)
+  const lockedFiles = new Set([...state.locks].filter(([, user]) => user !== currentUser.id).map(([path]) => path));
+  const lockingUser = new Map([...state.locks].map(([path, user]) => [path, state.people[user]?.name ?? 'Someone'] as [string, string]));
 
   const openConflicts = state.conflicts.filter(c => c.status === 'open' || c.status === 'voting');
   const openQuestions = state.questions.filter(q => q.status === 'open');
@@ -397,7 +434,7 @@ export default function RoomPage() {
             onSendMessage={handleSendMessage}
             canPostTeam={currentUserMembership.permission !== 'viewer'}
             activeConflict={openConflicts[0] ? { id: openConflicts[0].id, taskId: openConflicts[0].task_id, options: openConflicts[0].options } : undefined}
-            activeQuestion={openQuestions[0] ? { id: openQuestions[0].id, taskId: openQuestions[0].task_id } : undefined}
+            activeQuestion={openQuestions[0] ? { id: openQuestions[0].id, taskId: openQuestions[0].task_id ?? '' } : undefined}
           />
 
           {/* Center: Preview / Code */}

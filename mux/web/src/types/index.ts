@@ -1,11 +1,15 @@
-// MUX Frontend Types - matches the event catalog from architecture.md
+// MUX frontend types. The UI works on these shapes; lib/reducer.ts builds them from the server's events,
+// whose payload types are generated from the server's models (types/server.ts, npm run gen:types).
+import type { EventPayloads } from './server';
 
 export type UserRole = 'owner' | 'editor' | 'viewer';
 export type DomainRole = 'pm' | 'design' | 'eng';
-export type MessageLabel = 'merge' | 'queue' | 'interrupt' | 'conflict' | 'chat';
+// plan: the first message to a room with no plan, which drafted one
+export type MessageLabel = 'merge' | 'queue' | 'interrupt' | 'conflict' | 'chat' | 'plan';
 // agent: instructions for the coordinator (the default). team: notes between people, never sent to the coordinator
 export type MessageTo = 'agent' | 'team';
-export type PlanItemStatus = 'draft' | 'todo' | 'doing' | 'done' | 'skipped_conflict' | 'skipped_question';
+// blocked: the coder gave up on the task; a person sets it back to todo to retry
+export type PlanItemStatus = 'draft' | 'todo' | 'doing' | 'done' | 'skipped_conflict' | 'skipped_question' | 'blocked';
 export type ConflictStatus = 'open' | 'voting' | 'closed';
 export type QuestionStatus = 'open' | 'answered' | 'defaulted';
 
@@ -39,21 +43,25 @@ export interface Room {
   created_at: string;
   updated_at?: string;
   members: Membership[];
+  // Events up to this seq are history when the room opens; later ones are live (notifications)
+  last_seq?: number;
+  my_permission?: UserRole; // the signed-in user's access (also for people who opened the link)
 }
 
 export interface PlanItem {
   id: string;
   title: string;
   status: PlanItemStatus;
-  owner_role?: DomainRole;
-  notes?: string;
+  owner_role?: DomainRole | null;
+  notes?: string | null;
   merged_notes?: string[];
 }
 
 export interface Message {
   id: string;
+  seq?: number; // the event that posted it, for greying out after a rewind
   room_id: string;
-  user_id: string;
+  user_id: string; // 'agent' for the coordinator and the coder
   text: string;
   to?: MessageTo;
   // Unset while the coordinator hasn't labeled it yet; team notes never get one
@@ -68,6 +76,7 @@ export interface Message {
     research_queries: string[];
   };
   reply?: string;
+  task_id?: string | null; // the task a queue, merge or interrupt went into
   created_at: string;
   user: User;
 }
@@ -75,15 +84,19 @@ export interface Message {
 export interface Conflict {
   id: string;
   room_id: string;
-  task_id: string;
+  task_id: string; // the first held task; task_ids lists all of them
+  task_ids: string[];
+  message_ids: string[];
+  summary: string;
   options: string[];
   evidence: { query: string; summary: string; citations: string[] }[];
   domain: 'ui' | 'architecture' | 'scope';
   status: ConflictStatus;
   result?: string;
-  resolved_by?: string;
+  resolved_by?: string; // votes, owner or domain (tie rules), or override
+  totals?: Record<string, number>;
   created_at: string;
-  expires_at: string;
+  expires_at: string; // '' while the research runs
   votes: Vote[];
 }
 
@@ -97,7 +110,7 @@ export interface Vote {
 export interface Question {
   id: string;
   room_id: string;
-  task_id: string;
+  task_id: string | null;
   text: string;
   options: string[];
   default_option: string;
@@ -121,10 +134,10 @@ export interface Checkpoint {
   id: string;
   room_id: string;
   seq: number;
+  start_seq: number;
   manifest_id: string;
   sandbox_snapshot_uuid: string | null;
-  plan: PlanItem[];
-  task_log_id: string;
+  plan: PlanItem[]; // the plan when it was saved
   parent_id: string | null;
   created_at: string;
 }
@@ -151,239 +164,32 @@ export interface RoomState {
   messages: Message[];
   conflicts: Conflict[];
   questions: Question[];
+  // Versions seen in file.changed and room.rewound events. The template's files (checkpoint C0) and files a rewind
+  // removes are not in events, so the page loads the full list from GET /files.
   files: Map<string, { hash: string; version: number }>;
+  locks: Map<string, string>; // path -> user id holding the soft lock
   checkpoints: Checkpoint[];
+  head_checkpoint_id: string | null;
+  active: Set<number>; // seqs not greyed out by a rewind (lib/rewind.ts)
   budget: Budget;
+  paused: boolean;
   presence: Presence[];
+  people: Record<string, User>; // everyone seen in the room, for names and avatars
   current_user: User;
   current_user_membership: Membership;
 }
 
-// Event types for WebSocket
-export type EventType =
-  | 'room.created'
-  | 'member.joined'
-  | 'member.role_changed'
-  | 'sharing.changed'
-  | 'message.posted'
-  | 'message.labeled'
-  | 'plan.drafted'
-  | 'plan.edited'
-  | 'plan.approved'
-  | 'plan.item_added'
-  | 'plan.item_updated'
-  | 'coordinator.reply'
-  | 'conflict.opened'
-  | 'conflict.evidence'
-  | 'conflict.vote'
-  | 'conflict.closed'
-  | 'question.opened'
-  | 'question.answered'
-  | 'question.defaulted'
-  | 'task.started'
-  | 'agent.text'
-  | 'tool.called'
-  | 'tool.result'
-  | 'build.result'
-  | 'test.result'
-  | 'task.escalated'
-  | 'task.finished'
-  | 'turn.interrupted'
-  | 'file.changed'
-  | 'file.locked'
-  | 'file.unlocked'
-  | 'checkpoint.created'
-  | 'room.rewound'
-  | 'log.task_written'
-  | 'log.day_written'
-  | 'budget.updated'
-  | 'room.paused'
-  | 'room.resumed'
-  | 'export.started'
-  | 'export.finished'
-  | 'presence.join'
-  | 'presence.leave'
-  | 'presence.typing'
-  | 'presence.tab'
-  | 'agent.text.delta';
+// ---- events: the server's envelope, with payloads typed per event type ----
+
+export type EventType = keyof EventPayloads;
 
 export interface BaseEvent {
-  seq: number;
+  seq: number; // presence and agent.text.delta carry the last stored seq
   room_id: string;
   type: EventType;
-  actor_id: string;
+  actor: string; // a user id, "agent" or "system"
   ts: string;
 }
 
-export interface MessagePostedEvent extends BaseEvent {
-  type: 'message.posted';
-  payload: Message;
-}
-
-export interface MessageLabeledEvent extends BaseEvent {
-  type: 'message.labeled';
-  payload: { message_id: string; label: MessageLabel; rationale: string; domain?: string };
-}
-
-export interface PlanItemAddedEvent extends BaseEvent {
-  type: 'plan.item_added';
-  payload: PlanItem;
-}
-
-export interface PlanItemUpdatedEvent extends BaseEvent {
-  type: 'plan.item_updated';
-  payload: { id: string; changes: Partial<PlanItem> };
-}
-
-export interface ConflictOpenedEvent extends BaseEvent {
-  type: 'conflict.opened';
-  payload: Conflict;
-}
-
-export interface ConflictVoteEvent extends BaseEvent {
-  type: 'conflict.vote';
-  payload: { conflict_id: string; user_id: string; option: string; weight: number };
-}
-
-export interface ConflictClosedEvent extends BaseEvent {
-  type: 'conflict.closed';
-  payload: { conflict_id: string; result: string; resolved_by: string };
-}
-
-export interface QuestionOpenedEvent extends BaseEvent {
-  type: 'question.opened';
-  payload: Question;
-}
-
-export interface QuestionAnsweredEvent extends BaseEvent {
-  type: 'question.answered';
-  payload: { question_id: string; answer: string; by_user_id: string };
-}
-
-export interface TaskStartedEvent extends BaseEvent {
-  type: 'task.started';
-  payload: { task_id: string };
-}
-
-export interface AgentTextEvent extends BaseEvent {
-  type: 'agent.text';
-  payload: { task_id: string; text: string };
-}
-
-export interface ToolCalledEvent extends BaseEvent {
-  type: 'tool.called';
-  payload: { tool: string; args: Record<string, unknown> };
-}
-
-export interface ToolResultEvent extends BaseEvent {
-  type: 'tool.result';
-  payload: { tool: string; summary: string; ok: boolean };
-}
-
-export interface BuildResultEvent extends BaseEvent {
-  type: 'build.result';
-  payload: { passed: boolean; duration: number; errors: string[]; sandbox_snapshot_uuid?: string };
-}
-
-export interface FileChangedEvent extends BaseEvent {
-  type: 'file.changed';
-  payload: FileChange;
-}
-
-export interface CheckpointCreatedEvent extends BaseEvent {
-  type: 'checkpoint.created';
-  payload: Checkpoint;
-}
-
-export interface RoomRewoundEvent extends BaseEvent {
-  type: 'room.rewound';
-  payload: { checkpoint_id: string; seq: number };
-}
-
-export interface BudgetUpdatedEvent extends BaseEvent {
-  type: 'budget.updated';
-  payload: Budget;
-}
-
-export interface PresenceJoinEvent extends BaseEvent {
-  type: 'presence.join';
-  payload: Presence;
-}
-
-export interface PresenceLeaveEvent extends BaseEvent {
-  type: 'presence.leave';
-  payload: { user_id: string };
-}
-
-export interface PresenceTypingEvent extends BaseEvent {
-  type: 'presence.typing';
-  payload: { user_id: string; typing: boolean };
-}
-
-export interface PresenceTabEvent extends BaseEvent {
-  type: 'presence.tab';
-  payload: { user_id: string; tab: Presence['tab'] };
-}
-
-export interface AgentTextDeltaEvent extends BaseEvent {
-  type: 'agent.text.delta';
-  payload: { task_id: string; delta: string };
-}
-
-type TypedEventType =
-  | 'message.posted'
-  | 'message.labeled'
-  | 'plan.item_added'
-  | 'plan.item_updated'
-  | 'conflict.opened'
-  | 'conflict.vote'
-  | 'conflict.closed'
-  | 'question.opened'
-  | 'question.answered'
-  | 'task.started'
-  | 'agent.text'
-  | 'tool.called'
-  | 'tool.result'
-  | 'build.result'
-  | 'file.changed'
-  | 'checkpoint.created'
-  | 'room.rewound'
-  | 'budget.updated'
-  | 'presence.join'
-  | 'presence.leave'
-  | 'presence.typing'
-  | 'presence.tab'
-  | 'agent.text.delta';
-
-// Events without a dedicated payload type yet
-export interface GenericEvent extends BaseEvent {
-  type: Exclude<EventType, TypedEventType>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  payload: any;
-}
-
-export type AppEvent =
-  | GenericEvent
-  | MessagePostedEvent
-  | MessageLabeledEvent
-  | PlanItemAddedEvent
-  | PlanItemUpdatedEvent
-  | ConflictOpenedEvent
-  | ConflictVoteEvent
-  | ConflictClosedEvent
-  | QuestionOpenedEvent
-  | QuestionAnsweredEvent
-  | TaskStartedEvent
-  | AgentTextEvent
-  | ToolCalledEvent
-  | ToolResultEvent
-  | BuildResultEvent
-  | FileChangedEvent
-  | CheckpointCreatedEvent
-  | RoomRewoundEvent
-  | BudgetUpdatedEvent
-  | PresenceJoinEvent
-  | PresenceLeaveEvent
-  | PresenceTypingEvent
-  | PresenceTabEvent
-  | AgentTextDeltaEvent;
+export type AppEvent = { [K in EventType]: BaseEvent & { type: K; payload: EventPayloads[K] } }[EventType];
+export type EventOf<K extends EventType> = Extract<AppEvent, { type: K }>;

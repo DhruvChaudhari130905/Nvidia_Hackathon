@@ -4,7 +4,7 @@
 //
 // There are a few ready-made sample projects, each with its own plan, feed, decisions, files and
 // preview. Rooms the user creates start blank and are kept in localStorage.
-import type { AppEvent, Membership, MessageTo, PlanItem, Room, User } from '@/types';
+import type { AppEvent, EventOf, Membership, MessageTo, PlanItem, Room, User } from '@/types';
 
 const DEMO_FLAG_KEY = 'mux_demo';
 const CREATED_ROOMS_KEY = 'mux_demo_rooms';
@@ -380,15 +380,16 @@ export function getDemoFiles(roomId: string): Record<string, string> {
 }
 
 /* ─────────────── Room events ─────────────── */
+// Canned events in the server's envelope format (types/server.ts), as the room WebSocket would send them
 
 let seqCounter = 0;
-function ev<T extends AppEvent['type']>(roomId: string, type: T, payload: unknown, actor = 'coordinator', minutesAgo = 0): AppEvent {
+function ev<T extends AppEvent['type']>(roomId: string, type: T, payload: EventOf<T>['payload'], actor = 'agent', minutesAgo = 0): AppEvent {
   seqCounter += 1;
   return {
     seq: seqCounter,
     room_id: roomId,
     type,
-    actor_id: actor,
+    actor,
     ts: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
     payload,
   } as AppEvent;
@@ -399,24 +400,22 @@ export function nextDemoSeq(): number {
   return seqCounter;
 }
 
-const AGENT = { id: 'agent', email: '', name: 'MUX', initials: 'H', color: '#3b82f6' } as User;
-
-// The initial event dump a real server would send over the room WebSocket
 // Messages the user posts in demo mode, kept per room so the chat survives leaving or reloading
 const sentKey = (roomId: string) => `mux_demo_sent:${roomId}`;
 
 function loadSent(roomId: string): AppEvent[] {
   try {
-    return JSON.parse(window.localStorage.getItem(sentKey(roomId)) || '[]') as AppEvent[];
+    const sent = JSON.parse(window.localStorage.getItem(sentKey(roomId)) || '[]') as AppEvent[];
+    return sent.filter(e => 'actor' in e); // events saved in the old format are dropped
   } catch {
     return [];
   }
 }
 
-function rememberSent(event: AppEvent) {
+function rememberSent(events: AppEvent[]) {
   try {
-    const all = [...loadSent(event.room_id), event].slice(-500);
-    window.localStorage.setItem(sentKey(event.room_id), JSON.stringify(all));
+    const all = [...loadSent(events[0].room_id), ...events].slice(-500);
+    window.localStorage.setItem(sentKey(events[0].room_id), JSON.stringify(all));
   } catch {
     // storage unavailable or full; the message still shows for this session
   }
@@ -424,79 +423,81 @@ function rememberSent(event: AppEvent) {
 
 export function demoRoomEvents(roomId: string): AppEvent[] {
   // History first, then everything the user said in this room before
-  const sent = loadSent(roomId);
+  seqCounter = 0;
   const events = baseDemoRoomEvents(roomId);
-  return sent.length ? [...events, ...sent.map(e => ({ ...e, seq: nextDemoSeq() }))] : events;
+  return [...events, ...loadSent(roomId).map(e => ({ ...e, seq: nextDemoSeq() }) as AppEvent)];
+}
+
+function joined(roomId: string, user: User, tab: 'feed' | 'preview', typing = false): AppEvent {
+  return ev(roomId, 'presence.join', { user_id: user.id, name: user.name, tab, typing }, user.id);
 }
 
 function baseDemoRoomEvents(roomId: string): AppEvent[] {
-  const at = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
   const scenario = SCENARIOS[roomId];
   const room = getDemoRoom(roomId);
-  const presence = [ev(roomId, 'presence.join', { user_id: DEMO_USER.id, user: DEMO_USER, tab: 'feed', active: true, last_seen: at(0) })];
+  const created = ev(roomId, 'room.created', { owner_id: room.owner_id, title: room.title, description: room.description }, room.owner_id, 60);
 
   // A room the user created: empty plan and history, just a welcome from the agent
   if (!scenario) {
     return [
-      ...presence,
-      ev(roomId, 'message.posted', {
-        id: 'welcome', room_id: roomId, user_id: 'agent', label: 'chat', created_at: at(0), user: AGENT,
+      created,
+      joined(roomId, DEMO_USER, 'feed'),
+      ev(roomId, 'coordinator.reply', {
         text: room.description
           ? `New room ready. I’ll draft a plan for “${room.description}” — add details or say “go” to start.`
           : 'New room ready. Tell me what to build and I’ll draft a plan for the room to approve.',
-      }, 'agent', 0),
+      }),
       ev(roomId, 'budget.updated', { tokens_used: 0, runs_used: 0, tokens_cap: room.budget_tokens_cap, runs_cap: room.budget_runs_cap }),
     ];
   }
 
-  const others = scenario.members.map((u, i) =>
-    ev(roomId, 'presence.join', { user_id: u.id, user: u, tab: 'preview', active: i < 2, typing: i === 0, last_seen: at(i * 3) }),
-  );
-  const plan = scenario.plan.map((item, i) => ev(roomId, 'plan.item_added', { id: `t${i + 1}`, ...item }, 'coordinator', 60 - i));
-  const messages = scenario.messages.map((m, i) =>
-    ev(roomId, 'message.posted', {
-      id: `m${i + 1}`, room_id: roomId, user_id: m.user.id, text: m.text, label: m.label, created_at: at(m.minutesAgo), user: m.user,
-      ...(m.rationale ? { rationale: m.rationale } : {}),
-    }, m.user.id, m.minutesAgo),
-  );
+  const events: AppEvent[] = [created, joined(roomId, DEMO_USER, 'feed')];
+  scenario.members.forEach((u, i) => events.push(joined(roomId, u, 'preview', i === 0)));
+  scenario.plan.forEach((item, i) => events.push(ev(roomId, 'plan.item_added', { id: `t${i + 1}`, ...item }, 'agent', 60 - i)));
+  scenario.messages.forEach((m, i) => {
+    const id = `m${i + 1}`;
+    events.push(ev(roomId, 'message.posted', { id, user_id: m.user.id, text: m.text, to: 'agent' }, m.user.id, m.minutesAgo));
+    events.push(ev(roomId, 'message.labeled', { message_id: id, label: m.label, rationale: m.rationale ?? '' }, 'agent', m.minutesAgo));
+  });
   const c = scenario.conflict;
   const q = scenario.question;
-
-  return [
-    ...presence,
-    ...others,
-    ...plan,
-    ...messages,
+  const clash = scenario.messages.flatMap((m, i) => (m.label === 'conflict' ? [`m${i + 1}`] : []));
+  events.push(
     ev(roomId, 'conflict.opened', {
-      id: 'c1', room_id: roomId, task_id: `t${c.task}`,
-      options: c.options,
-      evidence: [{ query: c.query, summary: c.summary, citations: ['https://example.com/research'] }],
-      domain: c.domain, status: 'voting', created_at: at(8), expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
-      votes: [{ conflict_id: 'c1', user_id: scenario.members[0].id, option: c.options[0], weight: 2 }],
-    }, 'coordinator', 8),
+      id: 'c1', message_ids: clash, summary: c.options.join(' or ') + '?', options: c.options as [string, string, ...string[]],
+      domain: c.domain, task_ids: [`t${c.task}`],
+    }, 'agent', 8),
+    ev(roomId, 'conflict.evidence', {
+      conflict_id: 'c1', summary: c.summary, queries: [c.query],
+      citations: [{ title: 'Research', url: 'https://example.com/research' }],
+      expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+    }, 'agent', 8),
+    ev(roomId, 'conflict.vote', { conflict_id: 'c1', user_id: scenario.members[0].id, option: c.options[0], weight: 2 }, scenario.members[0].id, 7),
     ev(roomId, 'question.opened', {
-      id: 'q1', room_id: roomId, task_id: `t${q.task}`,
-      text: q.text, options: q.options, default_option: q.default,
-      status: 'open', created_at: at(4), expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
-    }, 'coordinator', 4),
-    ev(roomId, 'checkpoint.created', { id: 'cp1', room_id: roomId, seq: 1, manifest_id: 'mf1', sandbox_snapshot_uuid: null, plan: [], task_log_id: 'l1', parent_id: null, created_at: at(45) }, 'coordinator', 45),
-    ev(roomId, 'checkpoint.created', { id: 'cp2', room_id: roomId, seq: 2, manifest_id: 'mf2', sandbox_snapshot_uuid: null, plan: [], task_log_id: 'l2', parent_id: 'cp1', created_at: at(30) }, 'coordinator', 30),
-    ev(roomId, 'checkpoint.created', { id: 'cp3', room_id: roomId, seq: 3, manifest_id: 'mf3', sandbox_snapshot_uuid: null, plan: [], task_log_id: 'l3', parent_id: 'cp2', created_at: at(10) }, 'coordinator', 10),
-    ev(roomId, 'budget.updated', { ...scenario.budget, tokens_cap: 2_000_000, runs_cap: 100 }),
-  ];
+      id: 'q1', task_id: `t${q.task}`, text: q.text, options: q.options as [string, string, ...string[]], default: q.default,
+      expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+    }, 'agent', 4),
+  );
+  // Checkpoints last, each covering the events since the one before, so nothing shows as rewound
+  let parent: string | null = null;
+  let start = 0;
+  for (const [i, minutesAgo] of [45, 30, 10].entries()) {
+    const id = `cp${i + 1}`;
+    const cp = ev(roomId, 'checkpoint.created', {
+      checkpoint_id: id, parent_id: parent, start_seq: start, manifest_id: `mf${i + 1}`, sandbox_snapshot_uuid: null,
+    }, 'agent', minutesAgo);
+    events.push(cp);
+    parent = id;
+    start = cp.seq;
+  }
+  events.push(ev(roomId, 'budget.updated', { ...scenario.budget, tokens_cap: 2_000_000, runs_cap: 100 }));
+  return events;
 }
 
-export function demoMessageEvent(roomId: string, text: string, to: MessageTo = 'agent'): AppEvent {
-  const now = new Date().toISOString();
-  const event: AppEvent = {
-    seq: nextDemoSeq(),
-    room_id: roomId,
-    type: 'message.posted',
-    actor_id: DEMO_USER.id,
-    ts: now,
-    payload: { id: `m-${Date.now()}`, room_id: roomId, user_id: DEMO_USER.id, text, to,
-      ...(to === 'agent' && { label: 'queue', rationale: 'Demo mode: queued locally.' }), created_at: now, user: DEMO_USER },
-  } as AppEvent;
-  rememberSent(event);
-  return event;
+export function demoMessageEvent(roomId: string, text: string, to: MessageTo = 'agent'): AppEvent[] {
+  const id = `m-${Date.now()}`;
+  const events = [ev(roomId, 'message.posted', { id, user_id: DEMO_USER.id, text, to }, DEMO_USER.id)];
+  if (to === 'agent') events.push(ev(roomId, 'message.labeled', { message_id: id, label: 'queue', rationale: 'Demo mode: queued locally.' }));
+  rememberSent(events);
+  return events;
 }

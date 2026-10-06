@@ -1,284 +1,108 @@
-// WebSocket client for real-time events and presence
-import type { AppEvent, Presence, RoomState } from '@/types';
+// Room WebSocket: /ws/rooms/{id}?token=<Supabase JWT>&since=<seq> (mux/server/mux/api/ws.py).
+// The server sends every stored event after `since`, then live ones, one envelope per message; presence and
+// text deltas carry the last stored seq. The client sends {type: "tab"}, {type: "typing"} and {type: "ping"}.
+import type { AppEvent, Presence, Room, RoomState, User } from '@/types';
 import { demoRoomEvents, isDemoMode } from './demo';
+import { applyEvent, createEmptyState } from './reducer';
+import { getAccessToken } from './supabase';
 
 type EventHandler = (event: AppEvent) => void;
 type PresenceHandler = (presence: Presence[]) => void;
 type StateHandler = (state: RoomState) => void;
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const MAX_RECONNECTS = 5;
+
 export class SocketClient {
   private ws: WebSocket | null = null;
-  private url: string;
   private roomId: string;
-  private since: number;
+  private since = 0; // the highest stored seq applied; a reconnect resumes after it
+  private liveAfter: number; // events up to here are history: they build the state but raise no notifications
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-  private reconnectDelay = 1000;
+  private closedByUs = false;
   private eventHandlers: Set<EventHandler> = new Set();
   private presenceHandlers: Set<PresenceHandler> = new Set();
   private stateHandlers: Set<StateHandler> = new Set();
-  private pendingEvents: AppEvent[] = [];
-  private currentState: RoomState | null = null;
-  private isConnected = false;
+  private state: RoomState;
 
-  constructor(roomId: string, since: number = 0) {
+  constructor(roomId: string, room?: Room, currentUser?: User) {
     this.roomId = roomId;
-    this.since = since;
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const apiHost = process.env.NEXT_PUBLIC_API_URL?.replace(/^http/, 'ws') || 'ws://localhost:8000';
-    this.url = `${apiHost}/rooms/${roomId}/ws?since=${since}`;
+    this.liveAfter = room?.last_seq ?? 0;
+    this.state = createEmptyState(room, currentUser);
   }
 
-  connect(): Promise<void> {
+  async connect(): Promise<void> {
+    this.closedByUs = false;
     if (isDemoMode()) {
       // Replay a canned room instead of opening a WebSocket
-      if (!this.currentState) this.handleMessage(demoRoomEvents(this.roomId));
-      this.isConnected = true;
-      return Promise.resolve();
-    }
-    return new Promise((resolve, reject) => {
-      try {
-        this.ws = new WebSocket(this.url);
-
-        this.ws.onopen = () => {
-          console.log('[WS] Connected');
-          this.isConnected = true;
-          this.reconnectAttempts = 0;
-          this.flushPendingEvents();
-          resolve();
-        };
-
-        this.ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            this.handleMessage(data);
-          } catch (e) {
-            console.error('[WS] Failed to parse message:', e);
-          }
-        };
-
-        this.ws.onclose = (event) => {
-          console.log('[WS] Disconnected:', event.code, event.reason);
-          this.isConnected = false;
-          this.scheduleReconnect();
-        };
-
-        this.ws.onerror = (error) => {
-          console.error('[WS] Error:', error);
-          if (!this.isConnected) {
-            reject(new Error('WebSocket connection failed'));
-          }
-        };
-      } catch (e) {
-        reject(e);
-      }
-    });
-  }
-
-  private handleMessage(data: unknown) {
-    // Handle initial state dump (array of events)
-    if (Array.isArray(data)) {
-      for (const event of data) {
-        this.applyEvent(event as AppEvent);
-      }
+      if (this.since === 0) for (const event of demoRoomEvents(this.roomId)) this.handle(event, false);
       this.notifyState();
       return;
     }
-
-    // Handle single event
-    const event = data as AppEvent;
-    this.applyEvent(event);
-    this.notifyEvent(event);
-    this.notifyState();
-  }
-
-  private applyEvent(event: AppEvent) {
-    this.since = event.seq;
-
-    if (!this.currentState) {
-      // Initialize minimal state - will be hydrated by initial dump
-      this.currentState = {
-        room: { id: this.roomId } as any,
-        plan: [],
-        messages: [],
-        conflicts: [],
-        questions: [],
-        files: new Map(),
-        checkpoints: [],
-        budget: { tokens_used: 0, runs_used: 0, tokens_cap: 2000000, runs_cap: 100 },
-        presence: [],
-        current_user: {} as any,
-        current_user_membership: {} as any,
+    const token = await getAccessToken();
+    const base = API_BASE.replace(/^http/, 'ws');
+    const url = `${base}/ws/rooms/${this.roomId}?since=${this.since}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      this.ws = ws;
+      let opened = false;
+      ws.onopen = () => {
+        opened = true;
+        this.reconnectAttempts = 0;
+        resolve();
       };
-    }
-
-    const state = this.currentState;
-
-    switch (event.type) {
-      case 'message.posted':
-        state.messages.push(event.payload);
-        break;
-      case 'message.labeled': {
-        const msg = state.messages.find(m => m.id === event.payload.message_id);
-        if (msg) {
-          msg.label = event.payload.label;
-          msg.rationale = event.payload.rationale;
-          msg.domain = event.payload.domain as any;
+      ws.onmessage = message => {
+        try {
+          const data = JSON.parse(message.data);
+          if (typeof data.seq !== 'number') {
+            if (data.type === 'error') console.error('[WS] Server error:', data.detail);
+            return; // pong and error replies are not events
+          }
+          this.handle(data as AppEvent, true);
+        } catch (e) {
+          console.error('[WS] Failed to handle message:', e);
         }
-        break;
-      }
-      case 'plan.item_added':
-        state.plan.push(event.payload);
-        break;
-      case 'plan.item_updated': {
-        const item = state.plan.find(p => p.id === event.payload.id);
-        if (item) Object.assign(item, event.payload.changes);
-        break;
-      }
-      case 'plan.approved': {
-        state.plan.forEach(p => { if (p.status === 'draft') p.status = 'todo'; });
-        break;
-      }
-      case 'conflict.opened':
-        state.conflicts.push(event.payload);
-        break;
-      case 'conflict.vote': {
-        const conflict = state.conflicts.find(c => c.id === event.payload.conflict_id);
-        if (conflict) {
-          conflict.votes.push({
-            conflict_id: event.payload.conflict_id,
-            user_id: event.payload.user_id,
-            option: event.payload.option,
-            weight: event.payload.weight,
-          });
-        }
-        break;
-      }
-      case 'conflict.closed': {
-        const conflict = state.conflicts.find(c => c.id === event.payload.conflict_id);
-        if (conflict) {
-          conflict.status = 'closed';
-          conflict.result = event.payload.result;
-          conflict.resolved_by = event.payload.resolved_by;
-        }
-        // Unblock the task
-        const task = state.plan.find(p => p.id === conflict?.task_id);
-        if (task) {
-          task.status = 'todo';
-          task.notes = `unblocked · ${event.payload.result}`;
-        }
-        break;
-      }
-      case 'question.opened':
-        state.questions.push(event.payload);
-        break;
-      case 'question.answered': {
-        const q = state.questions.find(q => q.id === event.payload.question_id);
-        if (q) {
-          q.status = 'answered';
-          q.answer = event.payload.answer;
-        }
-        const task = state.plan.find(p => p.id === q?.task_id);
-        if (task) {
-          task.status = 'todo';
-          task.notes = `unblocked · ${event.payload.answer.toLowerCase()}`;
-        }
-        break;
-      }
-      case 'question.defaulted': {
-        const q = state.questions.find(q => q.id === event.payload.question_id);
-        if (q) {
-          q.status = 'defaulted';
-          q.answer = q.default_option;
-        }
-        break;
-      }
-      case 'task.started': {
-        const task = state.plan.find(p => p.id === event.payload.task_id);
-        if (task) task.status = 'doing';
-        break;
-      }
-      case 'task.finished': {
-        const task = state.plan.find(p => p.id === event.payload.task_id);
-        if (task) task.status = 'done';
-        break;
-      }
-      case 'file.changed': {
-        state.files.set(event.payload.path, { hash: event.payload.hash, version: event.payload.version });
-        break;
-      }
-      case 'checkpoint.created':
-        state.checkpoints.push(event.payload);
-        break;
-      case 'room.rewound': {
-        // State will be rebuilt from events after rewind
-        // For now, just update checkpoints
-        state.checkpoints = state.checkpoints.filter(c => c.seq <= event.payload.seq);
-        break;
-      }
-      case 'budget.updated':
-        state.budget = event.payload;
-        break;
-      case 'presence.join':
-        state.presence.push(event.payload);
-        break;
-      case 'presence.leave':
-        state.presence = state.presence.filter(p => p.user_id !== event.payload.user_id);
-        break;
-      case 'presence.typing': {
-        const p = state.presence.find(p => p.user_id === event.payload.user_id);
-        if (p) p.typing = event.payload.typing;
-        break;
-      }
-      case 'presence.tab': {
-        const p = state.presence.find(p => p.user_id === event.payload.user_id);
-        if (p) p.tab = event.payload.tab;
-        break;
-      }
-    }
+      };
+      ws.onclose = event => {
+        if (this.ws === ws) this.ws = null;
+        if (!opened) reject(new Error(`WebSocket closed before opening (${event.code} ${event.reason})`));
+        else if (!this.closedByUs) this.scheduleReconnect();
+      };
+      ws.onerror = () => {
+        if (!opened) console.error('[WS] Connection failed');
+      };
+    });
   }
 
-  private flushPendingEvents() {
-    // Events that arrived before connection
-  }
-
-  private notifyEvent(event: AppEvent) {
-    this.eventHandlers.forEach(h => h(event));
+  private handle(event: AppEvent, notify: boolean) {
+    const stored = !event.type.startsWith('presence.') && event.type !== 'agent.text.delta';
+    if (stored && event.seq <= this.since) return; // already applied (a reconnect overlaps)
+    this.state = applyEvent(this.state, event);
+    if (stored) this.since = event.seq;
+    if (notify && (!stored || event.seq > this.liveAfter)) this.eventHandlers.forEach(h => h(event));
+    if (notify) this.notifyState();
   }
 
   private notifyState() {
-    if (this.currentState) {
-      // State is mutated in place, so hand out a fresh snapshot or React won't re-render
-      const s = this.currentState;
-      const snapshot: RoomState = {
-        ...s,
-        plan: s.plan.map(p => ({ ...p })),
-        messages: [...s.messages],
-        conflicts: s.conflicts.map(c => ({ ...c, votes: [...c.votes] })),
-        questions: s.questions.map(q => ({ ...q })),
-        files: new Map(s.files),
-        checkpoints: [...s.checkpoints],
-        presence: s.presence.map(p => ({ ...p })),
-      };
-      this.stateHandlers.forEach(h => h(snapshot));
-      // Also compute presence for convenience
-      this.presenceHandlers.forEach(h => h(this.currentState!.presence));
-    }
+    this.stateHandlers.forEach(h => h(this.state));
+    this.presenceHandlers.forEach(h => h(this.state.presence));
   }
 
   private scheduleReconnect() {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+    if (this.reconnectAttempts >= MAX_RECONNECTS) {
       console.error('[WS] Max reconnect attempts reached');
       return;
     }
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
+    const delay = 1000 * 2 ** this.reconnectAttempts;
     this.reconnectAttempts++;
-    setTimeout(() => this.connect(), delay);
+    setTimeout(() => {
+      if (!this.closedByUs) this.connect().catch(() => this.scheduleReconnect());
+    }, delay);
   }
 
   // Apply an event produced locally (demo mode) as if the server had sent it
   injectEvent(event: AppEvent) {
-    this.handleMessage(event);
+    this.handle(event, true);
   }
 
   onEvent(handler: EventHandler) {
@@ -293,32 +117,30 @@ export class SocketClient {
 
   onState(handler: StateHandler) {
     this.stateHandlers.add(handler);
-    if (this.currentState) handler(this.currentState);
+    handler(this.state);
     return () => this.stateHandlers.delete(handler);
   }
 
-  send(event: { type: string; payload: unknown }) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(event));
-    }
+  private send(message: Record<string, unknown>) {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(message));
   }
 
   sendPresence(tab: Presence['tab']) {
-    this.send({ type: 'presence.tab', payload: { tab } });
+    this.send({ type: 'tab', tab });
   }
 
   sendTyping(typing: boolean) {
-    this.send({ type: 'presence.typing', payload: { typing } });
+    this.send({ type: 'typing', typing });
   }
 
   disconnect() {
+    this.closedByUs = true;
     this.ws?.close(1000, 'Client disconnect');
     this.ws = null;
-    this.isConnected = false;
   }
 
-  getState(): RoomState | null {
-    return this.currentState;
+  getState(): RoomState {
+    return this.state;
   }
 
   getSince(): number {
@@ -326,23 +148,17 @@ export class SocketClient {
   }
 }
 
-// Singleton for the current room
+// One socket for the room on screen
 let currentSocket: SocketClient | null = null;
 
-export function getSocket(roomId: string, since?: number): SocketClient {
-  if (currentSocket && currentSocket['roomId'] === roomId) {
-    return currentSocket;
-  }
-  if (currentSocket) {
-    currentSocket.disconnect();
-  }
-  currentSocket = new SocketClient(roomId, since);
+export function getSocket(roomId: string, room?: Room, currentUser?: User): SocketClient {
+  if (currentSocket && currentSocket['roomId'] === roomId) return currentSocket;
+  currentSocket?.disconnect();
+  currentSocket = new SocketClient(roomId, room, currentUser);
   return currentSocket;
 }
 
 export function clearSocket() {
-  if (currentSocket) {
-    currentSocket.disconnect();
-    currentSocket = null;
-  }
+  currentSocket?.disconnect();
+  currentSocket = null;
 }

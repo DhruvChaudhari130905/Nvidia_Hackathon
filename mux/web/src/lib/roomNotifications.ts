@@ -37,7 +37,8 @@ export function notifyForEvent(event: AppEvent, ctx: RoomNotifyContext) {
     case 'plan.item_updated': {
       const status = event.payload.changes.status;
       if (status !== 'done' && status !== 'skipped_conflict' && status !== 'skipped_question') return;
-      const title = event.payload.changes.title ?? ctx.planItem(event.payload.id)?.title ?? 'A task';
+      const changed = event.payload.changes as { title?: string };
+      const title = changed.title ?? ctx.planItem(event.payload.id)?.title ?? 'A task';
       notify(
         status === 'done'
           ? { category: 'tasks', tone: 'ok', title: 'Task completed', body: title }
@@ -47,10 +48,10 @@ export function notifyForEvent(event: AppEvent, ctx: RoomNotifyContext) {
     }
 
     case 'build.result': {
-      const { passed, duration, errors } = event.payload;
+      const { passed, errors = [] } = event.payload;
       notify(
         passed
-          ? { category: 'builds', tone: 'ok', title: 'Build passed', body: `${roomTitle} · ${duration.toFixed(1)}s` }
+          ? { category: 'builds', tone: 'ok', title: 'Build passed', body: roomTitle }
           : { category: 'builds', tone: 'err', title: 'Build failed', body: errors[0] ? clip(errors[0]) : `${errors.length} errors` },
       );
       return;

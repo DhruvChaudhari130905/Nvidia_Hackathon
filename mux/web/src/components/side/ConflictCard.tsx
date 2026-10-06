@@ -47,20 +47,14 @@ export function ConflictCard({
     if (conflict.status === 'closed') setVoteDone(true);
   }, [conflict]);
 
-  // Timer
+  // Timer: the vote opens once the research is in (expires_at is set then); the server closes it
   useEffect(() => {
-    if (voteDone) return;
-    const interval = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) {
-          setVoteDone(true);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+    if (voteDone || !conflict.expires_at) return;
+    const tick = () => setTimeLeft(Math.max(0, Math.floor((new Date(conflict.expires_at).getTime() - Date.now()) / 1000)));
+    tick();
+    const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
-  }, [voteDone]);
+  }, [voteDone, conflict.expires_at]);
 
   const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
 
@@ -81,9 +75,11 @@ export function ConflictCard({
     <div className="card conflict">
       <div className="card-head">
         <span className="card-kind">Conflict · task {conflict.task_id}</span>
-        <span className="timer mono">{format(new Date(0).setSeconds(timeLeft), 'm:ss')}</span>
+        <span className="timer mono">
+          {conflict.status === 'open' ? 'researching…' : format(new Date(0).setSeconds(timeLeft), 'm:ss')}
+        </span>
       </div>
-      <h4>{conflict.options.length > 1 ? `What should we do?` : conflict.options[0]}</h4>
+      <h4>{conflict.summary || 'What should we do?'}</h4>
       <p className="why">
         {conflict.domain === 'ui' && 'Design decision needed. '}
         {conflict.domain === 'architecture' && 'Architecture decision needed. '}
@@ -112,7 +108,7 @@ export function ConflictCard({
         </div>
       ) : (
         <div className="resolved">
-          Decided: {conflict.result} ({conflict.resolved_by === currentUser.id ? 'your override' : 'vote closed'}). Pinned in the room log.
+          Decided: {conflict.result} ({conflict.resolved_by === 'override' ? 'owner override' : 'vote closed'}). Pinned in the room log.
         </div>
       )}
 
