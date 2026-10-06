@@ -127,6 +127,25 @@ input:focus-visible {
   font-weight: 500;
 }
 
+.tool.err::before {
+  background: var(--conflict);
+}
+
+.tool.err b {
+  color: var(--conflict);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool .truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .stream::after {
   content: "▍";
   color: var(--coder);

@@ -11,6 +11,18 @@ interface FeedItemProps {
 }
 
 export function FeedItem({ message, currentUser }: FeedItemProps) {
+  if (message.tool) {
+    const { name, detail, ok, summary } = message.tool;
+    const state = ok === undefined ? '' : ok ? 'ok' : 'err';
+    return (
+      <div className={`tool ${state}`} title={summary}>
+        <span>{name}</span>
+        {detail && <span className="truncate">{detail}</span>}
+        {ok !== undefined && <b>{ok ? (summary === 'passed' ? 'passed' : 'ok') : summary || 'failed'}</b>}
+      </div>
+    );
+  }
+
   const isAgent = message.user_id === 'agent' || message.user_id === 'mux';
   const isNote = message.to === 'team';
 
@@ -34,7 +46,7 @@ export function FeedItem({ message, currentUser }: FeedItemProps) {
             !isAgent && <span className="chip pending">waiting for coordinator</span>
           )}
         </div>
-        <p>{message.text}</p>
+        <p className={message.streaming ? 'stream' : undefined}>{message.text}</p>
       </div>
     </div>
   );

@@ -84,7 +84,9 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
     for (const event of demoMessageEvent(roomMatch[1], body.text, body.to)) getSocket(roomMatch[1]).injectEvent(event);
   }
   if (roomMatch && roomMatch[2] === '/files' && method === 'GET') return [] as T;
-  if (path === '/github/connect' || path.endsWith('/export')) return { url: 'https://github.com' } as T;
+  if (path.startsWith('/api/github/') || path.endsWith('/export')) {
+    return { url: 'https://github.com', configured: true, connected: true, login: 'demo', files: 0 } as T;
+  }
   return { path: '', version: (body.base_version ?? 0) + 1, changed: true } as T;
 }
 
@@ -175,10 +177,12 @@ export const api = {
   updateBudget: (roomId: string, tokensCap: number, runsCap: number) =>
     request<Budget & { paused: boolean }>(room(roomId, '/budget'), json('PUT', { tokens_cap: tokensCap, runs_cap: runsCap })),
 
-  // GitHub export comes back after v0; these still answer in demo mode
-  connectGitHub: () => request<{ url: string }>('/github/connect'),
+  // GitHub: connect once (OAuth; GitHub returns the browser to `next`), then export a room's current files
+  // to a new repository under the caller's account
+  githubStatus: () => request<{ configured: boolean; connected: boolean; login: string | null }>('/api/github/status'),
+  connectGitHub: (next = '/profile') => request<{ url: string }>(`/api/github/connect?next=${encodeURIComponent(next)}`),
   exportToGitHub: (roomId: string, repoName: string, isPrivate: boolean) =>
-    request<{ url: string }>(room(roomId, '/export'), json('POST', { repo_name: repoName, private: isPrivate })),
+    request<{ url: string; files: number }>(room(roomId, '/export'), json('POST', { repo_name: repoName, private: isPrivate })),
 
   // Session
   endSession: (roomId: string) => request<{ ended: boolean }>(room(roomId, '/session/end'), { method: 'POST' }),

@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { X, Github, Lock, Globe, ExternalLink, Check } from 'lucide-react';
 import type { Room } from '@/types';
-import { api } from '@/lib/api';
+import { ApiError, api } from '@/lib/api';
 
 interface ExportDialogProps {
   isOpen: boolean;
@@ -22,6 +22,8 @@ export function ExportDialog({ isOpen, onClose, room }: ExportDialogProps) {
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [repoUrl, setRepoUrl] = useState<string | null>(null);
+  const [fileCount, setFileCount] = useState(0);
+  const [needsConnect, setNeedsConnect] = useState(false);
 
   if (!isOpen) return null;
 
@@ -31,13 +33,26 @@ export function ExportDialog({ isOpen, onClose, room }: ExportDialogProps) {
     if (!name) return;
     setExporting(true);
     setError(null);
+    setNeedsConnect(false);
     try {
-      const { url } = await api.exportToGitHub(room.id, name, isPrivate);
+      const { url, files } = await api.exportToGitHub(room.id, name, isPrivate);
       setRepoUrl(url);
+      setFileCount(files);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Export failed. Is GitHub connected on your profile?');
+      setError(err instanceof Error ? err.message : 'Export failed.');
+      setNeedsConnect(err instanceof ApiError && err.status === 409 && /connect github/i.test(err.message));
     } finally {
       setExporting(false);
+    }
+  };
+
+  // GitHub returns the browser to this room afterwards
+  const handleConnect = async () => {
+    try {
+      const { url } = await api.connectGitHub(`/room/${room.id}`);
+      window.location.href = url;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not start the GitHub connection.');
     }
   };
 
@@ -71,8 +86,8 @@ export function ExportDialog({ isOpen, onClose, room }: ExportDialogProps) {
             <div className="flex items-start gap-3 rounded-lg border border-[var(--coord)]/40 bg-[var(--coord)]/10 p-4">
               <Check className="mt-0.5 h-5 w-5 flex-none text-[var(--coord)]" />
               <div>
-                <p className="font-medium">Export started</p>
-                <p className="text-sm text-[var(--muted)]">The current checkpoint is being pushed to your new repository.</p>
+                <p className="font-medium">Exported</p>
+                <p className="text-sm text-[var(--muted)]">{fileCount} files from the room are in your new repository.</p>
               </div>
             </div>
             <div className="flex justify-end gap-2">
@@ -124,7 +139,14 @@ export function ExportDialog({ isOpen, onClose, room }: ExportDialogProps) {
               })}
             </div>
 
-            {error && <p className="text-sm text-[var(--conflict)]">{error}</p>}
+            {error && (
+              <p className="text-sm text-[var(--conflict)]">
+                {error}{' '}
+                {needsConnect && (
+                  <button type="button" className="underline" onClick={handleConnect}>Connect GitHub</button>
+                )}
+              </p>
+            )}
 
             <div className="flex justify-end gap-2 border-t border-[var(--line)] pt-4">
               <button className="btn" onClick={handleClose} type="button" disabled={exporting}>Cancel</button>

@@ -1,7 +1,7 @@
 // Pure reducer: the server's events -> room state. Replay, live updates and rewind all go through applyEvent.
 // The server sends the room's facts (ids, payloads in types/server.ts); this file turns them into the shapes the
 // UI draws (types/index.ts): names and avatars for people, feed messages for agent activity, card status.
-import type { AppEvent, Checkpoint, Conflict, EventOf, Membership, Message, PlanItem, Presence, Question, Room, RoomState, User } from '@/types';
+import type { AppEvent, Checkpoint, Conflict, EventOf, Membership, Message, PlanItem, Presence, Question, Room, RoomState, ToolCall, User } from '@/types';
 import { AGENT, AGENT_ID, person } from './people';
 import { computeActive } from './rewind';
 
@@ -104,15 +104,40 @@ function apply(s: RoomState, event: AppEvent): RoomState {
     case 'coordinator.reply':
       s.messages = [...s.messages, agentMessage(event, event.payload.text)];
       break;
-    case 'agent.text':
-      s.messages = [...s.messages, agentMessage(event, event.payload.text)];
+    case 'agent.text.delta': {
+      // Pieces of the coder's turn as the model writes it; never stored, so a reload shows only agent.text
+      const id = liveId(event.payload.task_id);
+      const live = s.messages.find(m => m.id === id);
+      s.messages = live
+        ? s.messages.map(m => (m.id === id ? { ...m, text: m.text + event.payload.text } : m))
+        : [...s.messages, { ...agentMessage(event, event.payload.text), id, task_id: event.payload.task_id, streaming: true }];
+      break;
+    }
+    case 'agent.text': {
+      const id = liveId(event.payload.task_id);
+      s.messages = [...s.messages.filter(m => m.id !== id), { ...agentMessage(event, event.payload.text), task_id: event.payload.task_id }];
+      break;
+    }
+    case 'tool.called': {
+      const p = event.payload;
+      const tool: ToolCall = { name: p.name, detail: toolDetail(p.arguments) };
+      s.messages = [...s.messages, { ...agentMessage(event, ''), task_id: p.task_id, tool }];
+      break;
+    }
+    case 'tool.result':
+      settleTool(s, event.payload.task_id, event.payload.name, event.payload.ok, event.payload.summary);
       break;
     case 'build.result':
     case 'test.result': {
-      const what = event.type === 'build.result' ? 'Build' : 'Tests';
-      const errors = event.payload.errors ?? [];
-      const text = event.payload.passed ? `${what} passed.` : `${what} failed: ${errors[0] ?? 'see the log'}`;
-      s.messages = [...s.messages, agentMessage(event, text)];
+      // The run_build / run_tests call waiting for it gets the result; there is no tool.result for these
+      const p = event.payload;
+      const name = event.type === 'build.result' ? 'run_build' : 'run_tests';
+      const errors = p.errors ?? [];
+      const summary = p.passed ? 'passed' : `failed: ${errors[0] ?? 'see the log'}`;
+      if (!settleTool(s, p.task_id, name, p.passed, summary)) {
+        const tool: ToolCall = { name, detail: '', ok: p.passed, summary };
+        s.messages = [...s.messages, { ...agentMessage(event, ''), task_id: p.task_id, tool }];
+      }
       break;
     }
     case 'turn.interrupted':
@@ -269,8 +294,7 @@ function apply(s: RoomState, event: AppEvent): RoomState {
       s.presence = s.presence.map(p => (p.user_id === event.payload.user_id ? { ...p, tab: event.payload.tab } : p));
       break;
 
-    // agent.text.delta streams a turn whose full text arrives as agent.text; logs, sitting.ended and tool
-    // calls are not shown in the feed
+    // logs and sitting.ended are not shown in the feed
     default:
       break;
   }
@@ -285,8 +309,28 @@ function planItem(p: { id: string; title: string; status?: PlanItem['status']; o
   return { id: p.id, title: p.title, status: p.status ?? 'draft', owner_role: p.owner_role, notes: p.notes, merged_notes: p.merged_notes ?? [] };
 }
 
+const liveId = (taskId: string) => `live-${taskId}`;
+
+// Give the latest call of this tool in this task that still waits for a result its result. False if none waits.
+function settleTool(s: RoomState, taskId: string, name: string, ok: boolean, summary: string): boolean {
+  const index = s.messages.findLastIndex(m => m.tool?.ok === undefined && m.tool?.name === name && m.task_id === taskId);
+  if (index < 0) return false;
+  const m = s.messages[index];
+  s.messages = s.messages.with(index, { ...m, tool: { ...m.tool!, ok, summary } });
+  return true;
+}
+
+// The argument worth showing for a tool call: a path, a search, a question (file contents are left out)
+function toolDetail(args: Record<string, unknown>): string {
+  for (const key of ['path', 'query', 'pattern', 'title', 'question', 'summary']) {
+    const value = args[key];
+    if (typeof value === 'string' && value) return value.length > 80 ? `${value.slice(0, 79)}…` : value;
+  }
+  return '';
+}
+
 function agentMessage(
-  event: EventOf<'coordinator.reply' | 'agent.text' | 'build.result' | 'test.result' | 'turn.interrupted'>,
+  event: EventOf<'coordinator.reply' | 'agent.text' | 'agent.text.delta' | 'tool.called' | 'build.result' | 'test.result' | 'turn.interrupted'>,
   text: string,
 ): Message {
   return { id: `e${event.seq}`, seq: event.seq, room_id: event.room_id, user_id: AGENT_ID, text, to: 'agent', created_at: event.ts, user: AGENT };

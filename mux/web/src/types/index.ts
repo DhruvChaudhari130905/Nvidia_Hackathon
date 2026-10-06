@@ -79,6 +79,15 @@ export interface Message {
   task_id?: string | null; // the task a queue, merge or interrupt went into
   created_at: string;
   user: User;
+  streaming?: boolean; // the coder's turn still arriving (agent.text.delta); replaced by its agent.text
+  tool?: ToolCall; // set on a coder tool call, drawn as one short line instead of a message
+}
+
+export interface ToolCall {
+  name: string;
+  detail: string; // the argument worth showing: a path, a query
+  ok?: boolean; // unset until its tool.result arrives
+  summary?: string;
 }
 
 export interface Conflict {

@@ -42,6 +42,8 @@ export default function ProfilePage() {
   const [defaultRole, setDefaultRoleState] = useState<DomainRole>('pm');
   const [savedRole, setSavedRole] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [github, setGithub] = useState<{ connected: boolean; login: string | null } | null>(null);
+  const [githubNote, setGithubNote] = useState<string | null>(null);
   const [barReady, setBarReady] = useState(false); // lets the plan bar grow from 0 after first paint
 
   useEffect(() => {
@@ -69,6 +71,10 @@ export default function ProfilePage() {
         setDefaultRoleState(getDefaultRole());
 
         setRooms(await api.listRooms());
+        // GitHub sends the browser back here with ?github=connected or ?github=error&detail=...
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('github') === 'error') setGithubNote(`GitHub was not connected: ${params.get('detail') ?? 'unknown error'}`);
+        api.githubStatus().then(setGithub).catch(() => setGithub(null));
         requestAnimationFrame(() => setTimeout(() => setBarReady(true), 150));
       } catch (error) {
         console.error('Failed to load profile:', error);
@@ -336,8 +342,13 @@ export default function ProfilePage() {
                 className="flex w-full items-center justify-center gap-space-sm rounded-lg bg-surface-container-high py-space-sm text-label-md text-on-surface transition-colors hover:bg-surface-bright disabled:opacity-50"
               >
                 <Github className="h-4 w-4" />
-                {connecting ? 'Connecting…' : 'Connect GitHub for export'}
+                {connecting
+                  ? 'Connecting…'
+                  : github?.connected
+                    ? `GitHub connected${github.login ? ` as @${github.login}` : ''} · reconnect`
+                    : 'Connect GitHub for export'}
               </button>
+              {githubNote && <p className="text-body-sm text-error">{githubNote}</p>}
               <button
                 type="button"
                 onClick={handleSignOut}

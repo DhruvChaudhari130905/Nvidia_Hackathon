@@ -33,6 +33,8 @@ export function ConflictCard({
   const [votes, setVotes] = useState<Record<string, number>>({});
   const [userVote, setUserVote] = useState<string | null>(null);
   const [voteDone, setVoteDone] = useState(false);
+  // The owner picked "Owner override": the next option clicked decides the conflict instead of voting
+  const [overriding, setOverriding] = useState(false);
 
   // Initialize votes
   useEffect(() => {
@@ -68,8 +70,11 @@ export function ConflictCard({
   const handleOverride = (option: string) => {
     if (currentUserRole !== 'owner') return;
     onOverride(conflict.id, option);
+    setOverriding(false);
     setVoteDone(true);
   };
+
+  const handleChoose = (option: string) => (overriding ? handleOverride(option) : handleVote(option));
 
   return (
     <div className="card conflict">
@@ -88,13 +93,14 @@ export function ConflictCard({
       </p>
 
       {!voteDone ? (
-        <div className="opts">
-          {conflict.options.map((option, index) => (
+        <div className="opts" aria-label={overriding ? 'Pick the option that decides this conflict' : 'Vote'}>
+          {overriding && <p className="text-xs text-[var(--conflict)]">Owner override: pick the option that wins.</p>}
+          {conflict.options.map(option => (
             <button
               key={option}
               className="opt"
-              onClick={() => handleVote(option)}
-              aria-pressed={userVote === option}
+              onClick={() => handleChoose(option)}
+              aria-pressed={!overriding && userVote === option}
               disabled={voteDone || currentUserRole === 'viewer'}
               data-opt={option}
             >
@@ -118,8 +124,8 @@ export function ConflictCard({
           {DOMAIN_ROLE_FOR[conflict.domain] === currentUserDomainRole && '· your role counts 2×'}
         </span>
         {currentUserRole === 'owner' && !voteDone && (
-          <button className="linkbtn" onClick={() => handleOverride(conflict.options[1] || conflict.options[0])} type="button">
-            Owner override
+          <button className="linkbtn" onClick={() => setOverriding(o => !o)} type="button" aria-pressed={overriding}>
+            {overriding ? 'Cancel override' : 'Owner override'}
           </button>
         )}
       </div>

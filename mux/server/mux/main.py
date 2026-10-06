@@ -16,7 +16,7 @@ from tavily import AsyncTavilyClient
 from mux.agents.llm import TokenFactoryLLM
 from mux.integrations.tavily import TavilySearch
 from mux.sandbox.client import TokenFactorySandboxClient
-from mux.api import rooms, ws
+from mux.api import github, rooms, ws
 from mux.config import settings
 from mux.events.bus import event_bus
 from mux.rooms.registry import init_registry
@@ -73,6 +73,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(PermissionError, conflict)
     app.add_exception_handler(KeyError, not_found)
     app.include_router(rooms.router, prefix="/api/rooms", tags=["rooms"])
+    app.include_router(github.router, prefix="/api", tags=["github"])
     app.include_router(ws.router, prefix="/ws")
 
     @app.get("/health")

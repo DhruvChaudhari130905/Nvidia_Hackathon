@@ -1,490 +1,235 @@
-"""GitHub OAuth connect, encrypted token storage, and pushing an export from a checkpoint manifest."""
+"""GitHub connect (OAuth with the repo scope) and export: a new repository holding the room's current files.
 
-from __future__ import annotations
+Tokens are stored encrypted (Fernet, GITHUB_TOKEN_ENCRYPTION_KEY) in the github_tokens table, so a restart keeps
+them. An export creates a fresh repository and adds one commit on top of its first one; nothing is force-pushed.
+"""
 
-import json
+import asyncio
+import base64
 import logging
-import os
 import secrets
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Optional
 from urllib.parse import urlencode
+from uuid import UUID
 
 import httpx
-from cryptography.fernet import Fernet
-from pydantic import BaseModel
+from cryptography.fernet import Fernet, InvalidToken
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from mux.config import settings
+from mux.db.tables import GithubToken
 
 logger = logging.getLogger(__name__)
 
-OAUTH_STATE_TTL_SECONDS = 600
+API = "https://api.github.com"
+AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+TOKEN_URL = "https://github.com/login/oauth/access_token"
+SCOPES = "repo"
+STATE_TTL_S = 600
+TIMEOUT_S = 20.0
+READY_TRIES = 5  # a repository created with auto_init can take a moment before its branch is readable
 
 
-class GitHubOAuthConfig(BaseModel):
-    """GitHub OAuth configuration."""
-    client_id: str
-    client_secret: str
-    redirect_uri: str
-    scopes: list[str] = ["repo", "user:email"]
+class GitHubError(Exception):
+    """A GitHub call failed. `status` is the HTTP status the API route should answer with."""
+
+    def __init__(self, message: str, status: int = 502) -> None:
+        super().__init__(message)
+        self.status = status
 
 
-class GitHubTokenData(BaseModel):
-    """Stored GitHub token data."""
-    access_token: str
-    token_type: str = "bearer"
-    scope: str = ""
-    expires_at: Optional[float] = None
-    refresh_token: Optional[str] = None
-
-
-class GitHubUserInfo(BaseModel):
-    """GitHub user information."""
-    login: str
-    id: int
-    email: Optional[str] = None
-    name: Optional[str] = None
-    avatar_url: Optional[str] = None
-
-
-@dataclass
-class GitHubExportResult:
-    """Result of exporting to GitHub."""
+@dataclass(frozen=True)
+class ExportResult:
+    repo_url: str
     commit_sha: str
-    html_url: str
-    files_pushed: int
+    files: int
 
 
-class GitHubIntegration:
-    """Handles GitHub OAuth and repository operations."""
+@dataclass(frozen=True)
+class _State:
+    user_id: UUID
+    next_path: str
+    issued_at: float
 
-    def __init__(self, encryption_key: Optional[bytes] = None):
-        """
-        Initialize GitHub integration.
 
-        Args:
-            encryption_key: Fernet key for encrypting stored tokens.
-                           If not provided, uses GITHUB_TOKEN_ENCRYPTION_KEY from settings
-                           or generates a new one (not persistent across restarts).
-        """
-        self.config = self._load_config()
-        self._fernet = self._init_fernet(encryption_key)
-        self._token_store: dict[str, str] = {}  # user_id -> encrypted token; in-memory, replace with DB in production
-        self._pending_states: dict[str, tuple[str, float]] = {}  # state -> (user_id, issued_at)
+class GitHub:
+    """GitHub OAuth, token storage and export for every user of this server."""
 
-    def _load_config(self) -> GitHubOAuthConfig:
-        """Load GitHub OAuth config from settings."""
-        client_id = getattr(settings, "github_client_id", "") or os.getenv("GITHUB_CLIENT_ID", "")
-        client_secret = getattr(settings, "github_client_secret", "") or os.getenv("GITHUB_CLIENT_SECRET", "")
-        redirect_uri = getattr(settings, "github_redirect_uri", "") or os.getenv("GITHUB_REDIRECT_URI", "")
+    def __init__(
+        self, session: Callable[[], AsyncSession], *, client_id: str, client_secret: str, redirect_uri: str,
+        encryption_key: str, http: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._session = session
+        self.client_id = client_id
+        self._client_secret = client_secret
+        self.redirect_uri = redirect_uri
+        if encryption_key:
+            self._fernet = Fernet(encryption_key.encode())
+        else:
+            logger.warning("GITHUB_TOKEN_ENCRYPTION_KEY is not set: GitHub connections are lost on restart")
+            self._fernet = Fernet(Fernet.generate_key())
+        self._http = http or httpx.AsyncClient(timeout=TIMEOUT_S)
+        self._states: dict[str, _State] = {}
 
-        if not client_id or not client_secret:
-            logger.warning("GitHub OAuth not configured - set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET")
+    @property
+    def configured(self) -> bool:
+        return bool(self.client_id and self._client_secret and self.redirect_uri)
 
-        return GitHubOAuthConfig(
-            client_id=client_id,
-            client_secret=client_secret,
-            redirect_uri=redirect_uri,
+    # ---- OAuth ----
+
+    def authorize_url(self, user_id: UUID, next_path: str = "/profile") -> str:
+        """The GitHub page that asks the user to connect. The state ties the callback to this user (single use)."""
+        if not self.configured:
+            raise GitHubError("GitHub export is not configured on this server", 503)
+        self._prune()
+        state = secrets.token_urlsafe(32)
+        self._states[state] = _State(user_id, next_path, time.time())
+        query = {"client_id": self.client_id, "redirect_uri": self.redirect_uri, "scope": SCOPES, "state": state}
+        return f"{AUTHORIZE_URL}?{urlencode(query)}"
+
+    def take_state(self, state: str) -> _State | None:
+        """The user and return path a state was issued for; None if unknown, used or expired."""
+        self._prune()
+        return self._states.pop(state, None)
+
+    def _prune(self) -> None:
+        cutoff = time.time() - STATE_TTL_S
+        for key in [k for k, s in self._states.items() if s.issued_at < cutoff]:
+            del self._states[key]
+
+    async def connect(self, user_id: UUID, code: str) -> None:
+        """Trade the callback's code for a token and store it for the user."""
+        r = await self._http.post(
+            TOKEN_URL, headers={"Accept": "application/json"},
+            data={"client_id": self.client_id, "client_secret": self._client_secret, "code": code,
+                  "redirect_uri": self.redirect_uri},
         )
+        body = r.json() if r.is_success else {}
+        if "access_token" not in body:
+            raise GitHubError(f"GitHub did not grant access ({body.get('error', r.status_code)})", 400)
+        await self._save_token(user_id, body["access_token"], body.get("scope", ""))
 
-    def _init_fernet(self, key: Optional[bytes]) -> Optional[Fernet]:
-        """Initialize Fernet for token encryption."""
-        if key:
-            return Fernet(key)
+    # ---- tokens ----
 
-        # Try to get key from settings/env
-        key_b64 = getattr(settings, "github_token_encryption_key", "") or os.getenv("GITHUB_TOKEN_ENCRYPTION_KEY", "")
-        if key_b64:
-            try:
-                return Fernet(key_b64.encode())
-            except Exception as e:
-                logger.warning(f"Invalid encryption key: {e}")
-
-        # Generate ephemeral key (tokens won't persist across restarts)
-        logger.warning("No persistent encryption key - generating ephemeral key. Tokens will be lost on restart.")
-        return Fernet(Fernet.generate_key())
-
-    def _encrypt_token(self, token_data: GitHubTokenData) -> str:
-        """Encrypt token data for storage."""
-        data = token_data.model_dump_json().encode()
-        return self._fernet.encrypt(data).decode()
-
-    def _decrypt_token(self, encrypted: str) -> GitHubTokenData:
-        """Decrypt token data from storage."""
-        data = self._fernet.decrypt(encrypted.encode())
-        return GitHubTokenData.model_validate_json(data)
-
-    # =========================================================================
-    # OAuth Flow
-    # =========================================================================
-
-    def get_authorization_url(self, user_id: str, state: Optional[str] = None) -> tuple[str, str]:
-        """
-        Generate GitHub OAuth authorization URL.
-
-        Args:
-            user_id: The user ID to associate with the OAuth flow.
-            state: Optional state parameter (generated if not provided).
-
-        Returns:
-            Tuple of (authorization_url, state)
-        """
-        if not self.config.client_id:
-            raise RuntimeError("GitHub OAuth not configured: missing client_id")
-
-        if not state:
-            state = secrets.token_urlsafe(32)
-
-        # Remember which user started this flow; the callback looks it up by state
-        self._prune_states()
-        self._pending_states[state] = (user_id, time.time())
-
-        params = {
-            "client_id": self.config.client_id,
-            "redirect_uri": self.config.redirect_uri,
-            "scope": " ".join(self.config.scopes),
-            "state": state,
-            "allow_signup": "true",
-        }
-
-        url = f"https://github.com/login/oauth/authorize?{urlencode(params)}"
-        return url, state
-
-    def _prune_states(self) -> None:
-        cutoff = time.time() - OAUTH_STATE_TTL_SECONDS
-        for key in [k for k, (_, ts) in self._pending_states.items() if ts < cutoff]:
-            del self._pending_states[key]
-
-    def consume_state(self, state: str) -> Optional[str]:
-        """Return the user id for a state issued by get_authorization_url (single use), or None."""
-        self._prune_states()
-        entry = self._pending_states.pop(state, None)
-        return entry[0] if entry else None
-
-    async def exchange_code_for_token(self, code: str, state: str) -> GitHubTokenData:
-        """
-        Exchange OAuth code for access token.
-
-        Args:
-            code: Authorization code from GitHub callback.
-            state: State parameter from callback.
-
-        Returns:
-            GitHubTokenData with access token and metadata.
-        """
-        if not self.config.client_id or not self.config.client_secret:
-            raise RuntimeError("GitHub OAuth not configured")
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://github.com/login/oauth/access_token",
-                data={
-                    "client_id": self.config.client_id,
-                    "client_secret": self.config.client_secret,
-                    "code": code,
-                    "redirect_uri": self.config.redirect_uri,
-                },
-                headers={"Accept": "application/json"},
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-        if "error" in data:
-            raise ValueError(f"GitHub OAuth error: {data['error']} - {data.get('error_description', '')}")
-
-        token_data = GitHubTokenData(
-            access_token=data["access_token"],
-            token_type=data.get("token_type", "bearer"),
-            scope=data.get("scope", ""),
-            expires_at=time.time() + data.get("expires_in", 0) if data.get("expires_in") else None,
-            refresh_token=data.get("refresh_token"),
+    async def _save_token(self, user_id: UUID, token: str, scopes: str) -> None:
+        encrypted = self._fernet.encrypt(token.encode())
+        stmt = insert(GithubToken).values(user_id=user_id, token_encrypted=encrypted, scopes=scopes)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[GithubToken.user_id], set_={"token_encrypted": encrypted, "scopes": scopes}
         )
-        return token_data
+        async with self._session() as session, session.begin():
+            await session.execute(stmt)
 
-    async def get_user_info(self, access_token: str) -> GitHubUserInfo:
-        """Fetch authenticated user's GitHub profile."""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://api.github.com/user",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/vnd.github+json",
-                },
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            # Also fetch email if not public (must stay inside the client's context)
-            email = data.get("email")
-            if not email:
-                email_resp = await client.get(
-                    "https://api.github.com/user/emails",
-                    headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"},
-                    timeout=10.0,
-                )
-                if email_resp.is_success:
-                    emails = email_resp.json()
-                    primary = next((e for e in emails if e.get("primary") and e.get("verified")), None)
-                    if primary:
-                        email = primary.get("email")
-
-        return GitHubUserInfo(
-            login=data["login"],
-            id=data["id"],
-            email=email,
-            name=data.get("name"),
-            avatar_url=data.get("avatar_url"),
-        )
-
-    # =========================================================================
-    # Token Storage
-    # =========================================================================
-
-    def store_token(self, user_id: str, token_data: GitHubTokenData) -> None:
-        """Store encrypted token for a user."""
-        encrypted = self._encrypt_token(token_data)
-        self._token_store[user_id] = encrypted
-        logger.info(f"Stored GitHub token for user {user_id}")
-
-    def get_token(self, user_id: str) -> Optional[GitHubTokenData]:
-        """Retrieve and decrypt token for a user."""
-        encrypted = self._token_store.get(user_id)
-        if not encrypted:
+    async def token(self, user_id: UUID) -> str | None:
+        """The user's token; None if they never connected or it was encrypted with another key."""
+        async with self._session() as session:
+            row = await session.scalar(select(GithubToken).where(GithubToken.user_id == user_id))
+        if row is None:
             return None
         try:
-            return self._decrypt_token(encrypted)
-        except Exception as e:
-            logger.error(f"Failed to decrypt token for user {user_id}: {e}")
+            return self._fernet.decrypt(row.token_encrypted).decode()
+        except InvalidToken:
             return None
 
-    def delete_token(self, user_id: str) -> bool:
-        """Delete stored token for a user."""
-        if user_id in self._token_store:
-            del self._token_store[user_id]
-            return True
-        return False
+    async def status(self, user_id: UUID) -> dict[str, object]:
+        """Whether the user is connected, and their GitHub login (a revoked token counts as not connected)."""
+        token = await self.token(user_id)
+        if token is None:
+            return {"connected": False, "login": None}
+        r = await self._http.get(f"{API}/user", headers=_headers(token))
+        if not r.is_success:
+            return {"connected": False, "login": None}
+        return {"connected": True, "login": r.json().get("login")}
 
-    def has_token(self, user_id: str) -> bool:
-        """Check if user has a stored token."""
-        return user_id in self._token_store
+    # ---- export ----
 
-    def get_connection_status(self, user_id: str) -> dict:
-        """Get GitHub connection status for a user."""
-        token_data = self.get_token(user_id)
-        if not token_data:
-            return {"connected": False, "username": None, "scopes": []}
+    async def export(
+        self, user_id: UUID, repo_name: str, *, private: bool, files: Mapping[str, bytes], message: str
+    ) -> ExportResult:
+        """Create `repo_name` under the user's account and commit `files` to its default branch."""
+        token = await self.token(user_id)
+        if token is None:
+            raise GitHubError("Connect GitHub on your profile first", 409)
+        if not files:
+            raise GitHubError("The room has no files to export", 400)
+        h = _headers(token)
 
-        # Token exists - optionally validate it's still good
-        return {
-            "connected": True,
-            "username": None,  # Would need API call to get
-            "scopes": token_data.scope.split(",") if token_data.scope else [],
-            "expires_at": token_data.expires_at,
-        }
-
-    # =========================================================================
-    # Repository Operations
-    # =========================================================================
-
-    async def _get_headers(self, access_token: str) -> dict:
-        return {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-
-    async def create_or_update_files(
-        self,
-        access_token: str,
-        owner: str,
-        repo: str,
-        branch: str,
-        files: dict[str, str],  # path -> content
-        commit_message: str,
-        path_prefix: str = "",
-    ) -> GitHubExportResult:
-        """
-        Create or update multiple files in a repository in a single commit.
-
-        Uses the GitHub Contents API with a commit tree.
-        """
-        headers = await self._get_headers(access_token)
-
-        async with httpx.AsyncClient() as client:
-            # 1. Get the latest commit SHA on the branch
-            ref_resp = await client.get(
-                f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{branch}",
-                headers=headers,
-                timeout=10.0,
-            )
-            if ref_resp.status_code == 404:
-                # Branch doesn't exist - create from default branch
-                default_branch_resp = await client.get(
-                    f"https://api.github.com/repos/{owner}/{repo}",
-                    headers=headers,
-                    timeout=10.0,
-                )
-                default_branch_resp.raise_for_status()
-                default_branch = default_branch_resp.json()["default_branch"]
-
-                ref_resp = await client.get(
-                    f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{default_branch}",
-                    headers=headers,
-                    timeout=10.0,
-                )
-                if ref_resp.status_code == 404:
-                    raise ValueError(f"Repository {owner}/{repo} has no commits")
-
-                # Create the new branch
-                base_sha = ref_resp.json()["object"]["sha"]
-                create_ref_resp = await client.post(
-                    f"https://api.github.com/repos/{owner}/{repo}/git/refs",
-                    headers=headers,
-                    json={"ref": f"refs/heads/{branch}", "sha": base_sha},
-                    timeout=10.0,
-                )
-                create_ref_resp.raise_for_status()
-            else:
-                ref_resp.raise_for_status()
-                base_sha = ref_resp.json()["object"]["sha"]
-
-            # 2. Get the base tree
-            commit_resp = await client.get(
-                f"https://api.github.com/repos/{owner}/{repo}/git/commits/{base_sha}",
-                headers=headers,
-                timeout=10.0,
-            )
-            commit_resp.raise_for_status()
-            base_tree_sha = commit_resp.json()["tree"]["sha"]
-
-            # 3. Create blobs for each file
-            tree_items = []
-            for path, content in files.items():
-                full_path = f"{path_prefix}{path}".lstrip("/")
-                blob_resp = await client.post(
-                    f"https://api.github.com/repos/{owner}/{repo}/git/blobs",
-                    headers=headers,
-                    json={"content": content, "encoding": "utf-8"},
-                    timeout=10.0,
-                )
-                blob_resp.raise_for_status()
-                blob_sha = blob_resp.json()["sha"]
-
-                tree_items.append({
-                    "path": full_path,
-                    "mode": "100644",
-                    "type": "blob",
-                    "sha": blob_sha,
-                })
-
-            # 4. Create a new tree
-            tree_resp = await client.post(
-                f"https://api.github.com/repos/{owner}/{repo}/git/trees",
-                headers=headers,
-                json={"base_tree": base_tree_sha, "tree": tree_items},
-                timeout=10.0,
-            )
-            tree_resp.raise_for_status()
-            new_tree_sha = tree_resp.json()["sha"]
-
-            # 5. Create a new commit
-            commit_resp = await client.post(
-                f"https://api.github.com/repos/{owner}/{repo}/git/commits",
-                headers=headers,
-                json={
-                    "message": commit_message,
-                    "tree": new_tree_sha,
-                    "parents": [base_sha],
-                },
-                timeout=10.0,
-            )
-            commit_resp.raise_for_status()
-            new_commit_sha = commit_resp.json()["sha"]
-
-            # 6. Update the branch reference
-            update_ref_resp = await client.patch(
-                f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{branch}",
-                headers=headers,
-                json={"sha": new_commit_sha, "force": True},
-                timeout=10.0,
-            )
-            update_ref_resp.raise_for_status()
-
-            return GitHubExportResult(
-                commit_sha=new_commit_sha,
-                html_url=f"https://github.com/{owner}/{repo}/commit/{new_commit_sha}",
-                files_pushed=len(files),
-            )
-
-    async def export_checkpoint(
-        self,
-        user_id: str,
-        checkpoint_data: dict[str, Any],
-        github_owner: str,
-        github_repo: str,
-        branch: str = "main",
-        commit_message: Optional[str] = None,
-        path_prefix: str = "",
-    ) -> GitHubExportResult:
-        """
-        Export a checkpoint to a GitHub repository.
-
-        Args:
-            user_id: User initiating the export (must have stored token).
-            checkpoint_data: Checkpoint manifest with 'files' and 'plan' keys.
-            github_owner: GitHub username or organization.
-            github_repo: Repository name.
-            branch: Target branch.
-            commit_message: Custom commit message.
-            path_prefix: Path prefix in repo (e.g., 'mux-exports/').
-
-        Returns:
-            GitHubExportResult with commit info.
-        """
-        token_data = self.get_token(user_id)
-        if not token_data:
-            raise ValueError("No GitHub token stored for user. Connect GitHub first.")
-
-        files = checkpoint_data.get("files", {})
-        plan = checkpoint_data.get("plan", [])
-
-        if not files and not plan:
-            raise ValueError("Checkpoint has no files or plan to export")
-
-        # Prepare files to push
-        export_files = dict(files)
-
-        # Add plan as a JSON file if present
-        if plan:
-            export_files["PLAN.json"] = json.dumps(plan, indent=2)
-
-        # Default commit message
-        if not commit_message:
-            from datetime import datetime, timezone
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            commit_message = f"MUX export: checkpoint from {ts}"
-
-        return await self.create_or_update_files(
-            access_token=token_data.access_token,
-            owner=github_owner,
-            repo=github_repo,
-            branch=branch,
-            files=export_files,
-            commit_message=commit_message,
-            path_prefix=path_prefix,
+        r = await self._http.post(
+            f"{API}/user/repos", headers=h,
+            json={"name": repo_name, "private": private, "auto_init": True, "description": "Built in MUX"},
         )
+        if r.status_code == 422:
+            raise GitHubError(f"You already have a repository named {repo_name}", 409)
+        if r.status_code == 401:
+            raise GitHubError("GitHub access was revoked: connect GitHub again", 409)
+        _check(r, "create the repository")
+        repo = r.json()
+        full, branch = repo["full_name"], repo.get("default_branch") or "main"
+
+        base_sha = await self._branch_head(h, full, branch)
+        r = await self._http.get(f"{API}/repos/{full}/git/commits/{base_sha}", headers=h)
+        _check(r, "read the first commit")
+        base_tree = r.json()["tree"]["sha"]
+
+        tree = []
+        for path, content in sorted(files.items()):
+            r = await self._http.post(
+                f"{API}/repos/{full}/git/blobs", headers=h,
+                json={"content": base64.b64encode(content).decode(), "encoding": "base64"},
+            )
+            _check(r, f"upload {path}")
+            tree.append({"path": path, "mode": "100644", "type": "blob", "sha": r.json()["sha"]})
+
+        r = await self._http.post(f"{API}/repos/{full}/git/trees", headers=h, json={"base_tree": base_tree, "tree": tree})
+        _check(r, "create the tree")
+        r = await self._http.post(
+            f"{API}/repos/{full}/git/commits", headers=h,
+            json={"message": message, "tree": r.json()["sha"], "parents": [base_sha]},
+        )
+        _check(r, "create the commit")
+        commit = r.json()["sha"]
+        # A fast-forward of the branch the repository was just created with: no force
+        r = await self._http.patch(f"{API}/repos/{full}/git/refs/heads/{branch}", headers=h, json={"sha": commit})
+        _check(r, "update the branch")
+        return ExportResult(repo["html_url"], commit, len(files))
+
+    async def _branch_head(self, h: dict[str, str], full: str, branch: str) -> str:
+        for attempt in range(READY_TRIES):
+            r = await self._http.get(f"{API}/repos/{full}/git/ref/heads/{branch}", headers=h)
+            if r.is_success:
+                return r.json()["object"]["sha"]
+            if r.status_code not in (404, 409) or attempt == READY_TRIES - 1:
+                _check(r, "read the new repository")
+            await asyncio.sleep(0.5 * (attempt + 1))
+        raise GitHubError("GitHub did not finish creating the repository")
+
+    async def close(self) -> None:
+        await self._http.aclose()
 
 
-# Global instance (initialized on first use)
-_github_integration: Optional[GitHubIntegration] = None
+def _headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
 
 
-def get_github_integration() -> GitHubIntegration:
-    """Get or create the global GitHub integration instance."""
-    global _github_integration
-    if _github_integration is None:
-        _github_integration = GitHubIntegration()
-    return _github_integration
+def _check(r: httpx.Response, what: str) -> None:
+    if not r.is_success:
+        logger.warning("GitHub could not %s: %s %s", what, r.status_code, r.text[:300])
+        raise GitHubError(f"GitHub could not {what} ({r.status_code})")
+
+
+_github: GitHub | None = None
+
+
+def get_github(session: Callable[[], AsyncSession]) -> GitHub:
+    """The process-wide GitHub client, made on first use from the settings."""
+    global _github
+    if _github is None:
+        _github = GitHub(
+            session, client_id=settings.github_client_id, client_secret=settings.github_client_secret,
+            redirect_uri=settings.github_redirect_uri, encryption_key=settings.github_token_encryption_key,
+        )
+    return _github
