@@ -74,6 +74,7 @@ async def test_create_list_and_get(client):
     assert room["head_checkpoint_id"] is not None
     listed = (await client.get("/api/rooms", headers=auth(owner))).json()
     assert [(x["id"], x["permission"]) for x in listed] == [(room["id"], "owner")]
+    assert (listed[0]["members"], listed[0]["budget_runs_cap"]) == (room["members"], room["budget_runs_cap"])
     assert (await client.get(f"/api/rooms/{room['id']}", headers=auth(owner))).json() == room
     assert (await client.get(f"/api/rooms/{uuid4()}", headers=auth(owner))).status_code == 404
 

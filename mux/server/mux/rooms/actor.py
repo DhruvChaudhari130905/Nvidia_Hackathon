@@ -486,6 +486,7 @@ class RoomActor:
                     state = rewind.head_state(target.id, self.checkpoints, logs)
                     files = await manifest.load(state.manifest_id, session=tx.session)
                     payload = rewind.rewound_payload(self.files.live, target.id, files)
+                    payload.plan = [PlanItem.model_validate(item) for item in target.plan]
                     event = await tx.emit("room.rewound", payload, by)
                     await records.set_head(self.room_id, target.id, session=tx.session)
                 self.files.live.apply_rewound(payload, files)

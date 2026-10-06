@@ -43,7 +43,9 @@ async def test_rewind_restores_files_plan_and_head(session_factory, publish, pub
 
     event = published[-1]
     assert event.type == "room.rewound"
-    assert event.payload == {"checkpoint_id": str(cp1.id), "versions": {"a.ts": 4}}  # above every version a.ts had
+    assert event.payload["checkpoint_id"] == str(cp1.id)
+    assert event.payload["versions"] == {"a.ts": 4}  # above every version a.ts had
+    assert [(i["id"], i["status"]) for i in event.payload["plan"]] == [("t1", "draft")]  # the web app's new plan
     assert await actor.read_file("a.ts") == (b"two\n", 4)
     with pytest.raises(KeyError):
         await actor.read_file("b.ts")  # not in cp1

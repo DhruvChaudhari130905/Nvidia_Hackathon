@@ -17,6 +17,7 @@ from mux.events.models import (
     ConflictDomain, DomainRole, EvidenceCitation, LinkAccess, MemberPermission, MessagePosted, MessageTo, Permission,
     PlanItem,
 )
+from mux.rooms import budget as budgets
 from mux.rooms import records
 from mux.rooms.cards import Conflict, Question
 from mux.rooms.registry import get_registry
@@ -50,7 +51,9 @@ class RoomOut(BaseModel):
     head_checkpoint_id: UUID | None
     my_permission: Permission
     members: list[MemberOut]
-    last_seq: int
+    last_seq: int  # events up to here are history; the WebSocket's later events are live
+    budget_tokens_cap: int
+    budget_runs_cap: int
 
 
 class RoomListItem(BaseModel):
@@ -59,6 +62,9 @@ class RoomListItem(BaseModel):
     description: str
     permission: Permission
     created_at: datetime
+    members: list[MemberOut]
+    budget_tokens_cap: int
+    budget_runs_cap: int
 
 
 def room_out(access: RoomAccess) -> RoomOut:
@@ -72,6 +78,7 @@ def room_out(access: RoomAccess) -> RoomOut:
             for user_id, m in record.members.items()
         ],
         last_seq=access.actor.emitter.seq,
+        budget_tokens_cap=access.actor.budget.tokens_cap, budget_runs_cap=access.actor.budget.runs_cap,
     )
 
 
@@ -87,7 +94,12 @@ async def list_rooms(user: User) -> list[RoomListItem]:
     async with get_registry().session() as s:
         rooms = await records.list_for_user(user.id, session=s)
     return [
-        RoomListItem(id=r.id, title=r.title, description=r.description, permission=r.permission, created_at=r.created_at)
+        RoomListItem(
+            id=r.id, title=r.title, description=r.description, permission=r.permission, created_at=r.created_at,
+            members=[MemberOut(user_id=u, permission=m.permission, domain_role=m.domain_role) for u, m in r.members.items()],
+            budget_tokens_cap=r.tokens_cap or budgets.DEFAULT_TOKENS_CAP,
+            budget_runs_cap=r.runs_cap or budgets.DEFAULT_RUNS_CAP,
+        )
         for r in rooms
     ]
 

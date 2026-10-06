@@ -1,0 +1,1298 @@
+{
+  "$defs": {
+    "AgentText": {
+      "additionalProperties": false,
+      "description": "Payload of 'agent.text' (stored, the full text of one coder turn) and 'agent.text.delta' (broadcast only).",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "text"
+      ],
+      "title": "AgentText",
+      "type": "object"
+    },
+    "BudgetUpdated": {
+      "additionalProperties": false,
+      "description": "Payload of 'budget.updated'. Field names match the web app's Budget type.",
+      "properties": {
+        "runs_cap": {
+          "type": "integer"
+        },
+        "runs_used": {
+          "type": "integer"
+        },
+        "tokens_cap": {
+          "type": "integer"
+        },
+        "tokens_used": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tokens_used",
+        "runs_used",
+        "tokens_cap",
+        "runs_cap"
+      ],
+      "title": "BudgetUpdated",
+      "type": "object"
+    },
+    "BuildResult": {
+      "additionalProperties": false,
+      "description": "Payload of 'build.result' and 'test.result': at most 5 errors, and the snapshot of a passing build.",
+      "properties": {
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "snapshot_uuid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "passed"
+      ],
+      "title": "BuildResult",
+      "type": "object"
+    },
+    "CheckpointCreated": {
+      "additionalProperties": false,
+      "description": "Payload of 'checkpoint.created'. The checkpoint's own seq is the envelope seq (R4).",
+      "properties": {
+        "checkpoint_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "manifest_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sandbox_snapshot_uuid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "start_seq": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "checkpoint_id",
+        "parent_id",
+        "start_seq",
+        "manifest_id",
+        "sandbox_snapshot_uuid"
+      ],
+      "title": "CheckpointCreated",
+      "type": "object"
+    },
+    "ConflictClosed": {
+      "additionalProperties": false,
+      "description": "Payload of 'conflict.closed'. resolved_by: \"votes\", \"owner\" or \"domain\" (the tie rules), or \"override\".",
+      "properties": {
+        "conflict_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "resolved_by": {
+          "type": "string"
+        },
+        "result": {
+          "type": "string"
+        },
+        "totals": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "conflict_id",
+        "result",
+        "resolved_by",
+        "totals"
+      ],
+      "title": "ConflictClosed",
+      "type": "object"
+    },
+    "ConflictEvidence": {
+      "additionalProperties": false,
+      "description": "Payload of 'conflict.evidence': the research (None when there was none), and the vote opens until expires_at.",
+      "properties": {
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/EvidenceCitation"
+          },
+          "type": "array"
+        },
+        "conflict_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "queries": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "conflict_id",
+        "expires_at"
+      ],
+      "title": "ConflictEvidence",
+      "type": "object"
+    },
+    "ConflictOpened": {
+      "additionalProperties": false,
+      "description": "Payload of 'conflict.opened'. `task_ids` are the tasks held (skipped_conflict) until the vote closes.",
+      "properties": {
+        "domain": {
+          "enum": [
+            "ui",
+            "architecture",
+            "scope"
+          ],
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "message_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "options": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 2,
+          "type": "array"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "task_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "message_ids",
+        "summary",
+        "options",
+        "domain",
+        "task_ids"
+      ],
+      "title": "ConflictOpened",
+      "type": "object"
+    },
+    "ConflictVote": {
+      "additionalProperties": false,
+      "description": "Payload of 'conflict.vote'. A later vote by the same user replaces the earlier one.",
+      "properties": {
+        "conflict_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "option": {
+          "type": "string"
+        },
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "weight": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conflict_id",
+        "user_id",
+        "option",
+        "weight"
+      ],
+      "title": "ConflictVote",
+      "type": "object"
+    },
+    "CoordinatorReply": {
+      "additionalProperties": false,
+      "description": "Payload of 'coordinator.reply'.",
+      "properties": {
+        "message_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "CoordinatorReply",
+      "type": "object"
+    },
+    "Empty": {
+      "additionalProperties": false,
+      "description": "Payload of 'plan.approved' and 'room.resumed'.",
+      "properties": {},
+      "title": "Empty",
+      "type": "object"
+    },
+    "EventEnvelope": {
+      "description": "Wire/storage shape of every event.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "room_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "ts": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "seq",
+        "type",
+        "ts",
+        "room_id",
+        "actor",
+        "payload"
+      ],
+      "title": "EventEnvelope",
+      "type": "object"
+    },
+    "EvidenceCitation": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "url"
+      ],
+      "title": "EvidenceCitation",
+      "type": "object"
+    },
+    "FileChanged": {
+      "additionalProperties": false,
+      "description": "Payload of 'file.changed'.",
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "base_version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "diff_summary": {
+          "type": "string"
+        },
+        "hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "hash",
+        "version",
+        "base_version",
+        "deleted",
+        "actor",
+        "diff_summary"
+      ],
+      "title": "FileChanged",
+      "type": "object"
+    },
+    "FileLockChanged": {
+      "additionalProperties": false,
+      "description": "Payload of 'file.locked' and 'file.unlocked'. `user_id` is the lock's holder.",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "user_id"
+      ],
+      "title": "FileLockChanged",
+      "type": "object"
+    },
+    "LogWritten": {
+      "additionalProperties": false,
+      "description": "Payload of 'log.task_written' and 'log.day_written'.",
+      "properties": {
+        "checkpoint_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "log_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "log_id",
+        "checkpoint_id"
+      ],
+      "title": "LogWritten",
+      "type": "object"
+    },
+    "MemberJoined": {
+      "additionalProperties": false,
+      "description": "Payload of 'member.joined'.",
+      "properties": {
+        "domain_role": {
+          "anyOf": [
+            {
+              "enum": [
+                "pm",
+                "design",
+                "eng"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "permission": {
+          "enum": [
+            "editor",
+            "viewer"
+          ],
+          "type": "string"
+        },
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user_id",
+        "permission",
+        "domain_role"
+      ],
+      "title": "MemberJoined",
+      "type": "object"
+    },
+    "MemberRoleChanged": {
+      "additionalProperties": false,
+      "description": "Payload of 'member.role_changed'.",
+      "properties": {
+        "permission": {
+          "enum": [
+            "editor",
+            "viewer"
+          ],
+          "type": "string"
+        },
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user_id",
+        "permission"
+      ],
+      "title": "MemberRoleChanged",
+      "type": "object"
+    },
+    "MessageLabeled": {
+      "additionalProperties": false,
+      "description": "Payload of 'message.labeled': what the coordinator decided for one message to the agent.",
+      "properties": {
+        "domain": {
+          "anyOf": [
+            {
+              "enum": [
+                "ui",
+                "architecture",
+                "scope"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "fallback": {
+          "default": false,
+          "type": "boolean"
+        },
+        "label": {
+          "enum": [
+            "merge",
+            "queue",
+            "interrupt",
+            "conflict",
+            "chat",
+            "plan"
+          ],
+          "type": "string"
+        },
+        "message_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "message_id",
+        "label",
+        "rationale"
+      ],
+      "title": "MessageLabeled",
+      "type": "object"
+    },
+    "MessagePosted": {
+      "additionalProperties": false,
+      "description": "Payload of 'message.posted'.",
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "to": {
+          "enum": [
+            "agent",
+            "team"
+          ],
+          "type": "string"
+        },
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "user_id",
+        "text",
+        "to"
+      ],
+      "title": "MessagePosted",
+      "type": "object"
+    },
+    "PlanItem": {
+      "additionalProperties": false,
+      "description": "One task of the plan. Also the payload of 'plan.item_added'.",
+      "properties": {
+        "id": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        },
+        "merged_notes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "owner_role": {
+          "anyOf": [
+            {
+              "enum": [
+                "pm",
+                "design",
+                "eng"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "default": "draft",
+          "enum": [
+            "draft",
+            "todo",
+            "doing",
+            "done",
+            "skipped_conflict",
+            "skipped_question",
+            "blocked"
+          ],
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "title": "PlanItem",
+      "type": "object"
+    },
+    "PlanItemUpdated": {
+      "additionalProperties": false,
+      "description": "Payload of 'plan.item_updated'. `changes` holds only the fields that change.",
+      "properties": {
+        "changes": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "changes"
+      ],
+      "title": "PlanItemUpdated",
+      "type": "object"
+    },
+    "PlanItems": {
+      "additionalProperties": false,
+      "description": "Payload of 'plan.drafted' and 'plan.edited': the whole plan, in order.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/PlanItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "PlanItems",
+      "type": "object"
+    },
+    "PresenceJoined": {
+      "additionalProperties": false,
+      "description": "Payload of 'presence.join' (broadcast, never stored).",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tab": {
+          "anyOf": [
+            {
+              "enum": [
+                "feed",
+                "preview",
+                "code",
+                "cards"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "typing": {
+          "type": "boolean"
+        },
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user_id",
+        "name",
+        "tab",
+        "typing"
+      ],
+      "title": "PresenceJoined",
+      "type": "object"
+    },
+    "PresenceLeft": {
+      "additionalProperties": false,
+      "description": "Payload of 'presence.leave' (broadcast, never stored).",
+      "properties": {
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user_id"
+      ],
+      "title": "PresenceLeft",
+      "type": "object"
+    },
+    "PresenceTab": {
+      "additionalProperties": false,
+      "description": "Payload of 'presence.tab' (broadcast, never stored).",
+      "properties": {
+        "tab": {
+          "enum": [
+            "feed",
+            "preview",
+            "code",
+            "cards"
+          ],
+          "type": "string"
+        },
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user_id",
+        "tab"
+      ],
+      "title": "PresenceTab",
+      "type": "object"
+    },
+    "PresenceTyping": {
+      "additionalProperties": false,
+      "description": "Payload of 'presence.typing' (broadcast, never stored).",
+      "properties": {
+        "typing": {
+          "type": "boolean"
+        },
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user_id",
+        "typing"
+      ],
+      "title": "PresenceTyping",
+      "type": "object"
+    },
+    "QuestionAnswered": {
+      "additionalProperties": false,
+      "description": "Payload of 'question.answered'.",
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "question_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "user_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "answer",
+        "user_id"
+      ],
+      "title": "QuestionAnswered",
+      "type": "object"
+    },
+    "QuestionDefaulted": {
+      "additionalProperties": false,
+      "description": "Payload of 'question.defaulted': nobody answered in time, so the default is the answer.",
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "question_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "answer"
+      ],
+      "title": "QuestionDefaulted",
+      "type": "object"
+    },
+    "QuestionOpened": {
+      "additionalProperties": false,
+      "description": "Payload of 'question.opened': the coder asks the room. Its task is skipped_question until an answer.",
+      "properties": {
+        "default": {
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2,
+          "type": "array"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "task_id",
+        "text",
+        "options",
+        "default",
+        "expires_at"
+      ],
+      "title": "QuestionOpened",
+      "type": "object"
+    },
+    "RoomCreated": {
+      "additionalProperties": false,
+      "description": "Payload of 'room.created'.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "owner_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner_id",
+        "title",
+        "description"
+      ],
+      "title": "RoomCreated",
+      "type": "object"
+    },
+    "RoomPaused": {
+      "additionalProperties": false,
+      "description": "Payload of 'room.paused': which cap was reached. 'room.resumed' has an empty payload.",
+      "properties": {
+        "reason": {
+          "enum": [
+            "tokens",
+            "runs"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "RoomPaused",
+      "type": "object"
+    },
+    "RoomRewound": {
+      "additionalProperties": false,
+      "description": "Payload of 'room.rewound' (R2): the new version of every path whose content changed, applied as given.\nPaths missing from the target checkpoint's manifest are removed; they keep their high-water marks.\n`plan` is the checkpoint's plan, which becomes the room's plan (rewinds stored before it was added lack it).",
+      "properties": {
+        "checkpoint_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "plan": {
+          "items": {
+            "$ref": "#/$defs/PlanItem"
+          },
+          "type": "array"
+        },
+        "versions": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "checkpoint_id",
+        "versions"
+      ],
+      "title": "RoomRewound",
+      "type": "object"
+    },
+    "SharingChanged": {
+      "additionalProperties": false,
+      "description": "Payload of 'sharing.changed'. link_permission is None when link_access is 'restricted'.",
+      "properties": {
+        "link_access": {
+          "enum": [
+            "restricted",
+            "anyone"
+          ],
+          "type": "string"
+        },
+        "link_permission": {
+          "anyOf": [
+            {
+              "enum": [
+                "editor",
+                "viewer"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "link_access",
+        "link_permission"
+      ],
+      "title": "SharingChanged",
+      "type": "object"
+    },
+    "SittingEnded": {
+      "additionalProperties": false,
+      "description": "Payload of 'sitting.ended': nobody connected for 30 minutes, or the owner ended the session.",
+      "properties": {
+        "reason": {
+          "enum": [
+            "idle",
+            "owner"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "SittingEnded",
+      "type": "object"
+    },
+    "TaskRef": {
+      "additionalProperties": false,
+      "description": "Payload of 'task.started' and 'task.finished'.",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "title": "TaskRef",
+      "type": "object"
+    },
+    "ToolCalled": {
+      "additionalProperties": false,
+      "description": "Payload of 'tool.called'. Long string arguments (file contents) are cut short.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "name",
+        "arguments"
+      ],
+      "title": "ToolCalled",
+      "type": "object"
+    },
+    "ToolResult": {
+      "additionalProperties": false,
+      "description": "Payload of 'tool.result': whether the call worked, and a one-line summary.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "name",
+        "ok",
+        "summary"
+      ],
+      "title": "ToolResult",
+      "type": "object"
+    },
+    "TurnInterrupted": {
+      "additionalProperties": false,
+      "description": "Payload of 'turn.interrupted': the coder stopped at a turn boundary and starts the task again.",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "reason"
+      ],
+      "title": "TurnInterrupted",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Generated by mux/server/scripts/export_schema.py. Do not edit by hand.",
+  "properties": {
+    "agent.text": {
+      "$ref": "#/$defs/AgentText"
+    },
+    "agent.text.delta": {
+      "$ref": "#/$defs/AgentText"
+    },
+    "budget.updated": {
+      "$ref": "#/$defs/BudgetUpdated"
+    },
+    "build.result": {
+      "$ref": "#/$defs/BuildResult"
+    },
+    "checkpoint.created": {
+      "$ref": "#/$defs/CheckpointCreated"
+    },
+    "conflict.closed": {
+      "$ref": "#/$defs/ConflictClosed"
+    },
+    "conflict.evidence": {
+      "$ref": "#/$defs/ConflictEvidence"
+    },
+    "conflict.opened": {
+      "$ref": "#/$defs/ConflictOpened"
+    },
+    "conflict.vote": {
+      "$ref": "#/$defs/ConflictVote"
+    },
+    "coordinator.reply": {
+      "$ref": "#/$defs/CoordinatorReply"
+    },
+    "file.changed": {
+      "$ref": "#/$defs/FileChanged"
+    },
+    "file.locked": {
+      "$ref": "#/$defs/FileLockChanged"
+    },
+    "file.unlocked": {
+      "$ref": "#/$defs/FileLockChanged"
+    },
+    "log.day_written": {
+      "$ref": "#/$defs/LogWritten"
+    },
+    "log.task_written": {
+      "$ref": "#/$defs/LogWritten"
+    },
+    "member.joined": {
+      "$ref": "#/$defs/MemberJoined"
+    },
+    "member.role_changed": {
+      "$ref": "#/$defs/MemberRoleChanged"
+    },
+    "message.labeled": {
+      "$ref": "#/$defs/MessageLabeled"
+    },
+    "message.posted": {
+      "$ref": "#/$defs/MessagePosted"
+    },
+    "plan.approved": {
+      "$ref": "#/$defs/Empty"
+    },
+    "plan.drafted": {
+      "$ref": "#/$defs/PlanItems"
+    },
+    "plan.edited": {
+      "$ref": "#/$defs/PlanItems"
+    },
+    "plan.item_added": {
+      "$ref": "#/$defs/PlanItem"
+    },
+    "plan.item_updated": {
+      "$ref": "#/$defs/PlanItemUpdated"
+    },
+    "presence.join": {
+      "$ref": "#/$defs/PresenceJoined"
+    },
+    "presence.leave": {
+      "$ref": "#/$defs/PresenceLeft"
+    },
+    "presence.tab": {
+      "$ref": "#/$defs/PresenceTab"
+    },
+    "presence.typing": {
+      "$ref": "#/$defs/PresenceTyping"
+    },
+    "question.answered": {
+      "$ref": "#/$defs/QuestionAnswered"
+    },
+    "question.defaulted": {
+      "$ref": "#/$defs/QuestionDefaulted"
+    },
+    "question.opened": {
+      "$ref": "#/$defs/QuestionOpened"
+    },
+    "room.created": {
+      "$ref": "#/$defs/RoomCreated"
+    },
+    "room.paused": {
+      "$ref": "#/$defs/RoomPaused"
+    },
+    "room.resumed": {
+      "$ref": "#/$defs/Empty"
+    },
+    "room.rewound": {
+      "$ref": "#/$defs/RoomRewound"
+    },
+    "sharing.changed": {
+      "$ref": "#/$defs/SharingChanged"
+    },
+    "sitting.ended": {
+      "$ref": "#/$defs/SittingEnded"
+    },
+    "task.finished": {
+      "$ref": "#/$defs/TaskRef"
+    },
+    "task.started": {
+      "$ref": "#/$defs/TaskRef"
+    },
+    "test.result": {
+      "$ref": "#/$defs/BuildResult"
+    },
+    "tool.called": {
+      "$ref": "#/$defs/ToolCalled"
+    },
+    "tool.result": {
+      "$ref": "#/$defs/ToolResult"
+    },
+    "turn.interrupted": {
+      "$ref": "#/$defs/TurnInterrupted"
+    }
+  },
+  "required": [
+    "room.created",
+    "member.joined",
+    "member.role_changed",
+    "sharing.changed",
+    "message.posted",
+    "message.labeled",
+    "coordinator.reply",
+    "plan.drafted",
+    "plan.edited",
+    "plan.approved",
+    "plan.item_added",
+    "plan.item_updated",
+    "conflict.opened",
+    "conflict.evidence",
+    "conflict.vote",
+    "conflict.closed",
+    "question.opened",
+    "question.answered",
+    "question.defaulted",
+    "task.started",
+    "task.finished",
+    "agent.text",
+    "agent.text.delta",
+    "tool.called",
+    "tool.result",
+    "build.result",
+    "test.result",
+    "turn.interrupted",
+    "file.changed",
+    "file.locked",
+    "file.unlocked",
+    "checkpoint.created",
+    "room.rewound",
+    "log.task_written",
+    "log.day_written",
+    "budget.updated",
+    "room.paused",
+    "room.resumed",
+    "sitting.ended",
+    "presence.join",
+    "presence.leave",
+    "presence.typing",
+    "presence.tab"
+  ],
+  "title": "EventPayloads",
+  "type": "object"
+}

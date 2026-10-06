@@ -55,6 +55,9 @@ class RoomSummary:
     description: str
     permission: Permission
     created_at: datetime
+    members: dict[UUID, Member] = field(default_factory=dict)
+    tokens_cap: int | None = None  # None: the default cap
+    runs_cap: int | None = None
 
 
 async def create(
@@ -159,14 +162,21 @@ async def set_sharing(
 async def list_for_user(user_id: UUID, *, session: AsyncSession | None = None) -> list[RoomSummary]:
     """Rooms the user is a member of, newest first. A room open by link shows up once the user joins it."""
     async with scoped(session) as s:
-        rows = await s.execute(
-            select(Room.id, Room.title, Room.description, Membership.permission, Room.created_at)
+        rows = (await s.execute(
+            select(Room.id, Room.title, Room.description, Membership.permission, Room.created_at,
+                   Room.budget_tokens_cap, Room.budget_runs_cap)
             .join(Membership, Membership.room_id == Room.id)
             .where(Membership.user_id == user_id)
             .order_by(Room.created_at.desc())
-        )
+        )).all()
+        members: dict[UUID, dict[UUID, Member]] = {r.id: {} for r in rows}
+        found = await s.scalars(select(Membership).where(Membership.room_id.in_(members)))
+        for m in found:
+            members[m.room_id][m.user_id] = Member(cast(Permission, m.permission), cast(DomainRole | None, m.domain_role))
         return [
-            RoomSummary(r.id, r.title, r.description, cast(Permission, r.permission), r.created_at) for r in rows
+            RoomSummary(r.id, r.title, r.description, cast(Permission, r.permission), r.created_at, members[r.id],
+                        r.budget_tokens_cap, r.budget_runs_cap)
+            for r in rows
         ]
 
 

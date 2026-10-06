@@ -72,9 +72,11 @@ class CheckpointCreated(Payload):
 
 class RoomRewound(Payload):
     """Payload of 'room.rewound' (R2): the new version of every path whose content changed, applied as given.
-       Paths missing from the target checkpoint's manifest are removed; they keep their high-water marks."""
+       Paths missing from the target checkpoint's manifest are removed; they keep their high-water marks.
+       `plan` is the checkpoint's plan, which becomes the room's plan (rewinds stored before it was added lack it)."""
     checkpoint_id: UUID
     versions: dict[str, int]
+    plan: list["PlanItem"] = Field(default_factory=list)
 
 
 class RoomCreated(Payload):
@@ -336,3 +338,56 @@ class PresenceTab(Payload):
 
     user_id: UUID
     tab: Tab
+
+
+class Empty(Payload):
+    """Payload of 'plan.approved' and 'room.resumed'."""
+
+
+# Every event type and its payload: the contract the web app's types are generated from
+# (scripts/export_schema.py). Presence and 'agent.text.delta' are broadcast only, never stored.
+EVENT_PAYLOADS: dict[str, type[Payload]] = {
+    "room.created": RoomCreated,
+    "member.joined": MemberJoined,
+    "member.role_changed": MemberRoleChanged,
+    "sharing.changed": SharingChanged,
+    "message.posted": MessagePosted,
+    "message.labeled": MessageLabeled,
+    "coordinator.reply": CoordinatorReply,
+    "plan.drafted": PlanItems,
+    "plan.edited": PlanItems,
+    "plan.approved": Empty,
+    "plan.item_added": PlanItem,
+    "plan.item_updated": PlanItemUpdated,
+    "conflict.opened": ConflictOpened,
+    "conflict.evidence": ConflictEvidence,
+    "conflict.vote": ConflictVote,
+    "conflict.closed": ConflictClosed,
+    "question.opened": QuestionOpened,
+    "question.answered": QuestionAnswered,
+    "question.defaulted": QuestionDefaulted,
+    "task.started": TaskRef,
+    "task.finished": TaskRef,
+    "agent.text": AgentText,
+    "agent.text.delta": AgentText,
+    "tool.called": ToolCalled,
+    "tool.result": ToolResult,
+    "build.result": BuildResult,
+    "test.result": BuildResult,
+    "turn.interrupted": TurnInterrupted,
+    "file.changed": FileChanged,
+    "file.locked": FileLockChanged,
+    "file.unlocked": FileLockChanged,
+    "checkpoint.created": CheckpointCreated,
+    "room.rewound": RoomRewound,
+    "log.task_written": LogWritten,
+    "log.day_written": LogWritten,
+    "budget.updated": BudgetUpdated,
+    "room.paused": RoomPaused,
+    "room.resumed": Empty,
+    "sitting.ended": SittingEnded,
+    "presence.join": PresenceJoined,
+    "presence.leave": PresenceLeft,
+    "presence.typing": PresenceTyping,
+    "presence.tab": PresenceTab,
+}

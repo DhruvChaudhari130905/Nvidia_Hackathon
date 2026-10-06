@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # Browser origins allowed to call the API. In .env as a JSON list: CORS_ORIGINS='["https://mux.example"]'
-    cors_origins: list[str] = ["http://localhost:5173"]
+    cors_origins: list[str] = ["http://localhost:3000"]  # the Next.js dev server (mux/web)
 
     # Token Factory
     token_factory_api_key: str = ""
