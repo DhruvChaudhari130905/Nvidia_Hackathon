@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from mux.events.models import DomainRole
 from mux.rooms.actor import RoomActor
 from mux.rooms.emitter import Publish
+from mux.db.session import get_sessionmaker
 
 
 class RoomRegistry:
@@ -49,6 +50,10 @@ class RoomRegistry:
                     self._actors[room_id] = actor
                     actor.start()
             return actor
+        
+    def session(self) -> AsyncSession:
+        """A new session on the registry's database, for reads that need no actor (the room list)."""
+        return(self._sessionmaker or get_sessionmaker())()
 
     def open_rooms(self) -> list[UUID]:
         """Ids of the rooms with an actor in memory."""

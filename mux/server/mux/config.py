@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     test_database_url: str = ""
     debug: bool = False
 
+    # Browser origins allowed to call the API. In .env as a JSON list: CORS_ORIGINS='["https://mux.example"]'
+    cors_origins: list[str] = ["http://localhost:5173"]
+
     # Token Factory
     token_factory_api_key: str = ""
     token_factory_base_url: str = ""

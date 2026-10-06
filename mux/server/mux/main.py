@@ -1,98 +1,63 @@
-"""FastAPI app factory. Mounts the API routers and the WebSocket endpoint, and starts the room registry on startup."""
+"""FastAPI app: the room REST API at /api/rooms and the room WebSocket at /ws/rooms/{room_id}.
+
+Run one worker (`uvicorn mux.main:app`): each room's actor, and so its seqs, live in this one process (DB1).
+"""
+
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from mux import dbsession
-from mux.api import rooms, files, commands, export, ws
-from mux.api.ws import emit_event_with_alias
-from mux.events.log import EventLog, InMemoryEventLog
-from mux.events.models import BaseEvent
-import mux.rooms.registry as room_registry
+
+from mux.api import rooms, ws
+from mux.config import settings
+from mux.events.bus import event_bus
+from mux.rooms.registry import init_registry
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Per-room event logs storage
-_room_event_logs: dict[str, EventLog] = {}
-
-def get_event_log(room_id: str) -> EventLog:
-    """Get or create an event log for a specific room."""
-    if room_id not in _room_event_logs:
-        _room_event_logs[room_id] = InMemoryEventLog(room_id)
-    return _room_event_logs[room_id]
-
-# Make get_event_log available for dependency injection
-room_registry.get_event_log = get_event_log
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting MUX server...")
-    await dbsession.init_db()
-    logger.info("Database initialized")
-
-    # Initialize room registry with event bus callback for real-time WebSocket broadcasts
-    async def on_event_callback(event: BaseEvent) -> None:
-        """Publish actor events to WebSocket event bus with frontend-compatible aliases."""
-        await emit_event_with_alias(event.room_id, event)
-
-    # EventLog is per-room; on_event publishes to event bus
-    registry = await room_registry.init_registry(on_event=on_event_callback)
-    await registry.start()
-    logger.info("Room registry started")
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """One registry for the process; on shutdown every room's background tick stops."""
+    registry = init_registry(event_bus.publish)
     yield
-    logger.info("Shutting down MUX server...")
-    await room_registry.shutdown_registry()
-    logger.info("Room registry stopped")
-    await dbsession.close_db()
+    await registry.close()
+
+
+async def bad_request(request: Request, exc: Exception) -> JSONResponse:
+    """A broken rule: a bad plan change, an invalid path, an open link with no permission."""
+    return JSONResponse({"detail": str(exc)}, status_code=status.HTTP_400_BAD_REQUEST)
+
+
+async def conflict(request: Request, exc: Exception) -> JSONResponse:
+    """Someone else holds the file's lock, or the caller does not."""
+    return JSONResponse({"detail": str(exc)}, status_code=status.HTTP_409_CONFLICT)
+
+
+async def not_found(request: Request, exc: Exception) -> JSONResponse:
+    """An unknown file or checkpoint."""
+    return JSONResponse({"detail": "not found"}, status_code=status.HTTP_404_NOT_FOUND)
+
 
 def create_app() -> FastAPI:
-    app = FastAPI(
-        title="MUX API",
-        description="AI-powered collaborative coding platform",
-        version="0.1.0",
-        lifespan=lifespan
-    )
-
+    app = FastAPI(title="MUX API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        # Credentials can't be combined with a wildcard origin; auth uses bearer tokens
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["*"], allow_headers=["*"],
     )
-
-    @app.exception_handler(ValueError)
-    async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
-        """Domain validation errors (bad plan items, unknown ids, ...) are client errors."""
-        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": str(exc)})
-
+    app.add_exception_handler(ValueError, bad_request)
+    app.add_exception_handler(PermissionError, conflict)
+    app.add_exception_handler(KeyError, not_found)
     app.include_router(rooms.router, prefix="/api/rooms", tags=["rooms"])
-    app.include_router(files.router, prefix="/api/files", tags=["files"])
-    app.include_router(commands.router, prefix="/api/commands", tags=["commands"])
-    app.include_router(export.router, prefix="/api/export", tags=["export"])
-    app.include_router(ws.router, prefix="/ws", tags=["websocket"])
-
-    @app.get("/")
-    async def root():
-        return {"message": "MUX API is running"}
+    app.include_router(ws.router, prefix="/ws")
 
     @app.get("/health")
-    async def health_check():
-        return {"status": "healthy"}
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
 
     return app
 
-app = create_app()
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "mux.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+app = create_app()

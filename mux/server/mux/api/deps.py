@@ -1,98 +1,94 @@
-"""Shared FastAPI dependencies: current user from the Supabase JWT, room lookup, permission checks."""
+"""FastAPI dependencies: the user from the Supabase JWT, the room's actor, and the caller's permission in it."""
 
-import logging
-from typing import Optional
-from fastapi import Depends, HTTPException, status, Path
-from mux.auth.supabase import get_current_user, get_current_user_optional, User
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Annotated, Any
+from uuid import UUID
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials
+
 from mux.auth.permissions import has_permission
-from mux.rooms.actor import RoomActor, ROOM_ID_PATTERN
+from mux.auth.supabase import http_bearer, verify_supabase_token
+from mux.events.models import Permission
+from mux.rooms.actor import RoomActor
 from mux.rooms.registry import get_registry
 
-logger = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class CurrentUser:
+    """The signed-in user. `id` is the Supabase user id (the JWT's `sub`)."""
+
+    id: UUID
+    name: str | None
 
 
-async def get_room_actor_dep(
-    room_id: str = Path(...),
-    current_user: User = Depends(get_current_user),
-) -> RoomActor:
-    """
-    Get the RoomActor for an existing room, rehydrating it from the event log if needed.
+@dataclass(frozen=True)
+class RoomAccess:
+    """A room the caller may use, with their permission in it."""
 
-    Rooms are only created by POST /api/rooms; an unknown or closed room is a 404.
-    (Previously any request for an unknown id created the room and made the caller owner.)
-    """
-    if not ROOM_ID_PATTERN.match(room_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found")
-    actor = await get_registry().get_room_or_rehydrate(room_id)
+    actor: RoomActor
+    user: CurrentUser
+    permission: Permission
+
+
+def user_from_token(token: str | None) -> CurrentUser | None:
+    """The user a Supabase JWT belongs to, or None if the token is missing, invalid, or its `sub` is not a UUID."""
+    claims = verify_supabase_token(token) if token else None
+    if claims is None:
+        return None
+    try:
+        user_id = UUID(str(claims.get("sub")))
+    except ValueError:
+        return None
+    return CurrentUser(user_id, _name(claims))
+
+
+def _name(claims: dict[str, Any]) -> str | None:
+    """Supabase keeps the display name in user_metadata (full_name or name); fall back to the email."""
+    meta = claims.get("user_metadata")
+    if isinstance(meta, dict) and (meta.get("full_name") or meta.get("name")):
+        return meta.get("full_name") or meta.get("name")
+    return claims.get("email")
+
+
+async def current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(http_bearer)],
+) -> CurrentUser:
+    """The caller, from the Authorization: Bearer header. 401 without a valid token."""
+    user = user_from_token(credentials.credentials if credentials else None)
+    if user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not signed in", headers={"WWW-Authenticate": "Bearer"})
+    return user
+
+
+async def room_actor(room_id: UUID) -> RoomActor:
+    """The room's actor, opened from the database if needed. 404 if there is no such room."""
+    actor = await get_registry().get(room_id)
     if actor is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "room not found")
     return actor
 
 
-class RoomActorPermissionChecker:
-    """Permission checker that works with RoomActor."""
+def require(level: Permission) -> Callable[..., Awaitable[RoomAccess]]:
+    """A dependency that lets the caller in only with at least `level` in the room.
+    A room they cannot open at all is a 404, so its existence does not leak."""
 
-    def __init__(self, actor: RoomActor):
-        self.actor = actor
+    async def check(
+        user: Annotated[CurrentUser, Depends(current_user)], actor: Annotated[RoomActor, Depends(room_actor)]
+    ) -> RoomAccess:
+        permission = actor.role_of(user.id)
+        if permission is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "room not found")
+        if not has_permission(permission, level):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"needs {level} permission")
+        return RoomAccess(actor, user, permission)
 
-    async def get_user_role(self, user_id: str) -> Optional[str]:
-        """
-        Get the user's role in this room: owner, a granted member role,
-        viewer for public rooms, otherwise None. Presence does not grant access.
-        """
-        return self.actor.role_of(user_id)
-
-
-def get_user_permission_checker(required_permission: str):
-    """
-    Dependency factory to create a permission checker for a required permission.
-
-    Args:
-        required_permission: The permission to check (e.g., "owner", "editor", "viewer").
-
-    Returns:
-        A dependency function that takes the current user and room actor, checks permissions,
-        and returns the current user on success.
-    """
-    async def _permission_checker(
-        current_user: User = Depends(get_current_user),
-        actor: RoomActor = Depends(get_room_actor_dep),
-    ) -> User:
-        """
-        Check if the current user has the required permission on the given room.
-
-        Raises:
-            HTTPException: If the user does not have the required permission.
-        """
-        checker = RoomActorPermissionChecker(actor)
-        user_role = await checker.get_user_role(current_user.id)
-
-        if user_role is None:
-            logger.warning(
-                f"User {current_user.id} has no role in room {actor.room_id}. "
-                f"Cannot check permission '{required_permission}'."
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions: no role in room"
-            )
-
-        if not has_permission(user_role, required_permission):
-            logger.warning(
-                f"User {current_user.id} (role: {user_role}) lacks required permission "
-                f"'{required_permission}' on room {actor.room_id}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Insufficient permissions: requires {required_permission}"
-            )
-
-        return current_user
-
-    return _permission_checker
+    return check
 
 
-# Common permission dependencies
-require_owner = get_user_permission_checker("owner")
-require_editor = get_user_permission_checker("editor")
-require_viewer = get_user_permission_checker("viewer")
+User = Annotated[CurrentUser, Depends(current_user)]
+Actor = Annotated[RoomActor, Depends(room_actor)]
+Viewer = Annotated[RoomAccess, Depends(require("viewer"))]
+Editor = Annotated[RoomAccess, Depends(require("editor"))]
+Owner = Annotated[RoomAccess, Depends(require("owner"))]

@@ -91,6 +91,13 @@ class Emitter:
             for event in sorted(batch.events, key=lambda event: event.seq): #still under the lock, so broadcasts keep seq order
                 await self._safe_publish(event)
 
+    @asynccontextmanager
+    async def hold(self) -> AsyncIterator[None]:
+        """Hold back new events: nothing commits or broadcasts until the block ends. A WebSocket uses it to
+        read the stored events and subscribe with no gap and no duplicate. Never emit inside: it waits forever."""
+        async with self._lock:
+            yield
+
     async def emit(self, type:str, payload: BaseModel | dict, actor: str) -> EventEnvelope:
         """One event in its own transaction."""
         async with self.transaction() as tx:
