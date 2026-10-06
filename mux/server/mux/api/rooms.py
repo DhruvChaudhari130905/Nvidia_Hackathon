@@ -5,11 +5,11 @@ Errors: a broken rule is 400 (ValueError), a lock or state conflict 409 (Permiss
 file or checkpoint 404 (KeyError); main.py maps them."""
 
 from datetime import datetime
-from typing import Any
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from mux.api.deps import Actor, Editor, Owner, RoomAccess, User, Viewer
 from mux.checkpoints.checkpoint import CheckpointRow
@@ -24,12 +24,19 @@ from mux.rooms.registry import get_registry
 
 router = APIRouter()
 
+# Size limits on what people send; the events and the coder's context would carry anything larger
+DESCRIPTION_CHARS = 4000
+NOTES_CHARS = 2000
+PLAN_ITEMS = 100
+FILE_CHARS = 1_000_000
+CHOICE_CHARS = 500
+
 
 # ---- rooms ----
 
 class RoomIn(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    description: str = ""
+    description: str = Field("", max_length=DESCRIPTION_CHARS)
     domain_role: DomainRole | None = None
 
 
@@ -162,13 +169,31 @@ async def post_message(body: MessageIn, access: Editor) -> MessagePosted:
 
 
 class PlanIn(BaseModel):
-    items: list[PlanItem]
+    items: list[PlanItem] = Field(max_length=PLAN_ITEMS)
+
+
+def _check_notes(item: PlanItem) -> PlanItem:
+    if item.notes is not None and len(item.notes) > NOTES_CHARS:
+        raise ValueError(f"task notes are limited to {NOTES_CHARS} characters")
+    return item
+
+
+class PlanItemPatch(BaseModel):
+    """What a person may change on one task. Setting status back to todo retries a blocked or skipped task;
+    the coder and the coordinator move tasks through the other statuses."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(None, min_length=1, max_length=200)
+    notes: str | None = Field(None, max_length=NOTES_CHARS)
+    owner_role: DomainRole | None = None
+    status: Literal["todo"] | None = None
 
 
 @router.put("/{room_id}/plan", status_code=status.HTTP_204_NO_CONTENT)
 async def edit_plan(body: PlanIn, access: Editor) -> None:
     """Replace the whole plan (the plan editor)."""
-    await access.actor.edit_plan(body.items, str(access.user.id))
+    await access.actor.edit_plan([_check_notes(item) for item in body.items], str(access.user.id))
 
 
 @router.post("/{room_id}/plan/approve", status_code=status.HTTP_204_NO_CONTENT)
@@ -178,11 +203,18 @@ async def approve_plan(access: Owner) -> None:
 
 @router.post("/{room_id}/plan/items", status_code=status.HTTP_204_NO_CONTENT)
 async def add_plan_item(item: PlanItem, access: Editor) -> None:
-    await access.actor.add_plan_item(item, str(access.user.id))
+    if len(access.actor.plan) >= PLAN_ITEMS:
+        raise ValueError(f"a plan has at most {PLAN_ITEMS} tasks")
+    await access.actor.add_plan_item(_check_notes(item), str(access.user.id))
 
 
 @router.patch("/{room_id}/plan/items/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def update_plan_item(task_id: str, changes: dict[str, Any], access: Editor) -> None:
+async def update_plan_item(task_id: str, body: PlanItemPatch, access: Editor) -> None:
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        raise ValueError("nothing to change")
+    if None in (changes.get("title", ""), changes.get("status", "")):
+        raise ValueError("title and status cannot be empty")
     await access.actor.update_plan_item(task_id, changes, str(access.user.id))
 
 
@@ -236,11 +268,11 @@ def question_out(q: Question) -> QuestionOut:
 
 
 class OptionIn(BaseModel):
-    option: str
+    option: str = Field(max_length=CHOICE_CHARS)
 
 
 class AnswerIn(BaseModel):
-    answer: str
+    answer: str = Field(max_length=CHOICE_CHARS)
 
 
 @router.get("/{room_id}/cards")
@@ -282,7 +314,7 @@ class FileOut(BaseModel):
 
 
 class SaveIn(BaseModel):
-    content: str | None  # None deletes the file
+    content: str | None = Field(max_length=FILE_CHARS)  # None deletes the file
     base_version: int | None  # the version the edit started from; None for a new file
 
 

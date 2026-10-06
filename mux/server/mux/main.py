@@ -17,6 +17,7 @@ from mux.agents.llm import TokenFactoryLLM
 from mux.integrations.tavily import TavilySearch
 from mux.sandbox.client import TokenFactorySandboxClient
 from mux.api import github, rooms, ws
+from mux.auth.supabase import unverified_allowed
 from mux.config import settings
 from mux.events.bus import event_bus
 from mux.rooms.registry import init_registry
@@ -28,6 +29,13 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """One registry for the process; on shutdown every room's coordinator and background tick stop."""
+    if settings.allow_unverified_tokens:
+        if unverified_allowed():
+            logger.warning("ALLOW_UNVERIFIED_TOKENS and DEBUG are on: token signatures are NOT checked (local dev only)")
+        else:
+            logger.error("ALLOW_UNVERIFIED_TOKENS is ignored without DEBUG=true: token signatures are checked")
+    if not settings.supabase_jwt_secret and not settings.supabase_url and not unverified_allowed():
+        logger.error("Neither SUPABASE_URL nor SUPABASE_JWT_SECRET is set: nobody can sign in")
     llm = TokenFactoryLLM() if settings.token_factory_api_key else None
     if llm is None:
         logger.warning("TOKEN_FACTORY_API_KEY is not set: messages to the agent will get no answer")

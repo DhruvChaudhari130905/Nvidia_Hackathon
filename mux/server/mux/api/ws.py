@@ -1,4 +1,7 @@
-"""Room WebSocket at /ws/rooms/{room_id}?token=<Supabase JWT>&since=<seq>.
+"""Room WebSocket at /ws/rooms/{room_id}?since=<seq>, opened with the subprotocols ["mux", <Supabase JWT>].
+
+The token travels in the Sec-WebSocket-Protocol header, not the URL, so it never lands in access logs
+(uvicorn, Caddy) or browser history. The server accepts with the subprotocol "mux".
 
 Server to client: every stored event after `since` (all of them for since=0), then live events, each an
 EventEnvelope. Presence envelopes are never stored and carry the last stored seq. Control replies have no seq:
@@ -26,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+PROTOCOL = "mux"
 LIVE_BACKLOG = 1000  # live messages a client may fall behind by before it is dropped
 TABS: tuple[str, ...] = get_args(Tab)
 
@@ -58,19 +62,23 @@ class Outbox:
         self.queue.put_nowait(data)
 
 
+def token_from_subprotocols(offered: list[str]) -> str | None:
+    """The JWT a browser offers as the subprotocol after "mux" (browsers cannot set other headers)."""
+    if len(offered) == 2 and offered[0] == PROTOCOL:
+        return offered[1]
+    return None
+
+
 @router.websocket("/rooms/{room_id}")
-async def room_socket(
-    websocket: WebSocket, room_id: UUID, since: int = Query(0, ge=0), token: str | None = Query(None)
-) -> None:
-    """The token is a query parameter because browsers cannot set headers on a WebSocket.
-    Auth and access are checked before the connection is accepted."""
-    user = user_from_token(token)
+async def room_socket(websocket: WebSocket, room_id: UUID, since: int = Query(0, ge=0)) -> None:
+    """Auth and access are checked before the connection is accepted."""
+    user = user_from_token(token_from_subprotocols(list(websocket.scope.get("subprotocols", []))))
     if user is None:
         raise WebSocketException(status.WS_1008_POLICY_VIOLATION, "not signed in")
     actor = await get_registry().get(room_id)
     if actor is None or actor.role_of(user.id) is None:
         raise WebSocketException(status.WS_1008_POLICY_VIOLATION, "room not found")
-    await websocket.accept()
+    await websocket.accept(subprotocol=PROTOCOL)
     if await serve(actor, websocket, user, since):
         with contextlib.suppress(Exception):
             await websocket.close(status.WS_1013_TRY_AGAIN_LATER, "fell behind; reconnect with ?since")

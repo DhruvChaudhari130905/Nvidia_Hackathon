@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from jose import jwt
+import jwt
 
 from mux.api.deps import user_from_token
 from mux.config import settings
@@ -15,7 +15,7 @@ from mux.events.models import PlanItem
 from mux.main import create_app
 from mux.rooms.registry import get_registry, init_registry
 
-SECRET = "test-secret"
+SECRET = "test-secret-that-is-32-bytes-long!"
 
 
 def token(user_id: UUID | str, name: str = "Ada") -> str:
@@ -32,6 +32,8 @@ def jwt_secret(monkeypatch):
     monkeypatch.setattr(settings, "supabase_jwt_secret", SECRET)
     monkeypatch.setattr(settings, "supabase_jwt_audience", "")
     monkeypatch.setattr(settings, "supabase_jwt_issuer", "")
+    monkeypatch.setattr(settings, "supabase_url", "")
+    monkeypatch.setattr(settings, "allow_unverified_tokens", False)
 
 
 @pytest.fixture

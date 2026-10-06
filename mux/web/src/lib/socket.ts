@@ -1,4 +1,5 @@
-// Room WebSocket: /ws/rooms/{id}?token=<Supabase JWT>&since=<seq> (mux/server/mux/api/ws.py).
+// Room WebSocket: /ws/rooms/{id}?since=<seq>, with the Supabase JWT offered as a subprotocol after "mux" so it
+// stays out of URLs and access logs (mux/server/mux/api/ws.py).
 // The server sends every stored event after `since`, then live ones, one envelope per message; presence and
 // text deltas carry the last stored seq. The client sends {type: "tab"}, {type: "typing"} and {type: "ping"}.
 import type { AppEvent, Presence, Room, RoomState, User } from '@/types';
@@ -41,9 +42,9 @@ export class SocketClient {
     }
     const token = await getAccessToken();
     const base = API_BASE.replace(/^http/, 'ws');
-    const url = `${base}/ws/rooms/${this.roomId}?since=${this.since}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+    const url = `${base}/ws/rooms/${this.roomId}?since=${this.since}`;
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(url, token ? ['mux', token] : ['mux']);
       this.ws = ws;
       let opened = false;
       ws.onopen = () => {

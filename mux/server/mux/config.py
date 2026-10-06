@@ -35,9 +35,9 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str = ""
     supabase_url: str = ""
     supabase_service_role_key: str = ""
-    supabase_jwt_audience: str = ""
+    supabase_jwt_audience: str = "authenticated"  # what Supabase puts in signed-in users' tokens
     supabase_jwt_issuer: str = ""
-    # Allow unverified JWT tokens (local development only - NEVER enable in production)
+    # Accept tokens without checking their signature. Local development only: it also needs DEBUG=true.
     allow_unverified_tokens: bool = False
 
     # GitHub OAuth

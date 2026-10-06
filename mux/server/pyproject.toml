@@ -15,7 +15,6 @@ dependencies = [
   "asyncpg",
   "alembic",
   "pyjwt",
-  "python-jose[cryptography]",
   "aiosqlite",
   "httpx",
   "cryptography",
