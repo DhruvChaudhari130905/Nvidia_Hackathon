@@ -31,7 +31,7 @@ def free_port() -> int:
 
 @pytest.fixture
 def http_server(monkeypatch):
-    monkeypatch.setattr(settings, "mcp_allow_private_urls", True)
+    monkeypatch.setattr(settings, "allow_private_urls", True)
     port = free_port()
     proc = subprocess.Popen([sys.executable, str(Path(__file__).parent / "mcp_http_server.py"), str(port)])
     for _ in range(100):

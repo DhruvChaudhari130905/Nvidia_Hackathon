@@ -17,13 +17,13 @@ class UrlNotAllowed(ValueError):
 def check_url(url: str) -> None:
     """Raise UrlNotAllowed unless `url` is https and its host resolves only to public addresses.
 
-    MCP_ALLOW_PRIVATE_URLS=true (local development) allows http and private addresses.
+    ALLOW_PRIVATE_URLS=true (local development) allows http and private addresses.
     """
     parsed = urlparse(url)
     host = parsed.hostname
     if parsed.scheme not in ("http", "https") or not host:
         raise UrlNotAllowed("Use an https:// URL")
-    if settings.mcp_allow_private_urls:
+    if settings.allow_private_urls or settings.mcp_allow_private_urls:
         return
     if parsed.scheme != "https":
         raise UrlNotAllowed("Use an https:// URL")

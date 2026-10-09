@@ -130,7 +130,7 @@ async def test_unavailable_servers_are_skipped_and_reported(servers):
 
 
 async def test_room_server_urls_are_checked_again_when_connecting(servers, monkeypatch):
-    monkeypatch.setattr(settings, "mcp_allow_private_urls", False)
+    monkeypatch.setattr(settings, "allow_private_urls", False)
     reported: list[str] = []
 
     async def on_unavailable(name: str, reason: str) -> None:

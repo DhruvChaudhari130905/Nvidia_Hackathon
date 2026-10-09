@@ -818,8 +818,8 @@ def mcp_servers(monkeypatch):
 
     monkeypatch.setattr(mcp_client, "default_connect", connect)
     monkeypatch.setattr(mcp_config, "admin_servers", lambda: {"github": ServerSpec("github", command="gh-mcp")})
-    monkeypatch.setattr(settings, "mcp_allow_private_urls", False)
-    monkeypatch.setattr(settings, "mcp_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "allow_private_urls", False)
+    monkeypatch.setattr(settings, "room_secrets_key", Fernet.generate_key().decode())
     monkeypatch.setattr("mux.mcp.catalog.ADMIN_TOOLS", {})
     return available, server
 
@@ -856,7 +856,7 @@ def test_bad_room_mcp_servers_are_refused(client, mcp_servers, monkeypatch):
     assert r.status_code == 502 and r.json()["detail"] == "Could not connect to down: could not reach the server"
     assert add_mcp(client, rid, headers={"Authorization": "Bearer x\n"}).status_code == 422
     assert add_mcp(client, rid, headers={"Bad Name": "x"}).status_code == 422
-    monkeypatch.setattr(settings, "mcp_encryption_key", "")
+    monkeypatch.setattr(settings, "room_secrets_key", "")
     assert add_mcp(client, rid, headers={"Authorization": "x"}).status_code == 400
     assert client.get(f"/rooms/{rid}/mcp", headers=auth("alice")).json()["servers"] == []
 
@@ -911,5 +911,5 @@ def test_mcp_settings_survive_a_restart_and_a_lost_key(client, mcp_servers, monk
     room = registry_call(client, room_registry.get_registry().get_room, rid)
     assert [s.spec.headers for s in enabled_servers(room)] == [{"Authorization": "Bearer x"}]
     # A changed key skips the server instead of breaking the coder
-    monkeypatch.setattr(settings, "mcp_encryption_key", "")
+    monkeypatch.setattr(settings, "room_secrets_key", "")
     assert enabled_servers(room) == []

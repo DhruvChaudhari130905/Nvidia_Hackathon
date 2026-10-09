@@ -44,8 +44,11 @@ class Settings(BaseSettings):
     # Where the web app runs; the GitHub connect flow returns the browser here
     web_app_url: str = "http://localhost:3000"
 
-    # MCP servers for the coder (mux.mcp). mcp_config_path: server-wide servers, relative to mux/server.
-    # mcp_encryption_key: Fernet key for room servers' header values. mcp_allow_private_urls: local dev only.
+    # Room secrets (MCP server tokens, room AI keys) are encrypted with room_secrets_key (a Fernet key).
+    # allow_private_urls lets rooms use http:// and private-network addresses: local development only.
+    # The mcp_* names are the old ones, still read when the new ones are empty/false.
+    room_secrets_key: str = ""
+    allow_private_urls: bool = False
     mcp_config_path: str = "mcp.json"
     mcp_encryption_key: str = ""
     mcp_allow_private_urls: bool = False

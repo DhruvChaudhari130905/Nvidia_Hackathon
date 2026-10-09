@@ -8,7 +8,7 @@ from typing import Any
 import mux.mcp.config as mcp_config
 from mux.mcp.client import ToolInfo
 from mux.mcp.config import ServerSpec
-from mux.mcp.secrets import SecretsUnavailable, decrypt_headers
+from mux.secrets import SecretsUnavailable, decrypt_values
 from mux.mcp.toolset import EnabledServer
 from mux.mcp.views import server_view
 from mux.rooms.actor import RoomActor
@@ -26,7 +26,7 @@ def enabled_servers(actor: RoomActor) -> list[EnabledServer]:
                for name, cfg in sorted(actor.mcp_admin.items()) if cfg.get("enabled") and name in admin]
     for name, server in sorted(actor.mcp_servers.items()):
         try:
-            headers = decrypt_headers(server.get("headers") or {})
+            headers = decrypt_values(server.get("headers") or {})
         except SecretsUnavailable as e:
             logger.warning(f"Room {actor.room_id}: skipping MCP server {name}: {e}")
             continue

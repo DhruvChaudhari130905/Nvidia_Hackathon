@@ -16,8 +16,8 @@ from mux.mcp.catalog import room_mcp_view
 from mux.mcp.client import ToolInfo, describe_error
 from mux.mcp.config import ServerSpec
 from mux.mcp.names import header_problem
-from mux.mcp.secrets import SecretsUnavailable, decrypt_headers, encrypt_headers
-from mux.mcp.urls import UrlNotAllowed, check_url_async
+from mux.secrets import SecretsUnavailable, decrypt_values, encrypt_values
+from mux.urls import UrlNotAllowed, check_url_async
 from mux.rooms.actor import RoomActor
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ def _settings(settings: Optional[dict[str, ToolSettingModel]], tools: list[dict[
 
 def _encrypt(headers: dict[str, str]) -> dict[str, str]:
     try:
-        return encrypt_headers(headers)
+        return encrypt_values(headers)
     except SecretsUnavailable as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -119,7 +119,7 @@ async def refresh_server(room_id: str, name: str, current_user: User = Depends(r
                          actor: RoomActor = Depends(get_room_actor_dep)) -> dict[str, Any]:
     server = _room_server(actor, name)
     try:
-        headers = decrypt_headers(server["headers"])
+        headers = decrypt_values(server["headers"])
     except SecretsUnavailable as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     tools = await _tools(ServerSpec(name, url=server["url"], headers=headers), room_server=True)

@@ -21,6 +21,13 @@ from sqlalchemy.pool import NullPool  # noqa: E402
 SERVER_DIR = Path(__file__).resolve().parent.parent
 
 
+@pytest.fixture(autouse=True)
+def _no_legacy_secret_settings(monkeypatch):
+    """Tests set ROOM_SECRETS_KEY / ALLOW_PRIVATE_URLS; the old names (still read as fallbacks) start empty."""
+    monkeypatch.setattr(settings, "mcp_encryption_key", "")
+    monkeypatch.setattr(settings, "mcp_allow_private_urls", False)
+
+
 def check_test_database_url(url: str, database_url: str) -> str:
     """Return `url` only if it is safe to wipe: a database whose name contains "test", not DATABASE_URL.
 

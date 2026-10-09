@@ -230,7 +230,7 @@ class RoomMcpServerSavedEvent(BaseEvent):
     type: EventType = EventType.ROOM_MCP_SERVER_SAVED
     name: str = Field(..., description="Server name, unique in the room")
     url: str = Field(..., description="https URL of the server")
-    headers: Dict[str, str] = Field(default_factory=dict, description="Header name -> encrypted value (mux/mcp/secrets.py)")
+    headers: Dict[str, str] = Field(default_factory=dict, description="Header name -> encrypted value (mux/secrets.py)")
     tools: List[Dict[str, Any]] = Field(default_factory=list, description="Tools listed when it was added or refreshed")
     settings: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Tool -> {enabled, mode}")
 

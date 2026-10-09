@@ -21,7 +21,7 @@ import mux.mcp.client as mcp_client
 from mux.mcp.client import CALL_TIMEOUT, ToolInfo, describe_error, list_tools, result_payload
 from mux.mcp.config import ServerSpec
 from mux.mcp.names import tool_alias
-from mux.mcp.urls import check_url_async
+from mux.urls import check_url_async
 
 logger = logging.getLogger(__name__)
 
