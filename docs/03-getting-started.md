@@ -68,11 +68,25 @@ The coder can use tools from [MCP](https://modelcontextprotocol.io) servers. Eve
 
 **For every room (whoever runs the server):** copy `mux/server/mcp.example.json` to `mux/server/mcp.json`, list servers in the same format as Claude Desktop (`command`/`args`/`env` for local servers, `url`/`headers` for remote ones), and restart `make server`. Each room's owner then turns them on in **Tools**; they're off until then.
 
-**For one room (its owner):** **Tools** in the room's top bar → **Add a server** with a name, a public `https://` URL and an optional token. MUX connects and lists its tools. Set `MCP_ENCRYPTION_KEY` in `mux/server/.env` first if the server needs a token (tokens are stored encrypted and never sent back to browsers).
+**For one room (its owner):** **Tools** in the room's top bar → **Add a server** with a name, a public `https://` URL and an optional token. MUX connects and lists its tools. Set `ROOM_SECRETS_KEY` in `mux/server/.env` first if the server needs a token (tokens are stored encrypted and never sent back to browsers).
 
 **Approvals:** each tool is **Auto** or **Ask first**. An Ask-first call puts an Allow / Deny card in the room; no answer before it expires counts as Deny.
 
-**Limits:** room servers must be public `https` (set `MCP_ALLOW_PRIVATE_URLS=true` only on your own machine to try a local server); at most 10 per room; connecting gives up after 10 s, a call after 60 s; output is cut at 20,000 characters. A server that's down when a task starts is skipped for that task with a note in the feed.
+**Limits:** room servers must be public `https` (set `ALLOW_PRIVATE_URLS=true` only on your own machine to try a local server); at most 10 per room; connecting gives up after 10 s, a call after 60 s; output is cut at 20,000 characters. A server that's down when a task starts is skipped for that task with a note in the feed.
+
+## 🤖 A room's own AI model
+
+By default every room's agents use the server's Token Factory settings (`TOKEN_FACTORY_*`, `MODEL_*`). A room's owner can use their own provider instead: **AI model** in the room's top bar → pick a provider (Nebius Token Factory, OpenAI, Anthropic, OpenRouter, Groq, Together, or any OpenAI-compatible URL), paste the API key and choose a model for each role:
+
+| Role | Used by |
+|---|---|
+| Coordinator | Labels every message; pick a fast model |
+| Coder | Writes the code |
+| Coder when stuck | The model the coder switches to after repeated failures; pick the strongest |
+
+**Save** sends one tiny request to each model and saves only if all answer. The key is encrypted with `ROOM_SECRETS_KEY` and never shown again; leave the key field empty later to keep it. The owner's provider bills the room's usage. **Use the server's model** goes back to the default.
+
+If the model fails during work (wrong key, quota, rate limit), the feed says so (at most once a minute). A server with no Token Factory settings still runs agents in rooms that have their own key; other rooms have their agents off.
 
 ## ⚡ Shortcut: the Makefile
 
