@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mux import dbsession
-from mux.api import rooms, files, commands, export, ws, mcp
+from mux.api import rooms, files, commands, export, ws, mcp, ai
 from mux.api.ws import emit_event
 from mux.events.file_log import FileEventLog, events_root
 from mux.events.log import EventLog
@@ -101,6 +101,7 @@ def create_app() -> FastAPI:
     # The web app's API (architecture.md): /rooms/..., /github/connect, and the room socket /rooms/{id}/ws
     app.include_router(rooms.router, prefix="/rooms", tags=["rooms"])
     app.include_router(mcp.router, prefix="/rooms", tags=["mcp"])
+    app.include_router(ai.router, prefix="/rooms", tags=["ai"])
     app.include_router(rooms.github_router, tags=["github"])
     app.include_router(ws.router, tags=["websocket"])
     # Operator APIs

@@ -913,3 +913,83 @@ def test_mcp_settings_survive_a_restart_and_a_lost_key(client, mcp_servers, monk
     # A changed key skips the server instead of breaking the coder
     monkeypatch.setattr(settings, "room_secrets_key", "")
     assert enabled_servers(room) == []
+
+
+# --- Room AI provider ----------------------------------------------------------
+
+AI_BODY = {"provider": "openai", "base_url": "https://93.184.216.34/v1", "api_key": "sk-room-secret",
+           "models": {"lightning": "fast-1", "super": "smart-1", "ultra": "smart-2"}}
+
+
+@pytest.fixture
+def ai_checks(monkeypatch):
+    """check_models stand-in: records the key it was given, fails roles listed in `failing`."""
+    from cryptography.fernet import Fernet
+
+    import mux.agents.room_llm as room_llm
+    seen: dict = {"keys": [], "failing": {}}
+
+    async def fake_check(llm, models, secret):
+        seen["keys"].append(secret)
+        return dict(seen["failing"])
+
+    monkeypatch.setattr(room_llm, "check_models", fake_check)
+    monkeypatch.setattr(settings, "room_secrets_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "allow_private_urls", False)
+    return seen
+
+
+def test_owner_sets_the_room_ai_provider(client, ai_checks):
+    rid = create_room(client)
+    assert client.get(f"/rooms/{rid}/ai", headers=auth("alice")).json()["source"] == "none"
+    r = client.put(f"/rooms/{rid}/ai", json=AI_BODY, headers=auth("alice"))
+    assert r.status_code == 200, r.text
+    view = r.json()
+    assert view == {"source": "room", "provider": "openai", "base_url": AI_BODY["base_url"],
+                    "models": AI_BODY["models"], "has_key": True}
+    assert ai_checks["keys"] == ["sk-room-secret"]
+    # Others can read it, never the key; only the owner changes it
+    client.post(f"/rooms/{rid}/members", json={"user_id": "bob", "role": "editor"}, headers=auth("alice"))
+    assert client.get(f"/rooms/{rid}/ai", headers=auth("bob")).json()["provider"] == "openai"
+    assert client.put(f"/rooms/{rid}/ai", json=AI_BODY, headers=auth("bob")).status_code == 403
+    assert "sk-room-secret" not in client.get(f"/rooms/{rid}/ai", headers=auth("alice")).text
+    with client.websocket_connect(f"/rooms/{rid}/ws?since=0&token={token('alice')}") as ws:
+        assert "sk-room-secret" not in ws.receive_text()
+
+
+def test_empty_key_keeps_the_saved_one(client, ai_checks):
+    rid = create_room(client)
+    assert client.put(f"/rooms/{rid}/ai", json={**AI_BODY, "api_key": ""}, headers=auth("alice")).status_code == 400
+    client.put(f"/rooms/{rid}/ai", json=AI_BODY, headers=auth("alice"))
+    r = client.put(f"/rooms/{rid}/ai", json={**AI_BODY, "api_key": "", "models": {**AI_BODY["models"], "super": "smart-9"}},
+                   headers=auth("alice"))
+    assert r.status_code == 200 and r.json()["models"]["super"] == "smart-9"
+    assert ai_checks["keys"] == ["sk-room-secret", "sk-room-secret"]
+
+
+def test_bad_ai_settings_save_nothing(client, ai_checks, monkeypatch):
+    rid = create_room(client)
+    assert client.put(f"/rooms/{rid}/ai", json={**AI_BODY, "base_url": "https://10.0.0.5/v1"}, headers=auth("alice")).status_code == 400
+    assert client.put(f"/rooms/{rid}/ai", json={**AI_BODY, "provider": "nope"}, headers=auth("alice")).status_code == 422
+    assert client.put(f"/rooms/{rid}/ai", json={**AI_BODY, "models": {**AI_BODY["models"], "ultra": "has space"}},
+                      headers=auth("alice")).status_code == 422
+    ai_checks["failing"] = {"ultra": "NotFoundError: model smart-2 not found"}
+    r = client.put(f"/rooms/{rid}/ai", json=AI_BODY, headers=auth("alice"))
+    assert r.status_code == 400 and r.json()["detail"] == {"errors": {"ultra": "NotFoundError: model smart-2 not found"}}
+    ai_checks["failing"] = {}
+    monkeypatch.setattr(settings, "room_secrets_key", "")
+    assert client.put(f"/rooms/{rid}/ai", json=AI_BODY, headers=auth("alice")).status_code == 400
+    assert client.get(f"/rooms/{rid}/ai", headers=auth("alice")).json()["source"] == "none"
+
+
+def test_clearing_and_restart(client, ai_checks, monkeypatch):
+    rid = create_room(client)
+    client.put(f"/rooms/{rid}/ai", json=AI_BODY, headers=auth("alice"))
+    registry_call(client, room_registry.get_registry().stop_room, rid)
+    assert client.get(f"/rooms/{rid}/ai", headers=auth("alice")).json()["source"] == "room"
+    monkeypatch.setattr(settings, "token_factory_api_key", "tf-key")
+    monkeypatch.setattr(settings, "token_factory_base_url", "https://tf.example/v1")
+    monkeypatch.setattr(settings, "model_super", "nemotron")
+    r = client.delete(f"/rooms/{rid}/ai", headers=auth("alice"))
+    assert r.status_code == 200 and r.json() == {"source": "server", "provider": None, "base_url": None,
+                                                 "models": None, "has_key": False}
