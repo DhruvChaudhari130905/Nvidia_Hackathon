@@ -719,3 +719,30 @@ async def test_reviews_get_the_review_prompt_without_the_plan_and_more_turns(set
     assert "src/App.jsx" in context  # the files in scope are listed
     assert REVIEW_MAX_TURNS == 60
     await registry.shutdown_all()
+
+
+# --- skills ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_coder_sees_and_uses_the_rooms_skills(setup, tmp_path, monkeypatch):
+    import mux.skills.library as skills_library
+    root = tmp_path / "skill-root"
+    for name, desc in (("frontend-design", "Distinctive UIs"), ("tdd", "Tests first")):
+        (root / name).mkdir(parents=True)
+        (root / name / "SKILL.md").write_text(f"---\ndescription: {desc}\n---\nInstructions for {name}.")
+    lib = skills_library.SkillLibrary([(root, "server")])
+    monkeypatch.setattr(skills_library, "library", lambda: lib)
+
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs)
+    log = logs[actor.room_id]
+    await actor.set_skills(["frontend-design", "gone"], "alice")  # "gone" isn't on the server
+    llm.push(tool_reply(("use_skill", {"name": "frontend-design"})), tool_reply(("finish_task", {"summary": "done"})))
+    await actor.approve_plan_items(["t1"], "alice")
+    await until(lambda: of_type(log, EventType.CHECKPOINT_CREATED))
+
+    coder_call = next(c for c in llm.calls if c.tools)
+    system = coder_call.messages[0]["content"]
+    assert "- frontend-design: Distinctive UIs" in system and "tdd" not in system and "gone" not in system
+    assert notices(log, "skill.used") == [{"name": "frontend-design"}]
+    await registry.shutdown_all()

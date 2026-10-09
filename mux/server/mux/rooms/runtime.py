@@ -53,6 +53,8 @@ from mux.events.wire import ephemeral, user_view
 from mux.integrations.tavily import WebSearch
 from mux.mcp.catalog import enabled_servers
 from mux.mcp.toolset import ALLOW, DENY, McpToolset
+import mux.skills.library as skills_library
+from mux.agents.coder.tools.skills import skills_prompt
 from mux.rooms.actor import RoomActor
 
 logger = logging.getLogger(__name__)
@@ -489,8 +491,9 @@ class RoomRuntime:
         review = kind in ("review", "understand")  # read-only tasks: no write tools, no MCP, no checkpoint
         outcome: tuple[str, str] = ("stopped", "")
         scope = review_scope(await self.actor.list_files()) if kind == "review" else None
+        skills = self._skills()
         executor = CoderToolExecutor(ActorFileTools(self.actor), search=self.search, on_question=on_question,
-                                     read_only=review, review_scope=scope)
+                                     read_only=review, review_scope=scope, skills=skills)
 
         async def ask_first(question: str) -> str:
             return await self.ask_and_wait(question, [ALLOW, DENY], DENY, task_id)
@@ -506,7 +509,7 @@ class RoomRuntime:
                 loop = CoderLoop(self.llm, _Narrated(self.actor, toolset), _Boundary(self.actor), toolset.schemas(),
                                  max_turns=max(self.max_turns, REVIEW_MAX_TURNS) if kind == "review" else self.max_turns,
                                  on_text_delta=self._delta(task_id))
-                result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build, kind=kind))
+                result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build, kind=kind, skills=skills))
             await self._spend(result.usage, CODER)
             outcome = (result.status, result.summary)
             await self.actor.post_notice("agent.text", {"task_id": task_id, "text": result.summary}, CODER)
@@ -543,7 +546,13 @@ class RoomRuntime:
         await self._ask(f"The coder stopped on \"{item['title']}\" ({why}). Retry it?", [RETRY, SKIP], SKIP,
                         item["id"], parked=True)
 
-    async def _context(self, item: dict[str, Any], can_build: bool, *, kind: Optional[str] = None) -> list[dict[str, Any]]:
+    def _skills(self) -> dict[str, Any]:
+        """The room's enabled skills that exist on the server (a removed one is simply not offered)."""
+        available = skills_library.library().skills()
+        return {name: available[name] for name in sorted(self.actor.skills_enabled) if name in available}
+
+    async def _context(self, item: dict[str, Any], can_build: bool, *, kind: Optional[str] = None,
+                       skills: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
         plan = await self.actor.get_plan()
         files = await self.actor.list_files()
         task = item["title"] + (f"\n{item['notes']}" if item.get("notes") else "")
@@ -554,8 +563,9 @@ class RoomRuntime:
             if len(scope) > REVIEW_MAX_FILES:
                 task += f"\n(and {len(scope) - REVIEW_MAX_FILES} more; review the first {REVIEW_MAX_FILES} and say so)"
         return build_context(CoderContext(
-            system_prompt={"review": REVIEW_SYSTEM_PROMPT, "understand": UNDERSTAND_SYSTEM_PROMPT}.get(kind or "")
-            or coder_system_prompt(can_build),
+            system_prompt="\n\n".join(p for p in (
+                {"review": REVIEW_SYSTEM_PROMPT, "understand": UNDERSTAND_SYSTEM_PROMPT}.get(kind or "")
+                or coder_system_prompt(can_build), skills_prompt(skills or {})) if p),
             conventions=self.conventions,
             plan="" if kind == "review" else "\n".join(f"- [{p['id']}] {p['title']} ({p['status']})" for p in plan),
             current_task=f"[{item['id']}] {task}",
@@ -636,6 +646,8 @@ class _Narrated:
         shown = {k: v for k, v in arguments.items() if k not in ("content", "edits")}  # summaries only
         await self.actor.post_notice("tool.called", {"tool": name, "args": shown}, CODER)
         result = await self.inner.execute(name, arguments)
+        if name == "use_skill" and isinstance(result, dict) and result.get("ok"):
+            await self.actor.post_notice("skill.used", {"name": result.get("name")}, CODER)
         ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
         summary = _summary(name, result)
         await self.actor.post_notice("tool.result", {"tool": name, "summary": summary, "ok": ok}, CODER)
@@ -657,6 +669,8 @@ def _summary(name: str, result: Any) -> str:
         return f"{result['path']}{version}"
     if name == "list_files":
         return f"{len(result.get('files', []))} files"
+    if "instructions" in result:  # use_skill: the skill's text is long; the name is enough for the feed
+        return f"skill {result.get('name')}"
     if "content" in result:  # MCP tool output
         return str(result["content"])[:200]
     return str(result.get("summary") or "ok")[:200]

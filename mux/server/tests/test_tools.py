@@ -477,3 +477,67 @@ async def test_long_reviews_are_kept(tmp_path):
     tools = CoderToolExecutor(FileTools(tmp_path), read_only=True, review_scope=[])
     long = GOOD_REVIEW + "\n" + "- more detail\n" * 900
     assert len((await tools.execute("finish_task", {"summary": long}))["summary"]) > 12_000
+
+
+# skills
+
+def _skill(tmp_path: Path, files: dict[str, str] | None = None):
+    from mux.skills.library import load_skill
+    folder = tmp_path / "skills" / "frontend-design"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("---\ndescription: Distinctive UIs\n---\nUse bold type and real contrast.")
+    for name, content in (files or {}).items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(content)
+    skill = load_skill(folder, "server")
+    assert skill is not None
+    return skill
+
+
+async def test_skill_tools_are_offered_only_with_skills(tmp_path):
+    names = lambda tools: {s["function"]["name"] for s in tools.schemas()}
+    assert "use_skill" not in names(CoderToolExecutor(FileTools(tmp_path)))
+    skill = _skill(tmp_path)
+    with_skills = CoderToolExecutor(FileTools(tmp_path), skills={"frontend-design": skill})
+    assert {"use_skill", "read_skill_file"} <= names(with_skills)
+    review = CoderToolExecutor(FileTools(tmp_path), skills={"frontend-design": skill}, read_only=True)
+    assert names(review) == {"read_file", "list_files", "web_search", "finish_task", "use_skill", "read_skill_file"}
+
+
+async def test_use_skill_and_read_skill_file(tmp_path):
+    skill = _skill(tmp_path, {"examples/card.html": "<div class='card'></div>", "big.txt": "y" * 40_000})
+    (tmp_path / "secret.txt").write_text("nope")
+    tools = CoderToolExecutor(FileTools(tmp_path), skills={"frontend-design": skill})
+    used = await tools.execute("use_skill", {"name": "frontend-design"})
+    assert used == {"ok": True, "name": "frontend-design", "instructions": "Use bold type and real contrast.",
+                    "files": ["big.txt", "examples/card.html"]}
+    assert (await tools.execute("use_skill", {"name": "other"}))["ok"] is False
+    card = await tools.execute("read_skill_file", {"name": "frontend-design", "path": "examples/card.html"})
+    assert card == {"ok": True, "path": "examples/card.html", "content": "<div class='card'></div>"}
+    big = await tools.execute("read_skill_file", {"name": "frontend-design", "path": "big.txt"})
+    assert big["ok"] and len(big["content"]) < 31_000 and "cut" in big["content"]
+    for path in ("../../secret.txt", "/etc/passwd", "SKILL.md", "examples/../examples/card.html"):
+        assert (await tools.execute("read_skill_file", {"name": "frontend-design", "path": path}))["ok"] is False
+
+
+async def test_binary_skill_files_are_refused(tmp_path):
+    skill = _skill(tmp_path)
+    (skill.root / "logo.png").write_bytes(b"\x89PNG\x00\xff\xfe")
+    from mux.skills.library import load_skill
+    skill = load_skill(skill.root, "server")
+    tools = CoderToolExecutor(FileTools(tmp_path), skills={"frontend-design": skill})  # type: ignore[dict-item]
+    result = await tools.execute("read_skill_file", {"name": "frontend-design", "path": "logo.png"})
+    assert result["ok"] is False and "text" in result["error"]
+
+
+def test_compaction_keeps_the_latest_skill_text():
+    def call(cid: str, name: str, args: dict, result: str) -> list[dict]:
+        return [{"role": "assistant", "content": "", "tool_calls": [
+                    {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]},
+                {"role": "tool", "tool_call_id": cid, "content": result}]
+    body = json.dumps({"ok": True, "name": "frontend-design", "instructions": "I" * 500, "files": []})
+    messages = [*call("s1", "use_skill", {"name": "frontend-design"}, body),
+                *call("r1", "list_files", {"path": "."}, "x" * 500),
+                {"role": "assistant", "content": "", "tool_calls": []}]
+    out = compact(messages)
+    assert out[1]["content"] == body and out[3]["content"].startswith("[previous tool result]")

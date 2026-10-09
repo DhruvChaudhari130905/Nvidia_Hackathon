@@ -11,6 +11,7 @@ import httpx
 from mux.integrations.tavily import WebSearch
 
 from mux.sandbox.runner import Runner
+from mux.skills.library import Skill
 
 from .ask import ask_room
 from .codecheck import is_code, project_problems
@@ -20,11 +21,12 @@ from .finish import finish_task
 from .images import add_image, picture_problems
 from .plan import PlanTool, update_plan
 from .search import web_search
+from .skills import SKILL_TOOL_SCHEMAS, read_skill_file, use_skill
 from .review import MAX_REVIEW_CHARS, REVIEW_MAX_FILES, SEARCH_TOOL_SCHEMAS, review_problem, search_code
 
 QuestionCallback = Callable[[dict[str, Any]], Awaitable[Any] | Any]
 _CHANGES_FILES = {"write_file", "edit_file", "delete_file", "add_image"}
-READ_ONLY_TOOLS = {"read_file", "list_files", "web_search", "finish_task", "search_code"}
+READ_ONLY_TOOLS = {"read_file", "list_files", "web_search", "finish_task", "search_code", "use_skill", "read_skill_file"}
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -242,6 +244,7 @@ class CoderToolExecutor:
         http: httpx.AsyncClient | None = None,
         read_only: bool = False,
         review_scope: list[str] | None = None,
+        skills: dict[str, Skill] | None = None,
     ) -> None:
         if runner is not None and not isinstance(files, RoomFileTools):
             raise TypeError("a sandbox runner builds the room's files, so it needs RoomFileTools")
@@ -254,6 +257,7 @@ class CoderToolExecutor:
         self.http = http
         # A whole-codebase review: the source files it must read before it may finish (None: not a review)
         self.review_scope = review_scope
+        self.skills = skills or {}  # the room's enabled skills (mux/skills); tools offered only when non-empty
         self._reviewed: set[str] = set()
         self.read_only = read_only  # a review: reading tools only, and finish_task keeps the review as written
         self._images_used: set[str] = set()  # photos already added during this task
@@ -278,6 +282,8 @@ class CoderToolExecutor:
             "ask_room": self._ask_room,
             "update_plan": lambda **kwargs: update_plan(**kwargs, plan=self.plan),
             "finish_task": self._finish_task,
+            "use_skill": lambda name: use_skill(self.skills, name),
+            "read_skill_file": lambda name, path: read_skill_file(self.skills, name, path),
         }
         if self.read_only and name not in READ_ONLY_TOOLS:
             return {"ok": False, "error": f"{name} isn't available in a review: only read, then finish_task with the review"}
@@ -330,12 +336,13 @@ class CoderToolExecutor:
 
     def schemas(self) -> list[dict[str, Any]]:
         """The tool schemas to offer the model: the build tools only when builds can run."""
+        schemas = TOOL_SCHEMAS + (SKILL_TOOL_SCHEMAS if self.skills else [])
         if self.read_only:
             extra = SEARCH_TOOL_SCHEMAS if self.review_scope is not None else []
-            return [s for s in TOOL_SCHEMAS + extra if s["function"]["name"] in READ_ONLY_TOOLS]
+            return [s for s in schemas + extra if s["function"]["name"] in READ_ONLY_TOOLS]
         if self.can_build:
-            return TOOL_SCHEMAS
-        return [s for s in TOOL_SCHEMAS if s["function"]["name"] not in ("run_build", "run_tests")]
+            return schemas
+        return [s for s in schemas if s["function"]["name"] not in ("run_build", "run_tests")]
 
     async def _run_build(self) -> dict[str, Any]:
         if self.runner is not None:

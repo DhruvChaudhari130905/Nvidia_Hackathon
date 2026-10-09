@@ -71,6 +71,14 @@ def _reads_to_keep(messages: list[dict[str, Any]], calls: dict[str, tuple[str, d
         if message.get("role") != "tool":
             continue
         name, arguments = calls.get(str(message.get("tool_call_id", "")), ("", {}))
+        if name == "use_skill" and arguments.get("name"):
+            key = ("skill", arguments["name"])
+            size = len(str(message.get("content", "")))
+            if key not in seen and used + size <= KEPT_READS_BUDGET:
+                kept.add(i)
+                used += size
+            seen.add(key)
+            continue
         path = arguments.get("path")
         if not path:
             continue
