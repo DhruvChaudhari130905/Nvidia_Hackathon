@@ -62,6 +62,18 @@ Invite emails are sent by Supabase, which needs `SUPABASE_SERVICE_ROLE_KEY` in `
 
 `localhost` only works on your machine. For a quick session, `make tunnel` (needs `brew install cloudflared`) gives the web app and API public https addresses and prints the two restart commands and the Supabase redirect URL to add. For something permanent, deploy the web app and API and set `NEXT_PUBLIC_API_URL` and `WEB_APP_URL` to their addresses.
 
+## 🔌 MCP tools for the coder
+
+The coder can use tools from [MCP](https://modelcontextprotocol.io) servers. Every MCP call shows in the room's feed.
+
+**For every room (whoever runs the server):** copy `mux/server/mcp.example.json` to `mux/server/mcp.json`, list servers in the same format as Claude Desktop (`command`/`args`/`env` for local servers, `url`/`headers` for remote ones), and restart `make server`. Each room's owner then turns them on in **Tools**; they're off until then.
+
+**For one room (its owner):** **Tools** in the room's top bar → **Add a server** with a name, a public `https://` URL and an optional token. MUX connects and lists its tools. Set `MCP_ENCRYPTION_KEY` in `mux/server/.env` first if the server needs a token (tokens are stored encrypted and never sent back to browsers).
+
+**Approvals:** each tool is **Auto** or **Ask first**. An Ask-first call puts an Allow / Deny card in the room; no answer before it expires counts as Deny.
+
+**Limits:** room servers must be public `https` (set `MCP_ALLOW_PRIVATE_URLS=true` only on your own machine to try a local server); at most 10 per room; connecting gives up after 10 s, a call after 60 s; output is cut at 20,000 characters. A server that's down when a task starts is skipped for that task with a note in the feed.
+
 ## ⚡ Shortcut: the Makefile
 
 From the repo root, `make help` lists everything. The usual flow:

@@ -7,3 +7,6 @@ node_modules/
 dist/
 .DS_Store
 .mux/
+
+# Server-wide MCP servers can hold tokens (copy mcp.example.json)
+server/mcp.json
