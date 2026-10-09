@@ -224,7 +224,16 @@ export default function RoomPage() {
     setFileVersions(new Map(Array.from(initial.keys(), path => [path, 1])));
     setActiveFile(['README.md', 'src/App.tsx', 'package.json', 'index.html'].find(p => initial!.has(p)) ?? null);
     filesRoom.current = roomId;
-    if (imported) void saveRoomFiles(roomId, initial);
+    if (imported) {
+      void saveRoomFiles(roomId, initial);
+      // The agents work from the server's copy, so the project goes there too (it used to stay in this browser
+      // only, and the coordinator and coder never saw it). No base version: it replaces the empty room's files.
+      imported.files.forEach(f =>
+        api.saveFile(roomId, f.path, f.content, null)
+          .then(({ version }) => writeLocal([{ path: f.path, content: f.content, version }]))
+          .catch(error => console.error(`Could not save ${f.path} to the room:`, error)),
+      );
+    }
   };
   roomFns.current = { loadInitialFiles, pullServerFiles };
 
