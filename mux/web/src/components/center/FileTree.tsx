@@ -6,11 +6,9 @@ import {
   FilePlus, FolderPlus, FolderInput, Upload, Pencil, Trash2, Download, Search, ChevronsDownUp, Lock, X,
 } from 'lucide-react';
 import { isProjectDrop } from '@/lib/projectImport';
+import { BINARY_ASSET, bytesToDataUrl, dataUrlToBytes, isBinaryContent, maxBytesFor, mimeFor } from '@/lib/binaryFiles';
 
 export type FileMap = Map<string, { content: string }>;
-
-// Files pasted/dropped in must be text and reasonably small; the editor is text-only
-const MAX_UPLOAD_BYTES = 1_000_000;
 
 export interface UploadedFile {
   path: string;
@@ -72,9 +70,10 @@ function parentOf(path: string): string {
   return i === -1 ? '' : path.slice(0, i);
 }
 
-// Plain text download of one file
+// Download of one file: text as is, binary files (data URLs) as their bytes
 export function downloadFile(path: string, content: string) {
-  const url = URL.createObjectURL(new Blob([content], { type: 'text/plain' }));
+  const blob = isBinaryContent(content) ? new Blob([dataUrlToBytes(content) as BlobPart], { type: mimeFor(path) }) : new Blob([content], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = path.split('/').pop() || 'file.txt';
@@ -82,18 +81,19 @@ export function downloadFile(path: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
-// Read browser File objects as text, skipping binaries and oversized files
+// Read browser File objects: text as is, images/fonts/media as data URLs; other binaries and oversized files are skipped
 export async function readUploads(list: FileList | File[], targetDir: string): Promise<{ files: UploadedFile[]; skipped: string[] }> {
   const files: UploadedFile[] = [];
   const skipped: string[] = [];
   for (const f of Array.from(list)) {
-    const binary = /^(image|audio|video|font)\//.test(f.type) || /\.(png|jpe?g|gif|webp|ico|woff2?|ttf|zip|pdf)$/i.test(f.name);
-    if (binary || f.size > MAX_UPLOAD_BYTES) {
+    const asset = BINARY_ASSET.test(f.name);
+    const binary = !asset && !f.name.endsWith('.svg') && (/^(image|audio|video|font)\//.test(f.type) || /\.(zip|gz|tgz|rar|7z|exe|dll|wasm)$/i.test(f.name));
+    if (binary || f.size > maxBytesFor(f.name)) {
       skipped.push(f.name);
       continue;
     }
     const relative = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
-    files.push({ path: targetDir ? `${targetDir}/${relative}` : relative, content: await f.text() });
+    files.push({ path: targetDir ? `${targetDir}/${relative}` : relative, content: asset ? bytesToDataUrl(new Uint8Array(await f.arrayBuffer()), f.name) : await f.text() });
   }
   return { files, skipped };
 }
@@ -269,7 +269,7 @@ export function FileTree({
       if (targetDir) setExpanded(prev => new Set(prev).add(targetDir));
     }
     flash(
-      [uploaded.length && `Added ${uploaded.length} file${uploaded.length === 1 ? '' : 's'}${targetDir ? ` to ${targetDir}/` : ''}`, skipped.length && `skipped ${skipped.join(', ')} (binary or >1 MB)`]
+      [uploaded.length && `Added ${uploaded.length} file${uploaded.length === 1 ? '' : 's'}${targetDir ? ` to ${targetDir}/` : ''}`, skipped.length && `skipped ${skipped.join(', ')} (binary or over 1 MB, 2 MB for images)`]
         .filter(Boolean)
         .join(' · ') || 'Nothing to add',
     );
@@ -344,6 +344,7 @@ export function FileTree({
           <div
             role="treeitem"
             aria-expanded={isOpen}
+            aria-selected={isTarget}
             tabIndex={0}
             onClick={() => toggle(node.path)}
             onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(node.path); } }}

@@ -11,13 +11,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, model_validator
 
 from mux.api.deps import get_room_actor_dep, get_current_user, require_editor, require_owner, require_viewer, User
+from mux.events.file_log import stored_room_ids
 from mux.events.wire import membership_view
 from mux.integrations.github import get_github_integration
-from mux.rooms.actor import RoomActor
+from mux.rooms.actor import PathConflictError, RoomActor
 from mux.rooms.registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -167,7 +169,7 @@ class BudgetUpdateRequest(BaseModel):
 class ExportRequest(BaseModel):
     """`POST /rooms/{id}/export`: push the latest checkpoint to <your GitHub account>/<repo_name>."""
     repo_name: str = Field(..., min_length=1, max_length=100)
-    private: bool = Field(True, description="Visibility for a new repo (the repo must exist for now)")
+    private: bool = Field(True, description="Visibility when the repo doesn't exist yet and is created")
 
 
 class Accepted(BaseModel):
@@ -260,11 +262,11 @@ async def create_room(
 
 @router.get("")
 async def list_rooms(current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
-    """Rooms the current user can access (rooms with running actors, until rooms are stored in Postgres)."""
+    """Rooms the current user can access: running rooms and rooms saved on disk (rebuilt on first use)."""
     registry = get_registry()
     rooms = []
-    for room_id in await registry.list_rooms():
-        actor = await registry.get_room(room_id)
+    for room_id in sorted(set(await registry.list_rooms()) | set(stored_room_ids())):
+        actor = await registry.get_room_or_rehydrate(room_id)
         if actor and actor.role_of(current_user.id) is not None:
             rooms.append(await room_view(actor))
     return rooms
@@ -457,6 +459,7 @@ async def send_message(
     """A steering message (to the agent) or a note between people (to the team)."""
     await actor.add_message(
         label="chat", content=request.text, message_id=str(uuid.uuid4()), user_id=current_user.id, to=request.to,
+        user_name=current_user.name,
         enqueue=False,  # the room runtime labels it with the coordinator, then enqueues merges/interrupts
     )
     return accepted(actor)
@@ -573,7 +576,10 @@ async def save_file(
     current = await actor.file_version(path)
     # No base_version: overwrite whatever is there (still refused while someone else holds the lock)
     base = request.base_version if request.base_version is not None else current
-    outcome, version = await actor.save_checked(path, request.content, base, current_user.id)
+    try:
+        outcome, version = await actor.save_checked(path, request.content, base, current_user.id)
+    except PathConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     if outcome == "locked":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{path} is being edited by {await actor.locked_by(path)}")
     if outcome == "stale":
@@ -671,7 +677,7 @@ async def export_room(
     current_user: User = Depends(require_owner),
     actor: RoomActor = Depends(get_room_actor),
 ) -> UrlResponse:
-    """Push the room's current code to <connected GitHub user>/<repo_name> (the repo must already exist)."""
+    """Push the room's current code to <connected GitHub user>/<repo_name>, creating the repo if needed."""
     github = get_github_integration()
     username = github.get_connection_status(current_user.id).get("username")
     if not username:
@@ -680,12 +686,16 @@ async def export_room(
     checkpoint_id = await actor.create_checkpoint(current_user.id, "Export to GitHub")
     checkpoint_data = actor.manifest.get_checkpoint(checkpoint_id) or {}
     try:
+        await github.ensure_repository(current_user.id, username, request.repo_name, request.private)
         result = await github.export_checkpoint(
             user_id=current_user.id, checkpoint_data=checkpoint_data, github_owner=username,
             github_repo=request.repo_name, branch="main", commit_message=None, path_prefix="",
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        detail = f"GitHub returned {e.response.status_code} for {e.request.method} {e.request.url.path}"
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
     actor.manifest.add_export_record({
         "checkpoint_id": checkpoint_id, "github_owner": username, "github_repo": request.repo_name,
         "branch": "main", "commit_sha": result.commit_sha, "html_url": result.html_url,
@@ -695,11 +705,21 @@ async def export_room(
     return UrlResponse(url=result.html_url)
 
 
+def _safe_app_path(path: Optional[str]) -> Optional[str]:
+    """An in-app path such as /room/abc?export=1; anything that could leave the app is dropped."""
+    if not path or not path.startswith("/") or path.startswith("//") or "\\" in path:
+        return None
+    return path
+
+
 @github_router.get("/github/connect", response_model=UrlResponse)
-async def github_connect(current_user: User = Depends(get_current_user)) -> UrlResponse:
+async def github_connect(
+    next: Optional[str] = Query(None, max_length=500, description="App path to return to after connecting"),
+    current_user: User = Depends(get_current_user),
+) -> UrlResponse:
     """The GitHub authorization URL to send the user to (repo scope, asked for only at export)."""
     try:
-        auth_url, _state = get_github_integration().get_authorization_url(current_user.id)
+        auth_url, _state = get_github_integration().get_authorization_url(current_user.id, return_to=_safe_app_path(next))
     except RuntimeError as e:  # GITHUB_CLIENT_ID / SECRET not set
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
     return UrlResponse(url=auth_url)

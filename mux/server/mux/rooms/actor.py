@@ -136,6 +136,11 @@ class ActorState:
     running: bool = False
 
 
+
+class PathConflictError(ValueError):
+    """A file can't be saved where a folder is (or inside something that is a file)."""
+
+
 class RoomActor:
     """
     RoomActor is the single asyncio task that owns all room state and processes
@@ -673,6 +678,7 @@ class RoomActor:
         domain: Optional[str] = None,
         to: Optional[str] = None,
         enqueue: bool = True,
+        user_name: Optional[str] = None,
     ) -> None:
         """Post a message and add it to the inbox (coordinator labels: merge, queue, interrupt, conflict, chat).
 
@@ -682,6 +688,8 @@ class RoomActor:
         async with self._lock:
             if enqueue and to != "team":
                 await self.inbox.add(label, content, message_id=message_id, user_id=user_id, rationale=rationale, domain=domain)
+            if user_id and user_name:
+                self.member_names[user_id] = user_name
             event = UserMessageSentEvent(
                 id=uuid4(),
                 type=EventType.USER_MESSAGE_SENT,
@@ -692,7 +700,7 @@ class RoomActor:
                 prev_event_id=None,
                 message_id=message_id or str(uuid4()),
                 content=content,
-                user_name=None,
+                user_name=user_name or (self.member_names.get(user_id) if user_id else None),
                 reply_to=None,
                 to=to,
             )
@@ -814,14 +822,31 @@ class RoomActor:
         )
         await self._emit(event)
 
+    def _path_clash(self, path: str) -> Optional[str]:
+        """Why a file can't be saved at `path` because of the room's folders, or None when it can."""
+        paths = self.manifest.list_paths()
+        if not path or path.endswith("/"):
+            return "a file path needs a file name"
+        if any(p.startswith(f"{path}/") for p in paths):
+            return f"{path} is a folder"
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            parent = "/".join(parts[:depth])
+            if parent in paths:
+                return f"{parent} is a file, so it can't contain {path}"
+        return None
+
     async def save_checked(self, path: str, content: Optional[str], base_version: Optional[int], user_id: str) -> tuple[str, Optional[int]]:
         """Version-checked save, atomic against every other change to the room.
 
         `content=None` deletes. `base_version` is the version the edit started from (None or 0: the file
         must not exist yet). Returns ("ok", new version), ("stale", current version) or ("locked", None)
-        when someone else holds the file's soft lock.
+        when someone else holds the file's soft lock. Raises PathConflictError when the path clashes with a
+        folder (saving "src" while "src/App.tsx" exists, or "a.txt/b" while "a.txt" is a file).
         """
         async with self._lock:
+            if content is not None and (clash := self._path_clash(path)):
+                raise PathConflictError(clash)
             holder = await self.locks.locked_by(path)
             if holder and holder != user_id:
                 return "locked", None
@@ -1106,6 +1131,10 @@ class RoomActor:
                 self.members[e.user_id] = getattr(event, "role", "editor")
                 if e.domain_role:
                     self.domain_roles[e.user_id] = e.domain_role
+                if e.user_name:
+                    self.member_names[e.user_id] = e.user_name
+            elif t == EventType.USER_MESSAGE_SENT:
+                e = cast(UserMessageSentEvent, event)
                 if e.user_name:
                     self.member_names[e.user_id] = e.user_name
             elif t == EventType.ROOM_SHARING_UPDATED:

@@ -415,17 +415,12 @@ export function Terminal({ fs, active, onExit }: TerminalProps) {
         }
         print(mk('dim', `\n> ${pkg.name ?? 'app'}@${pkg.version ?? '0.0.0'} ${script}\n> ${scripts[script] ?? 'vitest run'}\n`));
         if (script === 'dev' || script.startsWith('dev:') || script === 'start' || script.startsWith('preview')) {
-          setBusy(true);
-          await sleep(700);
-          setBusy(false);
-          const port = script.startsWith('preview') ? 4173 : 5173;
+          // No server can run in this simulated shell, so don't print a localhost link that leads nowhere
           print(
-            mk('ok', `  VITE v5.0.0  ready in ${320 + Math.round(Math.random() * 200)} ms`),
-            mk('out', `\n  ➜  Local:   http://localhost:${port}/\n  ➜  Network: use --host to expose`),
-            mk('dim', '\n  watching for file changes… press Ctrl+C to stop\n  (simulated here — the room’s WebContainer serves the real preview)'),
+            mk('err', `Can't start "${script}" here: this is a simulated shell (see the note above), so no server runs.`),
+            mk('dim', 'Servers run in the browser\'s WebContainer, which this page couldn\'t start. Fix the reason above and\nreload; the Preview tab then installs and runs the app by itself.'),
           );
-          setRunning('dev');
-          return true;
+          return false;
         }
         if (script === 'test') {
           setBusy(true);

@@ -15,6 +15,19 @@
 - Never overwrite changes made since the last read.
 - Keep filenames and directory structure consistent with the starter template.
 
+## Runnable projects
+
+- The room previews the app by running `npm install` then `npm run dev` in the browser, so every app
+  must start that way. A React or TypeScript app needs, at the project root:
+  - `package.json` with a `dev` script (`"dev": "vite"`) and its dependencies (react, react-dom, vite,
+    @vitejs/plugin-react, typescript)
+  - `vite.config.ts` using `@vitejs/plugin-react`
+  - `index.html` with `<div id="root"></div>` and `<script type="module" src="/src/main.tsx"></script>`
+  - `src/main.tsx`, which renders the app into `#root`
+- Create these first, in the first task, before writing components.
+- A simple static site may be plain `index.html`, CSS and JS instead, with no package.json.
+- Every link, import, CSS class and id must point at something that exists in the project.
+
 ## React / TypeScript
 
 - Use TypeScript.
@@ -35,9 +48,9 @@
 
 ## Validation
 
-- Run the build after meaningful changes.
-- Run relevant tests when available.
-- Fix build errors before declaring the task complete.
+- When the build tools are available, run the build after meaningful changes, run relevant tests, and
+  fix build errors before declaring the task complete.
+- When they aren't, re-read the files you changed and check them against the rules above.
 - Do not claim success without a successful validation result.
 
 ## Task Completion

@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import type { Terminal as XTerm } from '@xterm/xterm';
 import type { WebContainerProcess } from '@webcontainer/api';
-import { attachRoom, onServerReady, pushRoomFiles, runningServers, updateRoomFs, webContainersSupported } from '@/lib/runtime';
+import { attachRoom, onServerReady, pushRoomFiles, resolveServerLink, runningServers, updateRoomFs, webContainersSupported } from '@/lib/runtime';
 import { notify } from '@/lib/notifications';
 import { checkPackageJson, installWarning } from '@/lib/installHints';
 import { Terminal as SimulatedTerminal, type TerminalFs } from './Terminal';
@@ -82,11 +82,11 @@ export function ShellTerminal({ roomId, fs, active, onExit, onControl, startDir 
 
   // Room edits flow into the container while this terminal is open
   useEffect(() => {
-    if (!fallback) updateRoomFs(fs);
+    if (!fallback) updateRoomFs(roomId, fs);
   });
   useEffect(() => {
-    if (!fallback) void pushRoomFiles(fs.files);
-  }, [fs.files, fallback]);
+    if (!fallback) void pushRoomFiles(roomId, fs.files);
+  }, [roomId, fs.files, fallback]);
 
   useEffect(() => {
     if (fallback || !hostRef.current) return;
@@ -114,7 +114,8 @@ export function ShellTerminal({ roomId, fs, active, onExit, onControl, startDir 
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
-      term.loadAddon(new WebLinksAddon((_e, uri) => window.open(uri, '_blank', 'noopener')));
+      // localhost links printed by dev servers point inside the WebContainer: open its URL for that port
+      term.loadAddon(new WebLinksAddon((_e, uri) => window.open(resolveServerLink(uri), '_blank', 'noopener')));
       term.open(hostRef.current);
       termRef.current = term;
       const doFit = () => {
@@ -206,7 +207,7 @@ export function ShellTerminal({ roomId, fs, active, onExit, onControl, startDir 
 
       term.write(dim(`Ready · real Node.js, npm, npx and node run here · files sync with the room\r\n`));
       installWarning(checkPackageJson(fs.files.get('package.json')?.content)).forEach(line => term.write(`${yellow(line)}\r\n`));
-      runningServers().forEach(([port, url]) => term.write(`${green('➜')} Server running on port ${port}: ${cyan(url)}\r\n`));
+      runningServers(roomId).forEach(([port, url]) => term.write(`${green('➜')} Server running on port ${port}: ${cyan(url)}\r\n`));
       await startShell();
       if (active) term.focus();
     })();

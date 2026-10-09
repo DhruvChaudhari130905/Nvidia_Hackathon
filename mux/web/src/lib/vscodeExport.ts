@@ -1,12 +1,12 @@
 // Hand a room's files to desktop VS Code: save them into a local folder (File System Access API,
 // Chromium only) or download a .zip, and read edits made in VS Code back from that folder.
+import { BINARY_ASSET, bytesToDataUrl, fileBytes, maxBytesFor } from './binaryFiles';
 
 export type FileContents = Map<string, string>;
 
 // Folders never copied back into the room
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.turbo', '.cache', 'coverage']);
 const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|bmp|woff2?|ttf|otf|eot|zip|gz|tgz|pdf|mp[34]|wav|webm|mov|sqlite|db|lock)$/i;
-const MAX_FILE_BYTES = 1_000_000;
 export const EXTENSIONS_FILE = '.vscode/extensions.json';
 
 export function projectSlug(title: string): string {
@@ -82,7 +82,8 @@ export function zipFiles(files: FileContents, rootFolder: string): Blob {
 
   for (const [path, content] of Array.from(files).sort(([a], [b]) => a.localeCompare(b))) {
     const name = enc.encode(`${rootFolder}/${path}`);
-    const data = enc.encode(content);
+    const bytes = fileBytes(content);
+    const data = typeof bytes === 'string' ? enc.encode(bytes) : bytes;
     const crc = crc32(data);
 
     const local = new DataView(new ArrayBuffer(30));
@@ -152,7 +153,7 @@ interface FileHandle {
   name: string;
   kind: 'file';
   getFile(): Promise<File>;
-  createWritable(): Promise<{ write(data: string): Promise<void>; close(): Promise<void> }>;
+  createWritable(): Promise<{ write(data: string | Uint8Array): Promise<void>; close(): Promise<void> }>;
 }
 
 export function canUseFolders(): boolean {
@@ -187,7 +188,7 @@ export async function saveToFolder(roomId: string, files: FileContents, pickNew 
     let d = dir;
     for (const part of parts.slice(0, -1)) d = await d.getDirectoryHandle(part, { create: true });
     const w = await (await d.getFileHandle(parts[parts.length - 1], { create: true })).createWritable();
-    await w.write(content);
+    await w.write(fileBytes(content));
     await w.close();
   }
   return dir.name;
@@ -210,11 +211,11 @@ export async function readFolder(roomId: string): Promise<{ files: FileContents;
       }
       if (entry.name === '.DS_Store') continue;
       const file = await entry.getFile();
-      if (BINARY_EXT.test(entry.name) || file.size > MAX_FILE_BYTES) {
+      if ((BINARY_EXT.test(entry.name) && !BINARY_ASSET.test(entry.name)) || file.size > maxBytesFor(entry.name)) {
         skipped++;
         continue;
       }
-      files.set(path, await file.text());
+      files.set(path, BINARY_ASSET.test(entry.name) ? bytesToDataUrl(new Uint8Array(await file.arrayBuffer()), path) : await file.text());
     }
   };
   await walk(dir, '');

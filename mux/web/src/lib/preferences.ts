@@ -45,11 +45,44 @@ export function setLastRoom(room: { id: string; title: string }) {
   }
 }
 
+// Forget the last room if it is this one (it no longer exists), so the header stops linking to it
+// Fired when the last room is forgotten, so a header already on screen stops linking to it
+export const LAST_ROOM_CHANGED = 'mux:last-room-changed';
+
+export function clearLastRoom(roomId: string) {
+  try {
+    if (getLastRoom()?.id !== roomId) return;
+    window.localStorage.removeItem(LAST_ROOM_KEY);
+    window.dispatchEvent(new Event(LAST_ROOM_CHANGED));
+  } catch {
+    // storage unavailable
+  }
+}
+
 export function getLastRoom(): LastRoom | null {
   try {
     const raw = window.localStorage.getItem(LAST_ROOM_KEY);
     return raw ? (JSON.parse(raw) as LastRoom) : null;
   } catch {
     return null;
+  }
+}
+
+// Whether the room's feed (left), decisions & plan (right) and timeline (bottom) panels are open
+export type RoomPanel = 'feed' | 'side' | 'timeline';
+
+export function getPanelOpen(panel: RoomPanel): boolean {
+  try {
+    return window.localStorage.getItem(`mux_panel_${panel}`) !== 'closed';
+  } catch {
+    return true;
+  }
+}
+
+export function setPanelOpen(panel: RoomPanel, open: boolean) {
+  try {
+    window.localStorage.setItem(`mux_panel_${panel}`, open ? 'open' : 'closed');
+  } catch {
+    // storage unavailable; the layout just won't persist
   }
 }

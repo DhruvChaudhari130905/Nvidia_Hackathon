@@ -5,7 +5,7 @@ import type { RoomState, Conflict, Question, PlanItem } from '@/types';
 import { ConflictCard } from './ConflictCard';
 import { QuestionCard } from './QuestionCard';
 import { PlanList } from './PlanList';
-import { PlanApproval } from './PlanApproval';
+import { CollapseButton } from '@/components/room/PanelRail';
 
 interface SidePanelProps {
   state: RoomState;
@@ -16,6 +16,9 @@ interface SidePanelProps {
   onAnswer: (questionId: string, answer: string) => void;
   onPlanUpdate: (items: PlanItem[]) => void;
   onPlanApprove: () => void;
+  // Hidden (still mounted) while collapsed to its rail
+  collapsed?: boolean;
+  onCollapse?: () => void;
 }
 
 export function SidePanel({
@@ -27,16 +30,20 @@ export function SidePanel({
   onAnswer,
   onPlanUpdate,
   onPlanApprove,
+  collapsed,
+  onCollapse,
 }: SidePanelProps) {
   const openConflicts = state.conflicts.filter(c => c.status === 'open' || c.status === 'voting');
   const openQuestions = state.questions.filter(q => q.status === 'open');
-  const isPlanApproved = state.plan.some(p => p.status !== 'draft');
 
   return (
-    <aside className="col flex flex-col" aria-label="Decisions and plan">
+    <aside className="col flex flex-col" aria-label="Decisions and plan" hidden={collapsed}>
       <div className="col-head">
         <span>Decisions & plan</span>
-        <span>{openConflicts.length + openQuestions.length} open</span>
+        <span className="flex items-center gap-2">
+          <span>{openConflicts.length + openQuestions.length} open</span>
+          {onCollapse && <CollapseButton side="right" label="decisions and plan" onCollapse={onCollapse} />}
+        </span>
       </div>
       <div className="scroll">
         <div className="side">
@@ -62,19 +69,13 @@ export function SidePanel({
             />
           ))}
 
-          {isPlanApproved ? (
-            <PlanList
-              plan={state.plan}
-              approved={true}
-              canEdit={currentUserRole !== 'viewer'}
-            />
-          ) : (
-            <PlanApproval
-              plan={state.plan}
-              onUpdate={onPlanUpdate}
-              onApprove={onPlanApprove}
-            />
-          )}
+          <PlanList
+            plan={state.plan}
+            canEdit={currentUserRole !== 'viewer'}
+            canApprove={currentUserRole === 'owner'}
+            onUpdate={onPlanUpdate}
+            onApprove={onPlanApprove}
+          />
         </div>
       </div>
     </aside>

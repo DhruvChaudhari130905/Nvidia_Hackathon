@@ -41,5 +41,8 @@ class Settings(BaseSettings):
     github_redirect_uri: str = ""
     github_token_encryption_key: str = ""
 
+    # Where the web app runs; the GitHub connect flow returns the browser here
+    web_app_url: str = "http://localhost:3000"
+
 
 settings = Settings()

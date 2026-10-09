@@ -42,6 +42,18 @@ export default function ProfilePage() {
   const [defaultRole, setDefaultRoleState] = useState<DomainRole>('pm');
   const [savedRole, setSavedRole] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  // Set when GitHub's connect flow returns here (?github=connected&username=… or ?github=error&message=…)
+  const [githubResult, setGithubResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get('github');
+    if (!result) return;
+    setGithubResult(result === 'connected'
+      ? { ok: true, text: `GitHub connected as @${params.get('username') ?? 'you'}. You can export rooms now.` }
+      : { ok: false, text: params.get('message') ?? 'GitHub connection failed.' });
+    window.history.replaceState(null, '', window.location.pathname);
+  }, []);
   const [barReady, setBarReady] = useState(false); // lets the plan bar grow from 0 after first paint
 
   useEffect(() => {
@@ -329,6 +341,15 @@ export default function ProfilePage() {
           <div className="rounded-lg border border-surface-container-highest bg-surface-container/90 p-space-lg shadow-sm backdrop-blur-md">
             <h2 className="mb-space-md font-headline text-headline-md text-on-surface">Account</h2>
             <div className="space-y-space-sm">
+              {githubResult && (
+                <p
+                  role="status"
+                  className={`flex items-start gap-space-sm rounded-lg border p-space-sm text-body-sm ${githubResult.ok ? 'border-primary/40 bg-primary/10 text-on-surface' : 'border-error-strong/40 bg-error-strong/10 text-error'}`}
+                >
+                  {githubResult.ok && <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />}
+                  {githubResult.text}
+                </p>
+              )}
               <button
                 type="button"
                 onClick={handleConnectGitHub}

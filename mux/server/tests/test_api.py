@@ -6,14 +6,14 @@ import time
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt
+import jwt
 
 import mux.rooms.registry as room_registry
 from mux.config import settings
 from mux.events.models import UserMessageSentEvent
 from mux.main import create_app
 
-SECRET = "test-secret"
+SECRET = "test-secret-that-is-at-least-32-bytes"
 
 
 def token(sub: str, aud: str | None = "authenticated") -> str:
@@ -34,6 +34,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "supabase_jwt_secret", SECRET)
     monkeypatch.setattr(settings, "supabase_jwt_audience", "")
     monkeypatch.setattr(settings, "database_url", f"sqlite+aiosqlite:///{tmp_path}/test.db")
+    # Keep a developer's real .env out of these tests: no live agents, no GitHub OAuth app
+    monkeypatch.setattr(settings, "token_factory_api_key", "")
+    monkeypatch.setattr(settings, "github_client_id", "")
+    monkeypatch.setattr(settings, "github_client_secret", "")
+    monkeypatch.setattr("mux.integrations.github._github_integration", None)
     with TestClient(create_app()) as c:
         yield c
 
@@ -63,6 +68,57 @@ def test_configured_audience_is_enforced(client, monkeypatch):
     create_room(client)
     bad = {"Authorization": f"Bearer {token('alice', aud='other')}"}
     assert client.post("/rooms", json={"name": "x"}, headers=bad).status_code == 401
+
+
+def test_messages_carry_the_senders_display_name(client):
+    rid = create_room(client)
+    named = jwt.encode({"sub": "alice", "aud": "authenticated", "exp": int(time.time()) + 3600, "email": "alice@x.dev",
+                        "user_metadata": {"full_name": "Alice Smith"}}, SECRET, algorithm="HS256")
+    r = client.post(f"/rooms/{rid}/messages", json={"text": "hi"}, headers={"Authorization": f"Bearer {named}"})
+    assert r.status_code == 200, r.text
+    with client.websocket_connect(f"/rooms/{rid}/ws?since=0") as ws:
+        ws.send_json({"type": "auth", "payload": {"token": named}})
+        dump = ws.receive_json()
+    posted = next(e for e in dump if e["type"] == "message.posted")
+    assert posted["payload"]["user"]["name"] == "Alice Smith"
+
+
+def test_display_name_falls_back_to_email():
+    from mux.auth.supabase import display_name
+    assert display_name({"email": "bob@x.dev", "user_metadata": {}}) == "bob"
+    assert display_name({"user_metadata": {"name": "  Bob B "}}) == "Bob B"
+    assert display_name({}) is None
+
+
+def test_asymmetric_supabase_token_is_verified_against_jwks(client, monkeypatch):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from jwt.algorithms import ECAlgorithm
+
+    import mux.auth.supabase as supa
+
+    def es256_key():
+        private = ec.generate_private_key(ec.SECP256R1())
+        pem = private.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+        )
+        return pem, ECAlgorithm.to_jwk(private.public_key(), as_dict=True)
+
+    signing_pem, public = es256_key()
+    other_pem, _ = es256_key()
+    public.update(kid="k1", alg="ES256")
+    monkeypatch.setattr(settings, "supabase_url", "https://example.supabase.co")
+    monkeypatch.setattr(supa, "_jwks_cache", {"url": None, "fetched_at": 0.0, "keys": []})
+    monkeypatch.setattr(supa, "_fetch_jwks", lambda url: [public])
+
+    def es_token(pem, sub="alice"):
+        claims = {"sub": sub, "aud": "authenticated", "exp": int(time.time()) + 3600}
+        return jwt.encode(claims, pem.decode(), algorithm="ES256", headers={"kid": "k1"})
+
+    good = {"Authorization": f"Bearer {es_token(signing_pem)}"}
+    assert client.post("/rooms", json={"description": "x"}, headers=good).status_code == 201
+    forged = {"Authorization": f"Bearer {es_token(other_pem)}"}
+    assert client.post("/rooms", json={"description": "x"}, headers=forged).status_code == 401
 
 
 # --- rooms / permissions --------------------------------------------------
@@ -367,6 +423,40 @@ def test_rehydration_restores_state(client):
     assert len(room.manifest.list_checkpoints()) == 1
 
 
+def test_saving_a_folder_path_as_a_file_is_a_409(client):
+    rid = create_room(client)
+    h = auth("alice")
+    assert client.put(f"/rooms/{rid}/files", json={"path": "src/App.tsx", "content": "x", "base_version": 0}, headers=h).status_code == 200
+    r = client.put(f"/rooms/{rid}/files", json={"path": "src", "content": "", "base_version": 0}, headers=h)
+    assert r.status_code == 409 and "folder" in r.json()["detail"]
+    r = client.put(f"/rooms/{rid}/files", json={"path": "src/App.tsx/x", "content": "", "base_version": 0}, headers=h)
+    assert r.status_code == 409 and "is a file" in r.json()["detail"]
+
+
+def test_rooms_survive_a_server_restart(client):
+    """Events are kept on disk: after a restart the room is listed again and rebuilt with its state."""
+    import mux.main as main_module
+
+    rid = create_room(client, initial_plan=[{"id": "p1", "title": "Home page", "status": "draft"}])
+    client.post(f"/rooms/{rid}/messages", json={"text": "make it blue"}, headers=auth("alice"))
+    client.put(f"/rooms/{rid}/files", json={"path": "index.html", "content": "<h1>hi</h1>", "base_version": 0}, headers=auth("alice"))
+    client.post(f"/rooms/{rid}/plan/approve", headers=auth("alice"))
+
+    # A restart: no running actors and no cached logs, only what's on disk
+    registry_call(client, room_registry.get_registry().stop_room, rid)
+    main_module._room_event_logs.clear()
+
+    assert [r["id"] for r in client.get("/rooms", headers=auth("alice")).json()] == [rid]
+    assert client.get("/rooms", headers=auth("mallory")).json() == []
+    room = registry_call(client, room_registry.get_registry().get_room, rid)
+    assert [(p["title"], p["status"]) for p in registry_call(client, room.get_plan)] == [("Home page", "todo")]
+    assert client.get(f"/api/files/{rid}/files/index.html", headers=auth("alice")).json()["content"] == "<h1>hi</h1>"
+    with client.websocket_connect(f"/rooms/{rid}/ws?since=0") as ws:
+        ws.send_json({"type": "auth", "payload": {"token": token("alice")}})
+        dump = ws.receive_json()
+    assert any(e["type"] == "message.posted" and e["payload"]["text"] == "make it blue" for e in dump)
+
+
 def test_rehydration_restores_budget(client):
     rid = create_room(client)
     reg = room_registry.get_registry()
@@ -386,8 +476,84 @@ def test_rehydration_restores_budget(client):
 def test_github_callback_rejects_forged_state(client):
     import base64
     forged = base64.urlsafe_b64encode(json.dumps({"user_id": "victim"}).encode()).decode()
-    r = client.get("/api/export/github/callback", params={"code": "c", "state": forged})
-    assert r.status_code == 400
+    r = client.get("/api/export/github/callback", params={"code": "c", "state": forged}, follow_redirects=False)
+    assert r.status_code == 307 and "github=error" in r.headers["location"]
+
+
+def test_connect_github_then_export_creates_the_repo(client, monkeypatch):
+    """The callback records the GitHub login, and export creates a missing repo before pushing."""
+    from mux.integrations.github import get_github_integration
+
+    monkeypatch.setattr(settings, "web_app_url", "http://app.test")
+    gh = get_github_integration()
+    gh.config.client_id, gh.config.client_secret = "id", "secret"
+    calls = []
+
+    def handler(req):
+        calls.append((req.method, req.url.path))
+        path = req.url.path
+        if path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "tok", "scope": "repo"})
+        if path == "/user":
+            return httpx.Response(200, json={"login": "alice-gh", "id": 7, "email": "a@x.dev"})
+        if path == "/repos/alice-gh/shop" and req.method == "GET":
+            return httpx.Response(404 if ("POST", "/user/repos") not in calls else 200, json={"default_branch": "main"})
+        if path == "/user/repos":
+            assert json.loads(req.content)["private"] is False
+            return httpx.Response(201, json={})
+        if path.endswith("/git/ref/heads/main"):
+            return httpx.Response(200, json={"object": {"sha": "base"}})
+        if path.endswith("/git/commits/base"):
+            return httpx.Response(200, json={"tree": {"sha": "tree0"}})
+        if path.endswith("/git/blobs"):
+            return httpx.Response(201, json={"sha": "blob"})
+        if path.endswith("/git/trees"):
+            return httpx.Response(201, json={"sha": "tree1"})
+        if path.endswith("/git/commits"):
+            return httpx.Response(201, json={"sha": "c1"})
+        if path.endswith("/git/refs/heads/main"):
+            return httpx.Response(200, json={})
+        return httpx.Response(500, json={"unexpected": path})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handler)))
+
+    rid = create_room(client)
+    client.put(f"/rooms/{rid}/files", json={"path": "index.html", "content": "<h1>hi</h1>", "base_version": 0}, headers=auth("alice"))
+    _, state = gh.get_authorization_url("alice")
+    r = client.get("/api/export/github/callback", params={"code": "c", "state": state}, follow_redirects=False)
+    assert r.headers["location"] == "http://app.test/profile?github=connected&username=alice-gh"
+
+    r = client.post(f"/rooms/{rid}/export", json={"repo_name": "shop", "private": False}, headers=auth("alice"))
+    assert r.status_code == 200, r.text
+    assert r.json()["url"] == "https://github.com/alice-gh/shop/commit/c1"
+    assert ("POST", "/user/repos") in calls
+
+
+def test_github_connect_returns_to_the_page_that_started_it(client, monkeypatch):
+    from urllib.parse import parse_qs, urlparse
+
+    from mux.integrations.github import get_github_integration
+
+    monkeypatch.setattr(settings, "web_app_url", "http://app.test")
+    gh = get_github_integration()
+    gh.config.client_id = "id"
+
+    def state_for(next_path):
+        r = client.get("/github/connect", params={"next": next_path}, headers=auth("alice"))
+        return parse_qs(urlparse(r.json()["url"]).query)["state"][0]
+
+    # A bad state still goes back to where the user came from, with the error
+    state = state_for("/room/r1?export=1")
+    monkeypatch.setattr(gh, "exchange_code_for_token", lambda code, state: (_ for _ in ()).throw(ValueError("bad code")))
+    r = client.get("/api/export/github/callback", params={"code": "c", "state": state}, follow_redirects=False)
+    assert r.headers["location"].startswith("http://app.test/room/r1?export=1&github=error")
+
+    # Paths that would leave the app fall back to the profile page
+    for unsafe in ("https://evil.test/x", "//evil.test/x", "/\\evil.test"):
+        state = state_for(unsafe)
+        r = client.get("/api/export/github/callback", params={"code": "c", "state": state}, follow_redirects=False)
+        assert r.headers["location"].startswith("http://app.test/profile?github=error"), unsafe
 
 
 def test_github_state_is_single_use():
@@ -456,3 +622,13 @@ def test_every_mapped_event_has_a_catalog_type():
     sent = set(re.findall(r'return "([a-z_.]+)", ', wire_src))
     assert sent and sent <= known, sent - known
     assert inspect.isfunction(to_envelope)
+
+
+def test_only_the_owner_can_delete_a_room_and_it_leaves_the_list(client):
+    rid = create_room(client)
+    assert client.post(f"/rooms/{rid}/close", headers=auth("bob")).status_code in (403, 404)
+    assert rid in [r["id"] for r in client.get("/rooms", headers=auth("alice")).json()]
+
+    r = client.post(f"/rooms/{rid}/close", params={"reason": "deleted_by_owner"}, headers=auth("alice"))
+    assert r.status_code == 200 and r.json()["closed"] is True
+    assert rid not in [r["id"] for r in client.get("/rooms", headers=auth("alice")).json()]

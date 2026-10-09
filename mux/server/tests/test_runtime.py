@@ -13,8 +13,8 @@ from typing import Any
 import pytest
 
 import mux.rooms.registry as room_registry
-from mux.agents.coder.tools.files import ActorFileTools
-from mux.agents.coordinator.schema import AddPlanItem, CoordinatorAction, OpenConflict, PlanDraft, PlanItemDraft
+from mux.agents.coder.tools.files import ActorFileTools, FileToolError
+from mux.agents.coordinator.schema import AddPlanItem, CoordinatorAction, OpenConflict
 from mux.agents.llm import LLMReply, ToolCall, Usage
 from mux.events.log import InMemoryEventLog
 from mux.events.models import AgentNoticeEvent, BaseEvent, EventType
@@ -24,7 +24,7 @@ from mux.rooms.actor import RoomActor
 from mux.rooms.registry import RoomRegistry
 from mux.rooms.runtime import RETRY, SKIP, RoomRuntime
 
-PLAN = PlanDraft(tasks=[PlanItemDraft(title="Booking page")])
+PLAN = [{"id": "t1", "title": "Booking page", "status": "draft"}]
 
 
 @pytest.fixture
@@ -65,10 +65,11 @@ def of_type(log: InMemoryEventLog, t: EventType) -> list[BaseEvent]:
     return [e for e in log._events if e.type == t]
 
 
-async def new_room(registry: RoomRegistry, llm: FakeLLM, logs, *, domain_role: str | None = "design") -> RoomActor:
-    llm.push(PLAN)
+async def new_room(registry: RoomRegistry, llm: FakeLLM, logs, *, domain_role: str | None = "design",
+                   plan: list[dict[str, Any]] | None = PLAN) -> RoomActor:
     actor = await registry.create_room("room_test1", "alice", name="Yoga", description="Yoga booking", domain_role=domain_role)
-    await until(lambda: actor.get_plan())
+    if plan:
+        await actor.draft_plan(plan, "alice")  # what POST /rooms does with initial_plan
     return actor
 
 
@@ -80,12 +81,22 @@ def tool_reply(*calls: tuple[str, dict[str, Any]]) -> LLMReply:
 
 
 @pytest.mark.asyncio
-async def test_room_creation_drafts_the_plan(setup):
-    registry, llm, logs, _ = setup
-    actor = await new_room(registry, llm, logs)
-    plan = await actor.get_plan()
-    assert [(p["id"], p["title"], p["status"]) for p in plan] == [("t1", "Booking page", "draft")]
-    assert (await actor.get_budget_status())["tokens_used"] > 0  # the planner's tokens count against the room
+async def test_room_starts_with_an_empty_plan_that_fills_from_the_feed(setup):
+    registry, llm, logs, runtimes = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    await runtimes[0].idle()
+    # Nothing is planned from the room's description
+    assert await actor.get_plan() == [] and llm.calls == []
+
+    # What the user asks for becomes a task, and with no draft to approve the coder builds it straight away
+    llm.push(
+        CoordinatorAction(label="queue", rationale="new work", add_plan_item=AddPlanItem(title="Booking page")),
+        tool_reply(("finish_task", {"summary": "Added the booking page"})),
+    )
+    await actor.add_message("chat", "build a booking page", message_id="m1", user_id="alice", enqueue=False)
+    await until(lambda: of_type(log, EventType.TASK_FINISHED))
+    assert [(p["id"], p["title"], p["status"]) for p in await actor.get_plan()] == [("t1", "Booking page", "done")]
     await registry.shutdown_all()
 
 
@@ -109,11 +120,13 @@ async def test_messages_are_labeled_and_applied(setup):
     assert [(p["title"], p["status"]) for p in await actor.get_plan()] == [("Booking page", "draft"), ("Pricing page", "draft")]
     assert not of_type(log, EventType.TASK_STARTED)
 
+    # With no task running there's nothing to merge into, so the change becomes a (draft) task
     llm.push(CoordinatorAction(label="merge", rationale="fits", domain="ui"))
     await actor.add_message("chat", "bigger headings", message_id="m3", user_id="alice", enqueue=False)
-    await until(lambda: len(notices(log, "message.labeled")) == 3)
+    await until(lambda: len(of_type(log, EventType.PLAN_ITEM_ADDED)) == 2)
+    assert (await actor.get_plan())[-1]["title"] == "bigger headings"
     merges, _, interrupt = await actor.drain_inbox()
-    assert merges == ["bigger headings"] and not interrupt
+    assert merges == [] and not interrupt
 
     # Team notes never reach the coordinator
     calls = len(llm.calls)
@@ -168,11 +181,42 @@ async def test_coder_builds_approved_tasks(setup):
 
     assert await actor.get_file("src/Booking.tsx") == "export const Booking = () => null;\n"
     assert (await actor.get_plan())[0]["status"] == "done"
+    # No sandbox here: the coder isn't offered builds or told to wait for a passing one
+    coder_call = next(c for c in llm.calls if c.tools)
+    offered = {t["function"]["name"] for t in coder_call.tools or []}
+    assert "write_file" in offered and not offered & {"run_build", "run_tests"}
+    assert "passing build" not in coder_call.messages[0]["content"]
     types = [env["type"] for env in map(to_envelope, log._events) if env]
     for expected in ("task.started", "tool.called", "tool.result", "file.changed", "agent.text", "task.finished", "checkpoint.created"):
         assert expected in types, types
     changed = next(e for e in map(to_envelope, log._events) if e and e["type"] == "file.changed")
     assert changed["actor"] == "coder" and changed["payload"]["version"] == 1
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_a_change_asked_for_after_the_plan_is_done_gets_built(setup):
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs)
+    log = logs[actor.room_id]
+    llm.push(
+        tool_reply(("write_file", {"path": "index.html", "content": "<h1>Yoga</h1>\n"})),
+        tool_reply(("finish_task", {"summary": "Booking page"})),
+    )
+    await actor.approve_plan_items(["t1"], "alice")
+    await until(lambda: len(of_type(log, EventType.TASK_FINISHED)) == 1)
+
+    # The coder is idle; a change asked for in the feed becomes a task and runs straight away
+    llm.push(
+        CoordinatorAction(label="merge", rationale="small change to the page", domain="ui"),
+        tool_reply(("edit_file", {"path": "index.html", "base_version": 1, "edits": [{"find": "<h1>", "replace": "<h1 style=\"color:blue\">"}]})),
+        tool_reply(("finish_task", {"summary": "Blue heading"})),
+    )
+    await actor.add_message("chat", "make the heading blue", message_id="m1", user_id="alice", enqueue=False)
+    await until(lambda: len(of_type(log, EventType.TASK_FINISHED)) == 2)
+    plan = await actor.get_plan()
+    assert [(p["title"], p["status"]) for p in plan] == [("Booking page", "done"), ("make the heading blue", "done")]
+    assert "blue" in (await actor.get_file("index.html") or "")
     await registry.shutdown_all()
 
 
@@ -199,6 +243,18 @@ async def test_stopped_task_is_parked_behind_a_question(setup):
 
 
 @pytest.mark.asyncio
+async def test_coder_does_not_read_binary_files_as_text(setup):
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs)
+    tools = ActorFileTools(actor)
+
+    assert await actor.save_checked("logo.png", "data:image/png;base64,iVBORw0KGgo=", None, "alice") == ("ok", 1)
+    with pytest.raises(FileToolError, match="binary file"):
+        await tools.read_file("logo.png")
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
 async def test_coder_never_overwrites_a_locked_or_newer_file(setup):
     registry, llm, logs, _ = setup
     actor = await new_room(registry, llm, logs)
@@ -214,4 +270,17 @@ async def test_coder_never_overwrites_a_locked_or_newer_file(setup):
     locked = await tools.edit_file("a.ts", 2, [{"find": "two", "replace": "dos"}])
     assert locked["ok"] is False and "locked" in locked["error"]
     assert await actor.get_file("a.ts") == "two"
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_file_reaches_the_web_app(setup):
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs)
+
+    assert await actor.save_checked("index.html", "<html></html>", None, "alice") == ("ok", 1)
+    assert await actor.save_checked("index.html", None, 1, "alice") == ("ok", None)
+    deleted = to_envelope(of_type(logs[actor.room_id], EventType.FILE_DELETED)[0])
+    assert deleted is not None
+    assert deleted["type"] == "file.deleted" and deleted["payload"]["path"] == "index.html"
     await registry.shutdown_all()

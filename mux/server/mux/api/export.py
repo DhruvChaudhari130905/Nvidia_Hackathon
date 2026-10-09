@@ -5,11 +5,16 @@ from __future__ import annotations
 import logging
 import time
 from typing import Optional
+from urllib.parse import urlencode
+
+import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from mux.api.deps import get_room_actor_dep, get_current_user, require_owner, require_viewer, User
+from mux.config import settings
 from mux.rooms.actor import RoomActor
 from mux.integrations.github import get_github_integration, GitHubExportResult
 
@@ -297,36 +302,35 @@ async def github_connect(
 async def github_callback(
     code: str = Query(..., description="Authorization code from GitHub"),
     state: str = Query(..., description="State parameter from GitHub"),
-) -> dict:
+) -> RedirectResponse:
     """
     Handle GitHub OAuth callback.
-    Exchanges code for token and stores it for the user.
+    Exchanges code for token, stores it with the user's GitHub login, and sends the browser back to
+    the app page that started the flow (the profile page by default) with ?github=connected
+    (or ?github=error&message=...).
     """
     github = get_github_integration()
     # The state must be one this server issued in /github/connect; the user id comes
     # from server-side storage, never from the (attacker-controllable) state value.
-    user_id = github.consume_state(state)
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired state parameter"
-        )
+    entry = github.consume_state_and_return(state)
+    return_to = (entry[1] if entry else None) or "/profile"
+
+    def back_to_app(**params: str) -> RedirectResponse:
+        joiner = "&" if "?" in return_to else "?"
+        return RedirectResponse(f"{settings.web_app_url.rstrip('/')}{return_to}{joiner}{urlencode(params)}")
+
+    if not entry:
+        return back_to_app(github="error", message="The GitHub sign-in expired or was already used. Try connecting again.")
+    user_id = entry[0]
 
     try:
         token_data = await github.exchange_code_for_token(code, state)
-        github.store_token(user_id, token_data)
-        return {"connected": True, "message": "GitHub account connected successfully"}
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        logger.exception(f"GitHub callback failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Connection failed: {str(e)}"
-        )
+        profile = await github.get_user_info(token_data.access_token)
+        github.store_token(user_id, token_data, username=profile.login)
+    except (ValueError, httpx.HTTPError) as e:
+        logger.warning(f"GitHub callback failed: {e}")
+        return back_to_app(github="error", message=f"GitHub connection failed: {e}")
+    return back_to_app(github="connected", username=profile.login)
 
 
 @router.get("/github/status", response_model=GitHubStatusResponse)

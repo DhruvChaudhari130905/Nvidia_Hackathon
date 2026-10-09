@@ -24,6 +24,10 @@ Rules:
 - Do not invent requirements that are not present in the task, plan,
   room log, or project conventions.
 - Keep generated code consistent with the starter template.
+- For pictures, call add_image to save a real photo into the project and use the path it returns.
+  Never use placeholder image services (via.placeholder.com, placehold.co, picsum) or made-up image URLs.
+  When asked for images of several things ("all the products"), add one per item, then edit the pages
+  so every item shows its own photo. Saving a photo isn't done until a page uses it.
 - Call finish_task only after a passing build.
 
 Tool results may be compacted. Re-read a file when its current contents
@@ -31,6 +35,28 @@ are required rather than relying on an old or incomplete result.
 
 The current task and task-specific context are authoritative over generic
 assumptions."""
+
+
+# Without a build runner (no sandbox yet) the build tools aren't offered, and the rules above that
+# demand a passing build would only send the coder into a loop of "not configured" failures
+_BUILD_RULES = (
+    "- Run a build after meaningful code changes.\n"
+    "- Run tests when they are relevant to the task.\n"
+    "- If a build fails, fix the reported errors before continuing.\n"
+)
+_NO_BUILD_RULES = (
+    "- Builds and tests can't run in this room yet. Check your work instead: re-read the files you\n"
+    "  changed, and make sure every link, import, class and id you use points at something that exists.\n"
+)
+
+
+def coder_system_prompt(can_build: bool) -> str:
+    """The coder's system prompt, with build rules only when builds can actually run."""
+    if can_build:
+        return CODER_SYSTEM_PROMPT
+    return (CODER_SYSTEM_PROMPT
+            .replace(_BUILD_RULES, _NO_BUILD_RULES)
+            .replace("- Call finish_task only after a passing build.", "- Call finish_task once the task is complete."))
 
 
 def load_conventions(template_root: str | Path) -> str:

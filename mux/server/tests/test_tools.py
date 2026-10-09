@@ -38,6 +38,21 @@ async def test_list_files_accepts_the_path_from_the_schema(repo: Path):
 
 
 @pytest.mark.asyncio
+async def test_edit_accepts_edits_sent_as_a_json_string(repo: Path):
+    """Nemotron sometimes JSON-encodes the edits array; a bare string used to crash with 'str' has no .get."""
+    tools = executor(repo)
+    read = await tools.execute("read_file", {"path": "src/App.tsx"})
+    ok = await tools.execute(
+        "edit_file",
+        {"path": "src/App.tsx", "base_version": read["version"], "edits": json.dumps([{"find": "a = 1", "replace": "a = 3"}])},
+    )
+    assert ok["ok"] is True and "a = 3" in (repo / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    bad = await tools.execute("edit_file", {"path": "src/App.tsx", "base_version": ok["version"], "edits": "not json"})
+    assert bad["ok"] is False and "list of" in bad["error"]
+
+
+@pytest.mark.asyncio
 async def test_edit_needs_current_version_and_a_unique_match(repo: Path):
     tools = executor(repo)
     read = await tools.execute("read_file", {"path": "src/App.tsx"})
@@ -114,7 +129,7 @@ async def test_update_plan_uses_the_room_plan(repo: Path):
 
 def test_schemas_are_valid_for_the_api():
     names = [schema["function"]["name"] for schema in TOOL_SCHEMAS]
-    assert len(names) == len(set(names)) == 11
+    assert len(names) == len(set(names)) == 12
     json.dumps(TOOL_SCHEMAS)
 
 
@@ -159,3 +174,184 @@ def test_repo_map_from_manifest_contents():
     })
     text = format_repo_map(entries)
     assert text == "client/src/App.tsx | exports: App | components: App\nserver/src/index.ts | routes: GET /api/rsvps"
+
+
+# images
+
+def openverse(results: list[dict], images: dict[str, tuple[int, str, bytes]]):
+    """An httpx transport answering the Openverse search and serving `images` by URL."""
+    import httpx
+
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        seen.append(url)
+        if url.startswith("https://api.openverse.org/v1/images/?"):
+            return httpx.Response(200, json={"results": results})
+        if url in images:
+            status, mime, body = images[url]
+            return httpx.Response(status, headers={"content-type": mime}, content=body)
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handle), seen
+
+
+def hit(i: str, url: str) -> dict:
+    return {"id": i, "url": url, "thumbnail": f"https://api.openverse.org/v1/images/{i}/thumb/", "title": f"Necklace {i}",
+            "creator": "Ann", "license": "by", "foreign_landing_url": f"https://flickr.com/{i}", "width": 1024, "height": 768}
+
+
+@pytest.mark.asyncio
+async def test_add_image_saves_a_real_photo_into_the_project(repo: Path):
+    import base64
+    import httpx
+
+    transport, seen = openverse([hit("a", "https://img.example/a.jpg")], {"https://img.example/a.jpg": (200, "image/jpeg", b"JPEG")})
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await executor(repo, http=client).execute("add_image", {"query": "gold necklace", "path": "images/necklace.jpg"})
+
+    assert result["ok"] and result["path"] == "images/necklace.jpg"
+    assert result["credit"] == "Necklace a by Ann (CC BY), https://flickr.com/a"
+    assert (repo / "images" / "necklace.jpg").read_text() == "data:image/jpeg;base64," + base64.b64encode(b"JPEG").decode()
+    assert "q=gold+necklace" in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_add_image_falls_back_to_the_thumbnail_and_fixes_the_extension(repo: Path):
+    import httpx
+
+    big = b"x" * 2_000_001
+    transport, _ = openverse(
+        [hit("a", "https://img.example/a.png"), hit("b", "https://img.example/b.png")],
+        {
+            "https://img.example/a.png": (200, "image/png", big),  # over the room's 2 MB cap
+            "https://api.openverse.org/v1/images/a/thumb/": (200, "image/jpeg", b"THUMB"),
+        },
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        tools = executor(repo, http=client)
+        first = await tools.execute("add_image", {"query": "ring", "path": "ring.png"})
+        # The same photo isn't used twice in one task; b has no downloadable file, so nothing is left
+        second = await tools.execute("add_image", {"query": "ring", "path": "ring2.png"})
+
+    assert first["ok"] and first["path"] == "ring.jpg"  # it's a JPEG, so the path says so
+    assert (repo / "ring.jpg").read_text().startswith("data:image/jpeg;base64,")
+    assert second == {"ok": False, "error": "no usable photo found for: ring"}
+
+
+@pytest.mark.asyncio
+async def test_add_image_needs_an_image_path(repo: Path):
+    result = await executor(repo).execute("add_image", {"query": "ring", "path": "ring.txt"})
+    assert result == {"ok": False, "error": "path must end in .jpg, .jpeg, .png or .webp"}
+
+
+# finishing a task with pictures left undone
+
+@pytest.mark.asyncio
+async def test_finish_is_refused_while_pages_still_use_placeholder_images(repo: Path):
+    tools = executor(repo)
+    await tools.execute("write_file", {"path": "index.html", "content": '<img src="https://via.placeholder.com/300?text=Ring">\n'})
+
+    refused = await tools.execute("finish_task", {"summary": "done"})
+    assert refused["ok"] is False
+    assert "index.html" in refused["error"] and "via.placeholder.com" in refused["error"]
+
+    (repo / "index.html").write_text('<img src="images/ring.jpg">\n', encoding="utf-8")
+    assert (await tools.execute("finish_task", {"summary": "done"}))["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_finish_is_refused_while_an_added_photo_is_unused(repo: Path):
+    import httpx
+
+    transport, _ = openverse([hit("a", "https://img.example/a.jpg")], {"https://img.example/a.jpg": (200, "image/jpeg", b"JPEG")})
+    async with httpx.AsyncClient(transport=transport) as client:
+        tools = executor(repo, http=client)
+        await tools.execute("add_image", {"query": "pearl bracelet", "path": "images/pearl-bracelet.jpg"})
+        refused = await tools.execute("finish_task", {"summary": "Added a photo"})
+        assert refused["ok"] is False and "images/pearl-bracelet.jpg" in refused["error"]
+
+        (repo / "index.html").write_text('<img src="/images/pearl-bracelet.jpg">\n', encoding="utf-8")
+        assert (await tools.execute("finish_task", {"summary": "Added a photo"}))["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_finish_gives_up_refusing_after_two_tries(repo: Path):
+    tools = executor(repo)
+    await tools.execute("write_file", {"path": "index.html", "content": '<img src="https://placehold.co/300">\n'})
+    assert (await tools.execute("finish_task", {"summary": "done"}))["ok"] is False
+    assert (await tools.execute("finish_task", {"summary": "done"}))["ok"] is False
+    assert (await tools.execute("finish_task", {"summary": "done"}))["ok"] is True  # never loops forever
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_task_is_not_held_up_by_old_placeholders(repo: Path):
+    (repo / "index.html").write_text('<img src="https://via.placeholder.com/300">\n', encoding="utf-8")
+    (repo / "README.md").write_text("Images: https://placehold.co/600\n", encoding="utf-8")
+    assert (await executor(repo).execute("finish_task", {"summary": "Bigger font"}))["ok"] is True
+
+
+# checking the code the coder writes (there's no build in most rooms)
+
+BROKEN_APP = """import React from 'react';
+import './index.css';
+
+const products = [
+  { id: 3, name: 'Diamond Bracelet', image: '/images/gold-necklace.jpg' }
+  { id: 4, name: 'Pearl Earrings', image: '/images/gold-necklace.jpg' },
+];
+
+export default function App() {
+  return <div>{products.map(p => <img key={p.id} src={p.image} />)}</div>;
+}
+"""
+
+
+@pytest.mark.asyncio
+async def test_writing_broken_code_reports_the_syntax_error_and_missing_import(repo: Path):
+    result = await executor(repo).execute("write_file", {"path": "src/Shop.jsx", "content": BROKEN_APP})
+    assert result["ok"] is True  # the file is saved; the problems come back so the coder fixes them
+    problems = " | ".join(result["problems"])
+    assert "src/Shop.jsx:5" in problems and "','" in problems
+    assert "./index.css" in problems
+
+
+@pytest.mark.asyncio
+async def test_valid_code_and_existing_imports_report_nothing(repo: Path):
+    (repo / "src" / "index.css").write_text("body {}\n", encoding="utf-8")
+    (repo / "src" / "Card.tsx").write_text("export const Card = () => null;\n", encoding="utf-8")
+    code = "import './index.css';\nimport { Card } from './Card';\nconst a: number[] = [1,\n 2];\nexport const App = () => <Card />;\n"
+    result = await executor(repo).execute("write_file", {"path": "src/Main.tsx", "content": code})
+    assert result["ok"] is True and "problems" not in result
+
+
+@pytest.mark.asyncio
+async def test_finish_is_refused_while_any_code_file_is_broken(repo: Path):
+    (repo / "src" / "App.jsx").write_text(BROKEN_APP, encoding="utf-8")  # broken before this task started
+    tools = executor(repo)
+    refused = await tools.execute("finish_task", {"summary": "Changed the ring image"})
+    assert refused["ok"] is False and "src/App.jsx:5" in refused["error"]
+
+    (repo / "src" / "App.jsx").write_text(BROKEN_APP.replace("jpg' }\n", "jpg' },\n", 1).replace("import './index.css';\n", ""), encoding="utf-8")
+    assert (await tools.execute("finish_task", {"summary": "Fixed it"}))["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_code_checks_are_skipped_without_the_parser(repo: Path, monkeypatch):
+    from mux.agents.coder.tools import codecheck
+
+    monkeypatch.setattr(codecheck, "_parsers", lambda: None)
+    result = await executor(repo).execute("write_file", {"path": "src/Shop.jsx", "content": BROKEN_APP})
+    assert result["ok"] is True and all("','" not in p for p in result.get("problems", []))
+
+
+def test_code_check_accepts_a_bare_ampersand_in_jsx_text_and_points_at_the_first_error():
+    from mux.agents.coder.tools.codecheck import syntax_errors
+
+    footer = "export const F = () => <p>&copy; 2026 Built with React, TypeScript & Tailwind CSS.</p>;\n"
+    assert syntax_errors("src/Footer.tsx", footer) == []
+    # An unclosed brace near the end: the error is reported where it is, not at line 1
+    broken = "import React from 'react';\n\nexport const A = () => {\n  return (\n    <div>\n      {[1].map(i => (\n        <p>{i}</p>\n      )}\n    </div>\n  );\n};\n"
+    (error,) = syntax_errors("src/A.tsx", broken)
+    assert not error.startswith("src/A.tsx:1:")

@@ -27,7 +27,7 @@ web: ## Run the web app against the backend on :3000
 	cd $(WEB) && npm run dev
 
 server: ## Run the API with reload on :8000
-	cd $(SERVER) && .venv/bin/uvicorn mux.main:app --reload --port 8000
+	cd $(SERVER) && .venv/bin/uvicorn mux.main:app --reload --reload-dir mux --port 8000
 
 db-up: ## Start the local Postgres (port 5433) used by the DB tests
 	cd $(SERVER) && docker compose up -d --wait
@@ -42,7 +42,7 @@ typecheck-server: ## Backend type check (pyright)
 	cd $(SERVER) && .venv/bin/pyright mux tests scripts
 
 check-web: ## Type-check, lint and build the web app
-	cd $(WEB) && npx tsc --noEmit && npm run lint && npm run build
+	cd $(WEB) && npx tsc --noEmit && npm run lint -- --max-warnings=0 && NEXT_DIST_DIR=.next-build npm run build
 
 test: test-server ## Alias for test-server
 

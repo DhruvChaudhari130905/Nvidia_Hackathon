@@ -56,12 +56,12 @@ module.exports = {
         'error-strong': '#f85149',
       },
       fontFamily: {
-        display: ['Mona Sans', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
-        body: ['Mona Sans', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
-        mono: ['IBM Plex Mono', 'ui-monospace', 'Menlo', 'Consolas', 'monospace'],
-        ui: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
-        headline: ['JetBrains Mono', 'ui-monospace', 'Menlo', 'monospace'],
-        code: ['JetBrains Mono', 'ui-monospace', 'Menlo', 'monospace'],
+        display: ['var(--nf-mona)', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+        body: ['var(--nf-mona)', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        mono: ['var(--nf-plex)', 'ui-monospace', 'Menlo', 'Consolas', 'monospace'],
+        ui: ['var(--nf-inter)', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+        headline: ['var(--nf-jetbrains)', 'ui-monospace', 'Menlo', 'monospace'],
+        code: ['var(--nf-jetbrains)', 'ui-monospace', 'Menlo', 'monospace'],
       },
       fontSize: {
         'code-sm': ['11px', { lineHeight: '16px' }],

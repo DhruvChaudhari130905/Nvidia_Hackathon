@@ -15,9 +15,12 @@ dependencies = [
   "asyncpg",
   "alembic",
   "pyjwt",
-  "python-jose[cryptography]",
   "aiosqlite",
   "httpx",
+  # Syntax check of the JS/TS the coder writes (mux.agents.coder.tools.codecheck)
+  "tree-sitter>=0.23",
+  "tree-sitter-javascript>=0.23",
+  "tree-sitter-typescript>=0.23",
   "cryptography",
   "contree-sdk",
 ]

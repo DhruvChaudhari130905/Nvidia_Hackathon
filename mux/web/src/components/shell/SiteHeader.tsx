@@ -6,7 +6,7 @@ import { Share2, Code2, User, Menu, X, Check } from 'lucide-react';
 import { Logo } from './Logo';
 import { formatClock, useTicker } from './Motion';
 import { getUser } from '@/lib/supabase';
-import { colorForId, getLastRoom, type LastRoom } from '@/lib/preferences';
+import { colorForId, getLastRoom, LAST_ROOM_CHANGED, type LastRoom } from '@/lib/preferences';
 
 export type NavKey = 'overview' | 'rooms' | 'sandbox' | 'pricing' | 'docs';
 
@@ -25,8 +25,11 @@ export function SessionPill() {
   useTicker(1000); // re-render each second for the clock
 
   useEffect(() => {
-    setLast(getLastRoom());
+    const read = () => setLast(getLastRoom());
+    read();
     setReady(true);
+    window.addEventListener(LAST_ROOM_CHANGED, read);
+    return () => window.removeEventListener(LAST_ROOM_CHANGED, read);
   }, []);
 
   const pill = 'flex items-center gap-space-sm rounded-lg bg-surface-container px-space-md py-space-xs text-body-sm transition-colors hover:bg-surface-container-high';

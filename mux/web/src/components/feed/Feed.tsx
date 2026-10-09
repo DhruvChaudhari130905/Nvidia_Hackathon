@@ -5,6 +5,7 @@ import type { Message, MessageTo, User } from '@/types';
 import { FeedItem } from './FeedItem';
 import { ConflictBanner } from './ConflictBanner';
 import { Composer } from './Composer';
+import { CollapseButton } from '@/components/room/PanelRail';
 
 interface FeedProps {
   messages: Message[];
@@ -13,6 +14,9 @@ interface FeedProps {
   canPostTeam?: boolean;
   activeConflict?: { id: string; taskId: string; options: string[] };
   activeQuestion?: { id: string; taskId: string };
+  // Hidden (still mounted, so the draft and scroll position survive) while collapsed to its rail
+  collapsed?: boolean;
+  onCollapse?: () => void;
 }
 
 export function Feed({
@@ -22,6 +26,8 @@ export function Feed({
   canPostTeam,
   activeConflict,
   activeQuestion,
+  collapsed,
+  onCollapse,
 }: FeedProps) {
   const feedEndRef = React.useRef<HTMLDivElement>(null);
   const scrollAreaRef = React.useRef<HTMLDivElement>(null);
@@ -31,10 +37,13 @@ export function Feed({
   }, [messages]);
 
   return (
-    <section className="col flex flex-col" aria-label="Agent feed">
+    <section className="col flex flex-col" aria-label="Agent feed" hidden={collapsed}>
       <div className="col-head">
         <span>Feed</span>
-        <span className="mono">coder · Super</span>
+        <span className="flex items-center gap-2">
+          <span className="mono">coder · Super</span>
+          {onCollapse && <CollapseButton side="left" label="feed" onCollapse={onCollapse} />}
+        </span>
       </div>
 
       {activeConflict && (

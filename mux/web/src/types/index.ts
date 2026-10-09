@@ -190,6 +190,7 @@ export type EventType =
   | 'task.finished'
   | 'turn.interrupted'
   | 'file.changed'
+  | 'file.deleted'
   | 'file.locked'
   | 'file.unlocked'
   | 'checkpoint.created'
@@ -290,6 +291,11 @@ export interface FileChangedEvent extends BaseEvent {
   payload: FileChange;
 }
 
+export interface FileDeletedEvent extends BaseEvent {
+  type: 'file.deleted';
+  payload: { path: string; author_id: string; created_at: string };
+}
+
 export interface CheckpointCreatedEvent extends BaseEvent {
   type: 'checkpoint.created';
   payload: Checkpoint;
@@ -346,6 +352,7 @@ type TypedEventType =
   | 'tool.result'
   | 'build.result'
   | 'file.changed'
+  | 'file.deleted'
   | 'checkpoint.created'
   | 'room.rewound'
   | 'budget.updated'
@@ -378,6 +385,7 @@ export type AppEvent =
   | ToolResultEvent
   | BuildResultEvent
   | FileChangedEvent
+  | FileDeletedEvent
   | CheckpointCreatedEvent
   | RoomRewoundEvent
   | BudgetUpdatedEvent

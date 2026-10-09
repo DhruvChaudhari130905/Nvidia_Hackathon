@@ -7,13 +7,14 @@ import { writeContainerFile } from '@/lib/runtime';
 import { PROJECT_DIR } from '@/lib/terminalCwd';
 
 interface NewProjectMenuProps {
+  roomId: string;
   existingPaths: string[];
   // Types the command into the active shell; false when no real shell is running
   run: (command: string) => boolean;
   onUnavailable: () => void;
 }
 
-export function NewProjectMenu({ existingPaths, run, onUnavailable }: NewProjectMenuProps) {
+export function NewProjectMenu({ roomId, existingPaths, run, onUnavailable }: NewProjectMenuProps) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const ref = useRef<HTMLDivElement>(null);
@@ -45,7 +46,7 @@ export function NewProjectMenu({ existingPaths, run, onUnavailable }: NewProject
     setName('');
     if (t.files) {
       try {
-        for (const [path, content] of Object.entries(t.files(folder))) await writeContainerFile(path, content);
+        for (const [path, content] of Object.entries(t.files(folder))) await writeContainerFile(roomId, path, content);
       } catch {
         return onUnavailable();
       }

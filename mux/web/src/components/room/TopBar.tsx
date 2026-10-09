@@ -2,13 +2,17 @@
 
 import React, { useEffect } from 'react';
 import Link from 'next/link';
-import { Share2, Github, ArrowLeft } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Share2, Github, ArrowLeft, Trash2 } from 'lucide-react';
 import type { User, Room, Membership } from '@/types';
 import { BudgetMeter } from './BudgetMeter';
 import { Presence } from './Presence';
 import { ShareDialog } from './ShareDialog';
 import { ExportDialog } from './ExportDialog';
+import { DeleteRoomDialog } from './DeleteRoomDialog';
 import { NotificationBell } from './Notifications';
+import { api } from '@/lib/api';
+import { isDemoMode } from '@/lib/demo';
 
 interface TopBarProps {
   room: Room;
@@ -27,12 +31,41 @@ export function TopBar({
 }: TopBarProps) {
   const [showShare, setShowShare] = React.useState(false);
   const [showExport, setShowExport] = React.useState(false);
+  const [showDelete, setShowDelete] = React.useState(false);
+  const router = useRouter();
+  const [checkingGitHub, setCheckingGitHub] = React.useState(false);
   const isOwner = currentUserMembership.permission === 'owner';
 
-  // /room/<id>?export=1 (from the header's Export button) opens the export dialog straight away
+  // /room/<id>?export=1 (from the header's Export button, or back from connecting GitHub) opens the
+  // export dialog straight away
   useEffect(() => {
-    if (isOwner && new URLSearchParams(window.location.search).get('export')) setShowExport(true);
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('github') === 'error') alert(params.get('message') ?? 'GitHub connection failed.');
+    if (isOwner && params.get('export') && params.get('github') !== 'error') setShowExport(true);
+    if (params.has('github')) window.history.replaceState(null, '', window.location.pathname);
   }, [isOwner]);
+
+  // Exporting needs GitHub: without a connection, go to GitHub first and come back to this dialog
+  const handleExport = async () => {
+    if (isDemoMode()) {
+      setShowExport(true);
+      return;
+    }
+    setCheckingGitHub(true);
+    try {
+      const { connected, username } = await api.githubStatus();
+      if (connected && username) {
+        setShowExport(true);
+        return;
+      }
+      const { url } = await api.connectGitHub(`${window.location.pathname}?export=1`);
+      window.location.href = url;
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Could not reach GitHub. Is the backend running?');
+    } finally {
+      setCheckingGitHub(false);
+    }
+  };
 
   return (
     <header className="top">
@@ -63,14 +96,30 @@ export function TopBar({
           <span className="hidden sm:inline">Share</span>
         </button>
         {isOwner && (
-          <button className="btn primary flex items-center gap-1.5" onClick={() => setShowExport(true)} type="button">
+          <button className="btn primary flex items-center gap-1.5" onClick={handleExport} disabled={checkingGitHub} type="button">
             <Github className="w-4 h-4" />
-            Export to GitHub
+            {checkingGitHub ? 'Checking GitHub…' : 'Export to GitHub'}
+          </button>
+        )}
+        {isOwner && (
+          <button
+            className="btn p-2 text-[var(--muted)] hover:border-[var(--conflict)] hover:text-[var(--conflict)]"
+            onClick={() => setShowDelete(true)}
+            type="button"
+            aria-label="Delete room"
+            title="Delete room"
+          >
+            <Trash2 className="h-4 w-4" />
           </button>
         )}
       </div>
       <ShareDialog isOpen={showShare} onClose={() => setShowShare(false)} room={room} />
       <ExportDialog isOpen={showExport} onClose={() => setShowExport(false)} room={room} />
+      <DeleteRoomDialog
+        room={showDelete ? { id: room.id, title: room.title } : null}
+        onClose={() => setShowDelete(false)}
+        onDeleted={() => router.push('/dashboard')}
+      />
     </header>
   );
 }

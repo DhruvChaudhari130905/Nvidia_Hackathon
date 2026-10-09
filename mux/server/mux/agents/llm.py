@@ -142,4 +142,6 @@ def _tool_call(id:str, name: str, raw: str | None) -> ToolCall:
         args = json.loads(raw) if raw else {}
     except json.JSONDecodeError:
         args = None #the coder loop answers with "invalid argyments" and the model retries
+    if not isinstance(args, dict):
+        args = None  # valid JSON but not an object (a list, a string) is no use as arguments either
     return ToolCall(id=id, name=name, arguments=args, raw_arguments=raw)

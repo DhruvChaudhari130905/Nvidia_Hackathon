@@ -12,7 +12,7 @@ export function reduce(events: AppEvent[], initialState?: RoomState): RoomState 
   return state;
 }
 
-function createEmptyState(): RoomState {
+export function createEmptyState(): RoomState {
   return {
     room: { id: '', title: '', description: '', owner_id: '', link_access: 'restricted', link_permission: 'editor', budget_tokens_cap: 2000000, budget_runs_cap: 100, head_checkpoint_id: null, created_at: '', members: [] },
     plan: [],
@@ -28,7 +28,7 @@ function createEmptyState(): RoomState {
   };
 }
 
-function applyEvent(state: RoomState, event: AppEvent): RoomState {
+export function applyEvent(state: RoomState, event: AppEvent): RoomState {
   // Create new state object for immutability
   const newState = { ...state };
 
@@ -181,6 +181,12 @@ function applyEvent(state: RoomState, event: AppEvent): RoomState {
     case 'file.changed': {
       const newFiles = new Map(newState.files);
       newFiles.set(event.payload.path, { hash: event.payload.hash, version: event.payload.version });
+      newState.files = newFiles;
+      break;
+    }
+    case 'file.deleted': {
+      const newFiles = new Map(newState.files);
+      newFiles.delete(event.payload.path);
       newState.files = newFiles;
       break;
     }

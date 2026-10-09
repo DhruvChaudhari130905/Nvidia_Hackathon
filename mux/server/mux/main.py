@@ -9,7 +9,8 @@ from fastapi.responses import JSONResponse
 from mux import dbsession
 from mux.api import rooms, files, commands, export, ws
 from mux.api.ws import emit_event
-from mux.events.log import EventLog, InMemoryEventLog
+from mux.events.file_log import FileEventLog, events_root
+from mux.events.log import EventLog
 from mux.events.models import BaseEvent
 import mux.rooms.registry as room_registry
 from mux.config import settings
@@ -24,9 +25,9 @@ logger = logging.getLogger(__name__)
 _room_event_logs: dict[str, EventLog] = {}
 
 def get_event_log(room_id: str) -> EventLog:
-    """Get or create an event log for a specific room."""
+    """Get or create an event log for a specific room. Events are kept on disk, so rooms survive restarts."""
     if room_id not in _room_event_logs:
-        _room_event_logs[room_id] = InMemoryEventLog(room_id)
+        _room_event_logs[room_id] = FileEventLog(room_id, events_root())
     return _room_event_logs[room_id]
 
 # Make get_event_log available for dependency injection

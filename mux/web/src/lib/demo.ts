@@ -352,6 +352,12 @@ export function isSampleRoom(id: string): boolean {
   return id in SCENARIOS;
 }
 
+// Sample rooms are built in and can't be deleted; rooms made in this browser can
+export function deleteDemoRoom(id: string) {
+  createdRooms = created().filter(r => r.id !== id);
+  saveCreated(createdRooms);
+}
+
 export function getDemoRoom(id: string): Room {
   const found = sampleRooms.find(r => r.id === id) || created().find(r => r.id === id);
   if (found) return found;

@@ -28,6 +28,7 @@ from mux.events.models import (
     ConflictResolvedEvent,
     EventType,
     FileCreatedEvent,
+    FileDeletedEvent,
     FileUpdatedEvent,
     PlanCreatedEvent,
     PlanItemAddedEvent,
@@ -202,6 +203,10 @@ def _payload(event: BaseEvent) -> Optional[tuple[str, dict[str, Any]]]:
             "path": e.path, "hash": e.hash or "", "version": e.version, "author_id": author,
             "is_manual": True, "created_at": ts,
         }
+
+    if t == EventType.FILE_DELETED:
+        e = cast(FileDeletedEvent, event)
+        return "file.deleted", {"path": e.path, "author_id": e.deleted_by, "created_at": ts}
 
     if t == EventType.CHECKPOINT_CREATED:
         e = cast(CheckpointCreatedEvent, event)

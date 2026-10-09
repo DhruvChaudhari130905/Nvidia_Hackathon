@@ -479,3 +479,22 @@ async def test_all_results_of_the_latest_turn_reach_the_model():
     tool_messages = [m for m in llm.calls[1].messages if m["role"] == "tool"]
     assert all("a" * 200 in m["content"] or "b" * 200 in m["content"] for m in tool_messages)
 
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_arguments_are_not_sent_back_to_the_api():
+    # The API parses the arguments of every assistant tool call in the history: echoing the model's
+    # broken JSON makes the next request fail with a 400 ("Expecting value: line 1 column …")
+    broken = ToolCall(id="call-1", name="write_file", arguments=None, raw_arguments='{"path": "index.html", "content": }')
+    llm = FakeLLM([reply(broken), reply(tool_call("finish_task", {"summary": "done"}, call_id="call-2"))])
+    tools = FakeTools()
+    loop = CoderLoop(llm, tools, FakeActor(), [])
+
+    result = await loop.run_task(CoderTask("t1", "Build it"), [{"role": "user", "content": "Build it"}])
+
+    assert result.status == "done"
+    assert tools.calls == [("finish_task", {"summary": "done"})]
+    history = llm.calls[1].messages
+    echoed = next(m for m in history if m.get("tool_calls"))["tool_calls"][0]["function"]["arguments"]
+    assert echoed == "{}"
+    assert any(m["role"] == "tool" and m["tool_call_id"] == "call-1" and "Invalid JSON" in m["content"] for m in history)

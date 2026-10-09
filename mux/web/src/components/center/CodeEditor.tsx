@@ -149,7 +149,7 @@ export function CodeEditor({ path, value, isLocked, settings, onChange, onShortc
           minimap: { enabled: settings.minimap, scale: 1, renderCharacters: false },
           fontSize: settings.fontSize,
           wordWrap: settings.wordWrap ? 'on' : 'off',
-          fontFamily: '"IBM Plex Mono", ui-monospace, Menlo, monospace',
+          fontFamily: 'var(--nf-plex), ui-monospace, Menlo, monospace',
           lineNumbers: 'on',
           scrollBeyondLastLine: false,
           automaticLayout: true,

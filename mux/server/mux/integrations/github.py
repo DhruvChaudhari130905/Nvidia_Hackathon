@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -16,10 +17,19 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
 from mux.config import settings
+from mux.files.binary import data_url_bytes
 
 logger = logging.getLogger(__name__)
 
 OAUTH_STATE_TTL_SECONDS = 600
+
+
+def _blob_body(content: str) -> dict[str, str]:
+    """A git blob request: binary files (stored as data URLs) go up as their real bytes."""
+    data = data_url_bytes(content)
+    if data is None:
+        return {"content": content, "encoding": "utf-8"}
+    return {"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"}
 
 
 class GitHubOAuthConfig(BaseModel):
@@ -71,7 +81,8 @@ class GitHubIntegration:
         self.config = self._load_config()
         self._fernet = self._init_fernet(encryption_key)
         self._token_store: dict[str, str] = {}  # user_id -> encrypted token; in-memory, replace with DB in production
-        self._pending_states: dict[str, tuple[str, float]] = {}  # state -> (user_id, issued_at)
+        self._usernames: dict[str, str] = {}  # user_id -> GitHub login, the owner of exported repos
+        self._pending_states: dict[str, tuple[str, float, Optional[str]]] = {}  # state -> (user_id, issued_at, return_to)
 
     def _load_config(self) -> GitHubOAuthConfig:
         """Load GitHub OAuth config from settings."""
@@ -119,13 +130,14 @@ class GitHubIntegration:
     # OAuth Flow
     # =========================================================================
 
-    def get_authorization_url(self, user_id: str, state: Optional[str] = None) -> tuple[str, str]:
+    def get_authorization_url(self, user_id: str, state: Optional[str] = None, return_to: Optional[str] = None) -> tuple[str, str]:
         """
         Generate GitHub OAuth authorization URL.
 
         Args:
             user_id: The user ID to associate with the OAuth flow.
             state: Optional state parameter (generated if not provided).
+            return_to: App path to send the browser back to after the callback (e.g. the room).
 
         Returns:
             Tuple of (authorization_url, state)
@@ -138,7 +150,7 @@ class GitHubIntegration:
 
         # Remember which user started this flow; the callback looks it up by state
         self._prune_states()
-        self._pending_states[state] = (user_id, time.time())
+        self._pending_states[state] = (user_id, time.time(), return_to)
 
         params = {
             "client_id": self.config.client_id,
@@ -153,14 +165,19 @@ class GitHubIntegration:
 
     def _prune_states(self) -> None:
         cutoff = time.time() - OAUTH_STATE_TTL_SECONDS
-        for key in [k for k, (_, ts) in self._pending_states.items() if ts < cutoff]:
+        for key in [k for k, (_, ts, _) in self._pending_states.items() if ts < cutoff]:
             del self._pending_states[key]
 
     def consume_state(self, state: str) -> Optional[str]:
         """Return the user id for a state issued by get_authorization_url (single use), or None."""
+        entry = self.consume_state_and_return(state)
+        return entry[0] if entry else None
+
+    def consume_state_and_return(self, state: str) -> Optional[tuple[str, Optional[str]]]:
+        """(user id, return_to) for a state issued by get_authorization_url (single use), or None."""
         self._prune_states()
         entry = self._pending_states.pop(state, None)
-        return entry[0] if entry else None
+        return (entry[0], entry[2]) if entry else None
 
     async def exchange_code_for_token(self, code: str, state: str) -> GitHubTokenData:
         """
@@ -243,10 +260,12 @@ class GitHubIntegration:
     # Token Storage
     # =========================================================================
 
-    def store_token(self, user_id: str, token_data: GitHubTokenData) -> None:
-        """Store encrypted token for a user."""
+    def store_token(self, user_id: str, token_data: GitHubTokenData, username: Optional[str] = None) -> None:
+        """Store encrypted token for a user, with their GitHub login when known."""
         encrypted = self._encrypt_token(token_data)
         self._token_store[user_id] = encrypted
+        if username:
+            self._usernames[user_id] = username
         logger.info(f"Stored GitHub token for user {user_id}")
 
     def get_token(self, user_id: str) -> Optional[GitHubTokenData]:
@@ -264,6 +283,7 @@ class GitHubIntegration:
         """Delete stored token for a user."""
         if user_id in self._token_store:
             del self._token_store[user_id]
+            self._usernames.pop(user_id, None)
             return True
         return False
 
@@ -280,7 +300,7 @@ class GitHubIntegration:
         # Token exists - optionally validate it's still good
         return {
             "connected": True,
-            "username": None,  # Would need API call to get
+            "username": self._usernames.get(user_id),
             "scopes": token_data.scope.split(",") if token_data.scope else [],
             "expires_at": token_data.expires_at,
         }
@@ -295,6 +315,27 @@ class GitHubIntegration:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
+
+    async def ensure_repository(self, user_id: str, owner: str, repo: str, private: bool) -> None:
+        """Create <owner>/<repo> when it doesn't exist yet, with a first commit so it has a branch to push to."""
+        token_data = self.get_token(user_id)
+        if not token_data:
+            raise ValueError("No GitHub token stored for user. Connect GitHub first.")
+        headers = await self._get_headers(token_data.access_token)
+        async with httpx.AsyncClient() as client:
+            existing = await client.get(f"https://api.github.com/repos/{owner}/{repo}", headers=headers, timeout=10.0)
+            if existing.status_code != 404:
+                existing.raise_for_status()
+                return
+            created = await client.post(
+                "https://api.github.com/user/repos",
+                headers=headers,
+                json={"name": repo, "private": private, "auto_init": True, "description": "Built in a MUX room"},
+                timeout=10.0,
+            )
+            if created.status_code == 422:
+                raise ValueError(f"GitHub refused to create {owner}/{repo}: {created.json().get('message', 'invalid name')}")
+            created.raise_for_status()
 
     async def create_or_update_files(
         self,
@@ -367,7 +408,7 @@ class GitHubIntegration:
                 blob_resp = await client.post(
                     f"https://api.github.com/repos/{owner}/{repo}/git/blobs",
                     headers=headers,
-                    json={"content": content, "encoding": "utf-8"},
+                    json=_blob_body(content),
                     timeout=10.0,
                 )
                 blob_resp.raise_for_status()

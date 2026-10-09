@@ -39,3 +39,11 @@ export async function saveRoomFiles(roomId: string, files: Map<string, { content
     // storage full or blocked; the room still works for this session
   }
 }
+
+export async function deleteRoomFiles(roomId: string): Promise<void> {
+  try {
+    await tx('readwrite', s => s.delete(roomId));
+  } catch {
+    // storage blocked; nothing was saved for this room anyway
+  }
+}

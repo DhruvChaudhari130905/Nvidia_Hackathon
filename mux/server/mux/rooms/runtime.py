@@ -4,7 +4,7 @@ One `RoomRuntime` per running room. It watches the actor's events in order and n
 directly: everything goes through the actor's methods, like a person's command, so every effect is an
 event the room sees live.
 
-- Room created: `create_plan` drafts the plan from the description (plan.drafted).
+- Room created: the plan starts empty; it fills from what the team asks for in the feed.
 - Agent message posted: the coordinator labels it (message.labeled) and the runtime applies the label:
   merge/interrupt go to the coder's inbox, queue adds a plan item, conflict opens a vote with Tavily
   research, chat posts a coordinator.reply.
@@ -28,12 +28,12 @@ from uuid import uuid4
 
 from mux.agents.coder.context import CoderContext, build_context
 from mux.agents.coder.loop import CoderLoop, CoderTask, TurnBoundary
-from mux.agents.coder.prompts import CODER_SYSTEM_PROMPT
-from mux.agents.coder.tools import TOOL_SCHEMAS, CoderToolExecutor
+from mux.agents.coder.prompts import coder_system_prompt
+from mux.agents.coder.tools import CoderToolExecutor
 from mux.agents.coder.tools.files import ActorFileTools
 from mux.agents.coordinator.agent import Coordinator
 from mux.agents.coordinator.conflicts import Vote, research_conflict, tally, vote_weight
-from mux.agents.coordinator.planner import create_plan, next_task_id
+from mux.agents.coordinator.planner import next_task_id
 from mux.agents.coordinator.prompts import Message, PlanItem, RoomView
 from mux.agents.coordinator.schema import CoordinatorAction, Domain, DomainRole, OpenConflict
 from mux.agents.llm import LLM, Usage
@@ -44,7 +44,6 @@ from mux.events.models import (
     ConflictResolvedEvent,
     EventType,
     QuestionAnsweredEvent,
-    RoomCreatedEvent,
     UserMessageSentEvent,
 )
 from mux.events.wire import ephemeral, user_view
@@ -156,9 +155,7 @@ class RoomRuntime:
 
     async def _handle(self, event: BaseEvent) -> None:
         t = event.type
-        if t == EventType.ROOM_CREATED:
-            await self._draft_plan(cast(RoomCreatedEvent, event))
-        elif t == EventType.USER_MESSAGE_SENT:
+        if t == EventType.USER_MESSAGE_SENT:
             e = cast(UserMessageSentEvent, event)
             message = Message(e.message_id, e.user_id, self._domain_role(e.user_id), e.content)
             if e.to == "team":
@@ -179,17 +176,6 @@ class RoomRuntime:
 
     # ---- coordinator ----
 
-    async def _draft_plan(self, event: RoomCreatedEvent) -> None:
-        if await self.actor.get_plan():
-            return
-        result = await create_plan(self.llm, event.room_description or event.room_name)
-        await self._spend(result.usage, COORDINATOR)
-        items = [
-            {"id": p.id, "title": p.title, "status": "draft", "owner_role": p.owner_role, "notes": p.notes}
-            for p in result.items
-        ]
-        await self.actor.draft_plan([{k: v for k, v in i.items() if v is not None} for i in items], COORDINATOR)
-
     async def _classify(self, message: Message) -> None:
         plan = await self._plan_items()
         view = RoomView(
@@ -209,18 +195,18 @@ class RoomRuntime:
         await self._apply(action, message, plan)
 
     async def _apply(self, action: CoordinatorAction, message: Message, plan: list[PlanItem]) -> None:
-        if action.label in ("merge", "interrupt"):
+        if action.label in ("merge", "interrupt") and self._current_task is None:
+            # Nothing is running to merge it into (e.g. every task is done): it becomes a task of its own,
+            # so a change asked for in the feed still gets built
+            await self._add_task(message.text, plan)
+        elif action.label in ("merge", "interrupt"):
             await self.actor.enqueue_message(
                 action.label, message.text, message_id=message.id, user_id=message.author,
                 rationale=action.rationale, domain=action.domain,
             )
         elif action.label == "queue" and action.add_plan_item:
-            # Before the owner approves the plan, new work joins the draft instead of starting the coder.
             # The actor appends; `after_task_id` ordering is a later refinement.
-            status = "draft" if any(p.status == "draft" for p in plan) else "todo"
-            await self.actor.add_plan_item(
-                {"id": next_task_id(plan), "title": action.add_plan_item.title, "status": status}, COORDINATOR,
-            )
+            await self._add_task(action.add_plan_item.title, plan)
         elif action.label == "conflict" and action.open_conflict and action.domain:
             await self._open_conflict(action.open_conflict, action.domain)
         elif action.label == "chat" and action.reply:
@@ -229,6 +215,15 @@ class RoomRuntime:
                 "id": str(uuid4()), "room_id": self.actor.room_id, "user_id": COORDINATOR, "text": action.reply,
                 "created_at": now, "user": user_view(COORDINATOR, "Coordinator"), "reply_to": message.id,
             })
+
+    async def _add_task(self, title: str, plan: list[PlanItem]) -> None:
+        # Before the owner approves the plan, new work joins the draft instead of starting the coder
+        status = "draft" if any(p.status == "draft" for p in plan) else "todo"
+        title = " ".join(title.split())
+        await self.actor.add_plan_item(
+            {"id": next_task_id(plan), "title": title if len(title) <= 120 else title[:119] + "…", "status": status},
+            COORDINATOR,
+        )
 
     # ---- conflicts and votes ----
 
@@ -349,11 +344,12 @@ class RoomRuntime:
         async def on_question(card: dict[str, Any]) -> None:
             asked.append(await self._ask(card["question"], card["options"], card["default"], task_id, parked=False))
 
-        tools = _Narrated(self.actor, CoderToolExecutor(ActorFileTools(self.actor), search=self.search, on_question=on_question))
-        loop = CoderLoop(self.llm, tools, _Boundary(self.actor), TOOL_SCHEMAS,
+        executor = CoderToolExecutor(ActorFileTools(self.actor), search=self.search, on_question=on_question)
+        tools = _Narrated(self.actor, executor)
+        loop = CoderLoop(self.llm, tools, _Boundary(self.actor), executor.schemas(),
                          max_turns=self.max_turns, on_text_delta=self._delta(task_id))
         try:
-            result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item))
+            result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build))
             await self._spend(result.usage, CODER)
             await self.actor.post_notice("agent.text", {"task_id": task_id, "text": result.summary}, CODER)
             if asked:
@@ -378,12 +374,12 @@ class RoomRuntime:
         await self._ask(f"The coder stopped on \"{item['title']}\" ({why}). Retry it?", [RETRY, SKIP], SKIP,
                         item["id"], parked=True)
 
-    async def _context(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _context(self, item: dict[str, Any], can_build: bool) -> list[dict[str, Any]]:
         plan = await self.actor.get_plan()
         files = await self.actor.list_files()
         task = item["title"] + (f"\n{item['notes']}" if item.get("notes") else "")
         return build_context(CoderContext(
-            system_prompt=CODER_SYSTEM_PROMPT,
+            system_prompt=coder_system_prompt(can_build),
             conventions=self.conventions,
             plan="\n".join(f"- [{p['id']}] {p['title']} ({p['status']})" for p in plan),
             current_task=f"[{item['id']}] {task}",

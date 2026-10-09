@@ -38,10 +38,32 @@ export async function signInWithProvider(provider: 'google' | 'github', next = '
     provider,
     options: {
       redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(safeNext(next))}`,
+      // Ask which account to use instead of silently reusing the one the browser is signed in to
+      queryParams: { prompt: 'select_account' },
     },
   });
   if (error) throw error;
   return data;
+}
+
+export async function signInWithEmail(email: string, password: string) {
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  return data;
+}
+
+// Returns needsConfirmation when the project asks new users to confirm their email first
+export async function signUpWithEmail(email: string, password: string, name: string, next = '/dashboard') {
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password,
+    options: {
+      data: name ? { full_name: name } : undefined,
+      emailRedirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(safeNext(next))}`,
+    },
+  });
+  if (error) throw error;
+  return { needsConfirmation: !data.session };
 }
 
 export async function signOut() {

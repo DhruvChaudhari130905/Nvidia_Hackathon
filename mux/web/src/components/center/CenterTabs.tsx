@@ -9,6 +9,7 @@ import type { PlanItem } from '@/types';
 import { canFormat, formatCode } from '@/lib/formatter';
 import { FileTree, FileIcon, downloadFile, readUploads, type CreateRequest, type UploadedFile } from './FileTree';
 import { CodeEditor, languageFor, type EditorSettings, type EditorShortcut } from './CodeEditor';
+import { isBinaryContent, isImagePath } from '@/lib/binaryFiles';
 import { Preview } from './Preview';
 import { BottomPanel, type Problem, type PanelView } from './BottomPanel';
 import type { RunState } from './RunOutput';
@@ -500,7 +501,7 @@ export function CenterTabs({
       </div>
 
       <div className="stage" id="stagePreview" hidden={activeTab === 'code'}>
-        <Preview files={files} roomId={roomId} title={roomTitle} description={roomDescription} plan={plan} />
+        <Preview files={files} fs={terminalFs} roomId={roomId} title={roomTitle} description={roomDescription} plan={plan} />
       </div>
 
       <div className="stage !p-2.5" id="stageCode" hidden={activeTab !== 'code'}>
@@ -656,7 +657,9 @@ export function CenterTabs({
                   </div>
                 </div>
 
-                <CodeEditor
+                {isBinaryContent(activeContent) ? (
+                  <BinaryFileView path={activeFile!} content={activeContent} />
+                ) : <CodeEditor
                   path={activeFile!}
                   value={activeContent}
                   isLocked={isLocked}
@@ -665,7 +668,7 @@ export function CenterTabs({
                   onShortcut={onShortcut}
                   onCursor={(line, column) => setCursor({ line, column })}
                   onReady={handleReady}
-                />
+                />}
               </>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
@@ -823,5 +826,20 @@ export function CenterTabs({
         </div>
       </div>
     </section>
+  );
+}
+
+// Images, fonts and media are stored as data URLs: show the image (or the file's size) instead of base64 text
+function BinaryFileView({ path, content }: { path: string; content: string }) {
+  const bytes = Math.floor(((content.length - content.indexOf(',') - 1) * 3) / 4);
+  const size = bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return (
+    <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 overflow-auto p-6">
+      {isImagePath(path) && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={content} alt={path} className="max-h-[70%] max-w-full rounded-md object-contain ring-1 ring-white/10" />
+      )}
+      <p className="text-xs text-[var(--muted)]">{path.split('/').pop()} · {size} · binary file, not editable as text</p>
+    </div>
   );
 }

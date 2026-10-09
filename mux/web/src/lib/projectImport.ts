@@ -1,6 +1,7 @@
 // Importing a project from the user's computer: a folder (any browser), a .zip (e.g. a GitHub download)
-// or files/folders dropped on the page. Dependencies, build output, VCS data and binaries are left out;
-// the room holds source text only.
+// or files/folders dropped on the page. Dependencies, build output, VCS data and binaries are left out,
+// except images, fonts and media, which come along as data URLs (see binaryFiles.ts).
+import { BINARY_ASSET, bytesToDataUrl, maxBytesFor } from './binaryFiles';
 
 export interface ImportedFile {
   path: string;
@@ -24,7 +25,6 @@ const SECRET_TEMPLATES = /\.(example|sample|template|defaults?)$/i;
 const IGNORED_FILES = /^(\.DS_Store|Thumbs\.db|desktop\.ini)$|\.log$/i;
 const BINARY = /\.(png|jpe?g|gif|webp|avif|ico|bmp|tiff?|psd|woff2?|ttf|otf|eot|zip|gz|tgz|rar|7z|tar|pdf|mp[34]|wav|ogg|webm|mov|avi|sqlite3?|db|wasm|node|exe|dll|so|dylib|class|jar|pyc|o|a|lockb)$/i;
 
-export const MAX_FILE_BYTES = 1_000_000;
 export const MAX_FILES = 2000;
 export const MAX_TOTAL_BYTES = 25_000_000;
 
@@ -68,8 +68,8 @@ async function collect(sources: Source[], fallbackName: string): Promise<ImportR
     if (isIgnoredPath(path)) { skipped.ignored++; continue; }
     const base = path.split('/').pop()!;
     if (SECRET_FILES.test(base) && !SECRET_TEMPLATES.test(base)) { skipped.secrets++; continue; }
-    if (BINARY.test(path)) { skipped.binary++; continue; }
-    if (s.size > MAX_FILE_BYTES) { skipped.tooLarge++; continue; }
+    if (BINARY.test(path) && !BINARY_ASSET.test(path)) { skipped.binary++; continue; }
+    if (s.size > maxBytesFor(path)) { skipped.tooLarge++; continue; }
     if (keep.length >= MAX_FILES || total + s.size > MAX_TOTAL_BYTES) { skipped.overLimit++; continue; }
     keep.push({ path, source: s });
     total += s.size;
@@ -81,7 +81,8 @@ async function collect(sources: Source[], fallbackName: string): Promise<ImportR
     while (next < keep.length) {
       const i = next++;
       const bytes = await keep[i].source.read();
-      contents[i] = looksBinary(bytes) ? null : decoder.decode(bytes);
+      const { path } = keep[i];
+      contents[i] = BINARY_ASSET.test(path) ? bytesToDataUrl(bytes, path) : looksBinary(bytes) ? null : decoder.decode(bytes);
     }
   };
   await Promise.all(Array.from({ length: Math.min(16, keep.length) }, worker));
@@ -297,7 +298,7 @@ export function describeSkipped(s: ImportResult['skipped']): string {
     s.secrets && `${s.secrets} .env file${s.secrets === 1 ? '' : 's'} (secrets)`,
     s.ignored && `${s.ignored} item${s.ignored === 1 ? '' : 's'} in node_modules/.git/build folders`,
     s.binary && `${s.binary} binary`,
-    s.tooLarge && `${s.tooLarge} over 1 MB`,
+    s.tooLarge && `${s.tooLarge} over the size limit (1 MB, 2 MB for images)`,
     s.overLimit && `${s.overLimit} over the ${MAX_FILES}-file limit`,
   ].filter(Boolean);
   return parts.length ? `Skipped ${parts.join(', ')}` : '';

@@ -12,11 +12,12 @@ import { CenterTabs } from '@/components/center';
 import { SidePanel } from '@/components/side';
 import { Timeline } from '@/components/timeline';
 import { ShaderBackground } from '@/components/shell';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import { getDemoFiles, isDemoMode, isSampleRoom } from '@/lib/demo';
 import { loadRoomFiles, saveRoomFiles } from '@/lib/roomFiles';
 import { takeStashedImport } from '@/lib/projectImport';
-import { setLastRoom } from '@/lib/preferences';
+import { clearLastRoom, getPanelOpen, setLastRoom, setPanelOpen, type RoomPanel } from '@/lib/preferences';
+import { PanelRail } from '@/components/room/PanelRail';
 import { starterProjectFiles } from '@/lib/starterProject';
 import { getSocket } from '@/lib/socket';
 import { notifyForEvent } from '@/lib/roomNotifications';
@@ -36,6 +37,15 @@ export default function RoomPage() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [currentUserMembership, setCurrentUserMembership] = useState<Membership | null>(null);
   const [activeTab, setActiveTab] = useState<'preview' | 'code'>('preview');
+  // Side columns can be collapsed to give Preview/Code more room; remembered per browser
+  const [panels, setPanels] = useState({ feed: true, side: true, timeline: true });
+  useEffect(() => {
+    setPanels({ feed: getPanelOpen('feed'), side: getPanelOpen('side'), timeline: getPanelOpen('timeline') });
+  }, []);
+  const togglePanel = useCallback((panel: RoomPanel, open: boolean) => {
+    setPanelOpen(panel, open);
+    setPanels(p => ({ ...p, [panel]: open }));
+  }, []);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   // Which room the files in state belong to; saving waits until they've loaded
   const filesRoom = useRef<string | null>(null);
@@ -49,11 +59,44 @@ export default function RoomPage() {
 
   const socketRef = useRef<ReturnType<typeof getSocket> | null>(null);
 
+  // Server version of each file whose content is in `files`. file.changed carries only path, hash and
+  // version, so any newer version (the coder's edits, a teammate's save) is fetched from the files API.
+  const syncedVersions = useRef<{ roomId: string | null; versions: Map<string, number> }>({ roomId: null, versions: new Map() });
+  const pullServerFiles = async (forRoom: string, entries: [string, { version: number }][]) => {
+    if (isDemoMode()) return;
+    const synced = syncedVersions.current;
+    if (synced.roomId !== forRoom) return;
+    const stale = entries.filter(([path, v]) => synced.versions.get(path) !== v.version);
+    stale.forEach(([path, v]) => synced.versions.set(path, v.version)); // claim them so a second event doesn't refetch
+    const loaded = await Promise.all(stale.map(async ([path, v]) => {
+      try {
+        return { path, version: v.version, content: (await api.readFile(forRoom, path)).content };
+      } catch (error) {
+        console.error(`Could not load ${path}:`, error);
+        synced.versions.delete(path);
+        return null;
+      }
+    }));
+    if (syncedVersions.current !== synced) return; // left the room meanwhile
+    writeLocal(loaded.filter((e): e is NonNullable<typeof e> => e !== null));
+  };
+  const fileEntries = (files: RoomState['files']): [string, { hash: string; version: number }][] =>
+    // files may arrive as a Map or as a plain object after JSON transport
+    files instanceof Map ? Array.from(files.entries()) : Object.entries(files ?? {});
+
+  // The room effect runs once per room and calls the latest versions of these (assigned below)
+  const roomFns = useRef<{ loadInitialFiles: () => Promise<void>; pullServerFiles: typeof pullServerFiles } | null>(null);
+
   // Initialize room data
   useEffect(() => {
+    let cancelled = false;
+    const unsubscribers: (() => void)[] = [];
+    const fns = () => roomFns.current!;
+
     const initRoom = async () => {
       // Nothing from the previous room carries over
       filesRoom.current = null;
+      syncedVersions.current = { roomId, versions: new Map() };
       setFiles(new Map());
       setFileVersions(new Map());
       setActiveFile(null);
@@ -91,37 +134,49 @@ export default function RoomPage() {
         await socket.connect();
 
         // Subscribe to state updates
+        // Paths the server had at the last state update: one that disappears was deleted there (by a
+        // teammate or the coder). Files that only exist in this browser are left alone.
+        let serverPaths = new Set<string>();
         const unsubState = socket.onState((newState) => {
           setState(newState);
-          // files may arrive as a Map or as a plain object after JSON transport
-          const entries: [string, { hash: string; version: number }][] =
-            newState.files instanceof Map ? Array.from(newState.files.entries()) : Object.entries(newState.files ?? {});
+          const entries = fileEntries(newState.files);
+          const paths = new Set(entries.map(([path]) => path));
+          const gone = Array.from(serverPaths).filter(path => !paths.has(path));
+          serverPaths = paths;
+          gone.forEach(path => syncedVersions.current.versions.delete(path));
           setFiles(prev => {
             const next = new Map(prev);
+            gone.forEach(path => next.delete(path));
             for (const [path] of entries) {
               if (!next.has(path)) next.set(path, { content: '' });
             }
             return next;
           });
           setFileVersions(new Map(entries.map(([path, v]) => [path, v.version])));
+          void fns().pullServerFiles(roomId, entries);
         });
 
         const unsubPresence = socket.onPresence((presence) => {
-          if (state) {
-            setState(prev => prev ? { ...prev, presence } : null);
-          }
+          setState(prev => prev ? { ...prev, presence } : null);
         });
+        unsubscribers.push(unsubState, unsubPresence);
+        if (cancelled) return; // left the room while connecting; cleanup below unsubscribes
 
         // Load initial files (starter template)
-        await loadInitialFiles();
+        await fns().loadInitialFiles();
+        // The browser's saved copy may be older than the server's: fetch every server file again
+        syncedVersions.current = { roomId, versions: new Map() };
+        const current = socket.getState();
+        if (current) void fns().pullServerFiles(roomId, fileEntries(current.files));
 
         setLoading(false);
-
-        return () => {
-          unsubState();
-          unsubPresence();
-        };
       } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          // A stale link (old bookmark or the header's last-room pill): forget it and go back quietly
+          clearLastRoom(roomId);
+          router.replace('/dashboard');
+          return;
+        }
         console.error('Failed to load room:', error);
         router.push('/dashboard');
       }
@@ -130,6 +185,8 @@ export default function RoomPage() {
     initRoom();
 
     return () => {
+      cancelled = true;
+      unsubscribers.forEach(unsubscribe => unsubscribe());
       if (socketRef.current) {
         socketRef.current.disconnect();
       }
@@ -159,6 +216,7 @@ export default function RoomPage() {
     filesRoom.current = roomId;
     if (imported) void saveRoomFiles(roomId, initial);
   };
+  roomFns.current = { loadInitialFiles, pullServerFiles };
 
   // Keep this room's files in the browser so they're still here next time. Saves are batched, but a
   // pending save is flushed (never dropped) when leaving the room or hiding/closing the tab.
@@ -207,6 +265,7 @@ export default function RoomPage() {
 
   // Put files into local state (content + version) immediately; the server write follows
   const writeLocal = useCallback((entries: { path: string; content: string; version: number }[]) => {
+    entries.forEach(e => syncedVersions.current.versions.set(e.path, e.version));
     setFiles(prev => {
       const next = new Map(prev);
       entries.forEach(e => next.set(e.path, { content: e.content }));
@@ -313,6 +372,7 @@ export default function RoomPage() {
       await api.updatePlan(roomId, items);
     } catch (error) {
       console.error('Failed to update plan:', error);
+      alert(`Could not save the plan: ${error instanceof Error ? error.message : 'please try again'}`);
     }
   }, [roomId]);
 
@@ -322,6 +382,7 @@ export default function RoomPage() {
       await api.approvePlan(roomId);
     } catch (error) {
       console.error('Failed to approve plan:', error);
+      alert(`Could not approve the plan: ${error instanceof Error ? error.message : 'please try again'}`);
     }
   }, [roomId]);
 
@@ -389,9 +450,12 @@ export default function RoomPage() {
           presence={presenceData}
         />
 
-        <main className="main">
+        <main className={`main${panels.feed ? '' : ' feed-closed'}${panels.side ? '' : ' side-closed'}`}>
           {/* Left: Agent Feed */}
+          {!panels.feed && <PanelRail side="left" label="Feed" onOpen={() => togglePanel('feed', true)} />}
           <Feed
+            collapsed={!panels.feed}
+            onCollapse={() => togglePanel('feed', false)}
             messages={state.messages}
             currentUser={currentUser}
             onSendMessage={handleSendMessage}
@@ -424,7 +488,12 @@ export default function RoomPage() {
           />
 
           {/* Right: Cards + Plan */}
+          {!panels.side && (
+            <PanelRail side="right" label="Decisions & plan" badge={openConflicts.length + openQuestions.length} onOpen={() => togglePanel('side', true)} />
+          )}
           <SidePanel
+            collapsed={!panels.side}
+            onCollapse={() => togglePanel('side', false)}
             state={state}
             currentUserRole={currentUserMembership.permission}
             currentUserDomainRole={currentUserMembership.domain_role}
@@ -443,6 +512,8 @@ export default function RoomPage() {
           onSelectCheckpoint={handleRewind}
           onReturnToLatest={handleReturnToLatest}
           isRewound={isRewound}
+          collapsed={!panels.timeline}
+          onToggle={open => togglePanel('timeline', open)}
         />
       </div>
     </>

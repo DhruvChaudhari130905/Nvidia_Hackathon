@@ -150,6 +150,7 @@ export function BottomPanel({
               {notice && <span className="item-in mr-2 font-sans text-[11px] text-[#d29922]">{notice}</span>}
               <TerminalDirPicker paths={paths} current={startDir} saved={savedDir} autoDir={autoDir} onChoose={chooseDir} />
               <NewProjectMenu
+                roomId={roomId}
                 existingPaths={Array.from(fs.files.keys())}
                 run={runInShell}
                 onUnavailable={() => showNotice('Wait for the shell to finish booting (a real Node.js terminal is needed)')}

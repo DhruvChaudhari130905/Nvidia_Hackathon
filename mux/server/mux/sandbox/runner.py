@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
+from mux.files.binary import file_bytes
 from mux.files.manifest import Manifest
 from mux.files.room_files import InvalidPath, check_path
 from mux.sandbox import errors
@@ -85,7 +86,7 @@ class Runner:
 
     async def _run(self, m: Manifest, command: str, *, disposable: bool) -> RunResult:
         paths = [check_path(p) for p in m]  # validate all before fetching any blob
-        files = {f"{PROJECT_DIR}/{p}": await self._get_blob(m[p].hash) for p in paths}
+        files = {f"{PROJECT_DIR}/{p}": file_bytes(await self._get_blob(m[p].hash)) for p in paths}
         return await self._client.run(
             image=self._image, files=files, command=command, cwd=PROJECT_DIR,
             disposable=disposable, timeout_s=TIMEOUT_S,

@@ -1,7 +1,7 @@
 // API client for REST commands
 import type { Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
 
-import { createDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
+import { createDemoRoom, deleteDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
 import { getSocket } from './socket';
 import { getAccessToken } from './supabase';
 
@@ -11,17 +11,28 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
   const method = options.method || 'GET';
   const body = options.body ? JSON.parse(options.body as string) : {};
-  const roomMatch = path.match(/^\/rooms\/([^/]+)(\/.*)?$/);
+  // Query strings (`/close?reason=…`) don't change which call this is
+  const roomMatch = path.split('?')[0].match(/^\/rooms\/([^/]+)(\/.*)?$/);
 
   if (path === '/rooms' && method === 'GET') return listDemoRooms() as T;
   if (path === '/rooms' && method === 'POST') return createDemoRoom(body.description) as T;
   if (roomMatch && !roomMatch[2] && method === 'GET') return getDemoRoom(roomMatch[1]) as T;
+  if (roomMatch && roomMatch[2] === '/close') {
+    deleteDemoRoom(roomMatch[1]);
+    return { room_id: roomMatch[1], closed: true } as T;
+  }
   if (roomMatch && roomMatch[2] === '/sharing') return Object.assign(getDemoRoom(roomMatch[1]), body) as T;
   if (roomMatch && roomMatch[2] === '/messages') {
     getSocket(roomMatch[1]).injectEvent(demoMessageEvent(roomMatch[1], body.text, body.to));
   }
   if (path === '/github/connect' || path.endsWith('/export')) return { url: 'https://github.com' } as T;
   return { accepted: true, seq: nextDemoSeq(), version: (body.base_version ?? 0) + 1 } as T;
+}
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
 }
 
 async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -40,7 +51,7 @@ async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promis
     const error = await res.json().catch(() => ({ message: 'Request failed' }));
     // FastAPI puts the reason in `detail` (a list of field errors for a 422)
     const detail = typeof error.detail === 'string' ? error.detail : error.detail && JSON.stringify(error.detail);
-    throw new Error(error.message || detail || `HTTP ${res.status}`);
+    throw new ApiError(error.message || detail || `HTTP ${res.status}`, res.status);
   }
 
   if (res.status === 204) return {} as T;
@@ -56,6 +67,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ description, domain_role }),
     }),
+  // Owner only. The room stops and disappears for everyone; the server keeps its history but never reopens it
+  closeRoom: (id: string, reason?: string) =>
+    fetchWithAuth<{ room_id: string; closed: boolean }>(
+      `/rooms/${id}/close${reason ? `?reason=${encodeURIComponent(reason)}` : ''}`,
+      { method: 'POST' },
+    ),
   updateSharing: (id: string, data: { link_access: 'restricted' | 'anyone'; link_permission: 'editor' | 'viewer'; invites?: string[] }) =>
     fetchWithAuth<Room>(`/rooms/${id}/sharing`, { method: 'PATCH', body: JSON.stringify(data) }),
 
@@ -105,14 +122,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
+  readFile: (roomId: string, path: string) =>
+    fetchWithAuth<{ path: string; content: string }>(
+      `/api/files/${roomId}/files/${path.split('/').map(encodeURIComponent).join('/')}`,
+    ),
   saveFile: (roomId: string, path: string, content: string, baseVersion: number) =>
     fetchWithAuth<{ accepted: true; seq: number; version: number }>(`/rooms/${roomId}/files`, {
       method: 'PUT',
       body: JSON.stringify({ path, content, base_version: baseVersion }),
     }),
 
+  // A file that only exists in this browser (never saved to the room) is already gone on the server
   deleteFile: (roomId: string, path: string) =>
-    fetchWithAuth<{ accepted: true; seq: number }>(`/rooms/${roomId}/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+    fetchWithAuth<{ accepted: true; seq: number }>(`/rooms/${roomId}/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
+      .catch(error => {
+        if (error instanceof ApiError && error.status === 404) return null;
+        throw error;
+      }),
 
   // Rewind
   rewind: (roomId: string, checkpointId: string) =>
@@ -129,7 +155,10 @@ export const api = {
     }),
 
   // GitHub
-  connectGitHub: () => fetchWithAuth<{ url: string }>('/github/connect'),
+  // `next`: the app page GitHub returns to after connecting (the profile page by default)
+  connectGitHub: (next?: string) =>
+    fetchWithAuth<{ url: string }>(`/github/connect${next ? `?next=${encodeURIComponent(next)}` : ''}`),
+  githubStatus: () => fetchWithAuth<{ connected: boolean; username: string | null }>('/api/export/github/status'),
   exportToGitHub: (roomId: string, repoName: string, isPrivate: boolean) =>
     fetchWithAuth<{ url: string }>(`/rooms/${roomId}/export`, {
       method: 'POST',

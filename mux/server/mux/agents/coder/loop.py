@@ -8,7 +8,7 @@ from typing import Any, Literal, Protocol
 
 from mux.agents.coder.compaction import compact
 from mux.agents.coder.escalation import EscalationState
-from mux.agents.llm import LLM, DeltaCallback, LLMReply, ModelRole, Usage
+from mux.agents.llm import LLM, DeltaCallback, LLMReply, ModelRole, ToolCall, Usage
 
 NUDGE = "Continue with tool calls, or call finish_task when the task is done."
 
@@ -133,10 +133,16 @@ def _tool_calls_message(reply: LLMReply) -> dict[str, Any]:
         return {}
     return {
         "tool_calls": [
-            {"id": call.id, "type": "function", "function": {"name": call.name, "arguments": call.raw_arguments}}
+            {"id": call.id, "type": "function", "function": {"name": call.name, "arguments": _echoed_arguments(call)}}
             for call in reply.tool_calls
         ]
     }
+
+
+def _echoed_arguments(call: ToolCall) -> str:
+    # The API parses the arguments of every tool call in the history: the model's invalid JSON (or an
+    # empty string) would fail the whole next request with a 400. Its tool message says to retry instead.
+    return call.raw_arguments if call.arguments is not None and call.raw_arguments else "{}"
 
 
 def _tool_message(call_id: str, result: Any) -> dict[str, Any]:

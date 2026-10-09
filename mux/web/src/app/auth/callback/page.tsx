@@ -13,9 +13,22 @@ function AuthCallbackHandler() {
     const handleAuth = async () => {
       const code = searchParams.get('code');
       const next = safeNext(searchParams.get('next'));
+      const backToLogin = (message: string) =>
+        router.replace(`/login?next=${encodeURIComponent(next)}&error=${encodeURIComponent(message)}`);
+
+      // The provider or Supabase refused the sign-in (e.g. a wrong OAuth client secret)
+      const failure = searchParams.get('error_description') || searchParams.get('error');
+      if (failure) {
+        backToLogin(failure);
+        return;
+      }
 
       if (code) {
-        await supabase.auth.exchangeCodeForSession(code);
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) {
+          backToLogin(error.message);
+          return;
+        }
       }
 
       router.push(next);

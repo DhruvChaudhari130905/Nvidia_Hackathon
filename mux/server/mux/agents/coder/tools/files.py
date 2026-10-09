@@ -11,9 +11,11 @@ Versions are the manifest's numbers (v1, v2, ...) everywhere (Q52):
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
+from mux.files.binary import data_url_bytes
 from mux.files.manifest import LiveFiles
 from mux.files.room_files import InvalidPath, RoomFiles, check_path
 
@@ -54,10 +56,30 @@ def _read_result(path: str, content: str, version: int, start_line: int | None, 
     }
 
 
+EDITS_FORMAT = 'edits must be a list of {"find": ..., "replace": ...} objects'
+
+
+def _normalize_edits(edits: Any) -> list[dict[str, str]] | None:
+    """Models sometimes send the edits list JSON-encoded as a string, or one edit on its own; accept both."""
+    if isinstance(edits, str):
+        try:
+            edits = json.loads(edits)
+        except ValueError:
+            return None
+    if isinstance(edits, dict):
+        edits = [edits]
+    if not isinstance(edits, list) or not all(isinstance(e, dict) for e in edits):
+        return None
+    return edits
+
+
 def apply_edits(path: str, content: str, edits: Iterable[dict[str, str]], version: int) -> str | dict[str, Any]:
     """The edited text, or an error result. Each find must match exactly one place."""
+    normalized = _normalize_edits(edits)
+    if normalized is None:
+        return {"ok": False, "error": EDITS_FORMAT, "path": path, "version": version}
     updated = content
-    for edit in edits:
+    for edit in normalized:
         find = edit.get("find", "")
         replace = edit.get("replace", "")
         if not find:
@@ -177,6 +199,8 @@ class ActorFileTools:
         version = await self.actor.file_version(check)
         if content is None or version is None:
             raise MissingFileError(f"file not found: {path}")
+        if data_url_bytes(content) is not None:
+            raise FileToolError(f"binary file: {path}")
         return content, version
 
     async def _save(self, path: str, content: str | None, base_version: int | None) -> tuple[str, int | None]:

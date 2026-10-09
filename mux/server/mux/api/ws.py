@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 
-from mux.auth.supabase import User, verify_supabase_token
+from mux.auth.supabase import User, display_name, verify_supabase_token
 from mux.events.bus import event_bus
 from mux.events.models import BaseEvent
 from mux.events.wire import ephemeral, to_envelope
@@ -36,7 +36,7 @@ def _user_from_token(token: str) -> Optional[User]:
     payload = verify_supabase_token(token)
     if payload is None or not payload.get("sub"):
         return None
-    return User(id=payload["sub"], email=payload.get("email"), role=payload.get("role", "authenticated"))
+    return User(id=payload["sub"], email=payload.get("email"), role=payload.get("role", "authenticated"), name=display_name(payload))
 
 
 async def _authenticate(websocket: WebSocket, token: Optional[str]) -> Optional[User]:

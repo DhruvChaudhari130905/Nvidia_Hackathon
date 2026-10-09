@@ -8,6 +8,7 @@ import {
 import { FileIcon } from './FileTree';
 import { VsCodeIcon } from './OpenInVsCode';
 import type { TerminalFs } from './Terminal';
+import { isBinaryContent } from '@/lib/binaryFiles';
 
 // VS Code-style activity bar and the side views it switches between (Explorer lives in FileTree)
 
@@ -118,7 +119,9 @@ export function SearchView({
     const needle = matchCase ? query : query.toLowerCase();
     for (const path of paths) {
       const hits: { line: number; column: number; text: string }[] = [];
-      contentOf(path).split('\n').forEach((text, i) => {
+      const content = contentOf(path);
+      if (isBinaryContent(content)) continue;
+      content.split('\n').forEach((text, i) => {
         if (total >= MAX_RESULTS) return;
         const col = (matchCase ? text : text.toLowerCase()).indexOf(needle);
         if (col >= 0) {

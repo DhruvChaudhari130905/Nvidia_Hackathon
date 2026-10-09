@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { DoorOpen, Plus, FolderInput, FolderOpen, FileArchive, Timer, Terminal, ArrowRight, Activity, Zap, PlusCircle, X, RefreshCw, Search, Crown, Users, Sparkles } from 'lucide-react';
+import { DoorOpen, Trash2, Plus, FolderInput, FolderOpen, FileArchive, Timer, Terminal, ArrowRight, Activity, Zap, PlusCircle, X, RefreshCw, Search, Crown, Users, Sparkles } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { getUser, loginHref } from '@/lib/supabase';
 import { api } from '@/lib/api';
@@ -13,6 +13,7 @@ import { colorForId, getDefaultRole } from '@/lib/preferences';
 import { isDemoMode, isSampleRoom } from '@/lib/demo';
 import { AppShell, BTN_GHOST, BTN_PRIMARY, CARD, CountUp, CtaCard, FilterChip, IconTile, PageHero, Reveal, Spotlight, useTicker } from '@/components/shell';
 import type { Room, User } from '@/types';
+import { DeleteRoomDialog } from '@/components/room/DeleteRoomDialog';
 
 // Active Rooms screen (stitch: mux_active_rooms_live_wallpaper_pro)
 
@@ -49,6 +50,7 @@ export default function DashboardPage() {
   const router = useRouter();
 
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [deleting, setDeleting] = useState<Room | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -322,7 +324,7 @@ export default function DashboardPage() {
 
           {featured && (
             <Reveal delay={80}>
-              <FeaturedRoom room={featured} currentUser={user} />
+              <FeaturedRoom room={featured} currentUser={user} onDelete={setDeleting} />
             </Reveal>
           )}
 
@@ -330,7 +332,7 @@ export default function DashboardPage() {
             <div className="mb-space-xl grid grid-cols-1 gap-space-lg md:grid-cols-2 lg:grid-cols-3">
               {others.map((room, i) => (
                 <Reveal key={room!.id} delay={Math.min(i, 6) * 70} className="h-full">
-                  <RoomCard room={room!} currentUser={user} tagStyle={TAG_STYLES[i % TAG_STYLES.length]} />
+                  <RoomCard room={room!} currentUser={user} tagStyle={TAG_STYLES[i % TAG_STYLES.length]} onDelete={setDeleting} />
                 </Reveal>
               ))}
             </div>
@@ -438,6 +440,15 @@ export default function DashboardPage() {
         </Reveal>
       </div>
 
+      <DeleteRoomDialog
+        room={deleting}
+        onClose={() => setDeleting(null)}
+        onDeleted={id => {
+          setRooms(rs => rs.filter(r => r.id !== id));
+          setDeleting(null);
+        }}
+      />
+
       {showExportPicker && (
         <ExportPicker
           rooms={rooms.filter(r => r.owner_id === user?.id)}
@@ -474,7 +485,26 @@ function Initials({ user, size = 'sm' }: { user: User; size?: 'sm' | 'md' }) {
   );
 }
 
-function FeaturedRoom({ room, currentUser }: { room: Room; currentUser: User | null }) {
+// Only the owner can delete a room; built-in sample rooms (demo mode) can't be deleted
+function canDelete(room: Room, user: User | null): boolean {
+  return room.owner_id === user?.id && !(isDemoMode() && isSampleRoom(room.id));
+}
+
+function DeleteRoomButton({ room, onDelete }: { room: Room; onDelete: (room: Room) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onDelete(room)}
+      className="grid h-8 w-8 flex-none place-items-center rounded-lg text-outline transition-colors hover:bg-red-500/10 hover:text-red-400"
+      aria-label={`Delete ${room.title}`}
+      title="Delete room"
+    >
+      <Trash2 className="h-4 w-4" />
+    </button>
+  );
+}
+
+function FeaturedRoom({ room, currentUser, onDelete }: { room: Room; currentUser: User | null; onDelete: (room: Room) => void }) {
   const activity = activityOf(room);
   const me = room.members.find(m => m.user_id === currentUser?.id);
 
@@ -520,13 +550,14 @@ function FeaturedRoom({ room, currentUser }: { room: Room; currentUser: User | n
             <Terminal className="h-[18px] w-[18px]" />
             Open workspace
           </Link>
+          {canDelete(room, currentUser) && <DeleteRoomButton room={room} onDelete={onDelete} />}
         </div>
       </div>
     </Spotlight>
   );
 }
 
-function RoomCard({ room, currentUser, tagStyle }: { room: Room; currentUser: User | null; tagStyle: string }) {
+function RoomCard({ room, currentUser, tagStyle, onDelete }: { room: Room; currentUser: User | null; tagStyle: string; onDelete: (room: Room) => void }) {
   const activity = activityOf(room);
   const isOwner = room.owner_id === currentUser?.id;
   const shown = room.members.slice(0, 2);
@@ -560,10 +591,13 @@ function RoomCard({ room, currentUser, tagStyle }: { room: Room; currentUser: Us
         <span className="font-code text-code-sm text-outline">
           {activity === 'idle' ? 'Idle' : 'Updated'} {formatDistanceToNow(lastActivity(room), { addSuffix: true })}
         </span>
-        <Link href={`/room/${room.id}`} className="flex items-center gap-space-xs rounded-lg px-space-sm py-1 text-body-sm text-primary transition-colors hover:bg-primary/10">
-          {activity === 'idle' ? 'Reopen' : 'Join room'}
-          <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
-        </Link>
+        <span className="flex items-center gap-space-xs">
+          {canDelete(room, currentUser) && <DeleteRoomButton room={room} onDelete={onDelete} />}
+          <Link href={`/room/${room.id}`} className="flex items-center gap-space-xs rounded-lg px-space-sm py-1 text-body-sm text-primary transition-colors hover:bg-primary/10">
+            {activity === 'idle' ? 'Reopen' : 'Join room'}
+            <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+          </Link>
+        </span>
       </div>
     </Spotlight>
   );

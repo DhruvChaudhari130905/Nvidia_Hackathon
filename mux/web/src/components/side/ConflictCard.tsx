@@ -41,11 +41,12 @@ export function ConflictCard({
     conflict.votes.forEach(v => { initialVotes[v.option] = (initialVotes[v.option] || 0) + v.weight; });
     setVotes(initialVotes);
 
+    // Recomputed when the signed-in user changes too, so one person's vote never shows as another's
     const myVote = conflict.votes.find(v => v.user_id === currentUser.id);
-    if (myVote) setUserVote(myVote.option);
+    setUserVote(myVote ? myVote.option : null);
 
     if (conflict.status === 'closed') setVoteDone(true);
-  }, [conflict]);
+  }, [conflict, currentUser.id]);
 
   // Timer
   useEffect(() => {

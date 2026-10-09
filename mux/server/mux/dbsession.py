@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from mux.config import settings
@@ -34,7 +35,7 @@ async def init_db() -> None:
     elif database_url.startswith("postgresql://"):
         database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-    logger.info(f"Initializing database: {database_url}")
+    logger.info(f"Initializing database: {make_url(database_url).render_as_string(hide_password=True)}")
 
     engine = create_async_engine(
         database_url,

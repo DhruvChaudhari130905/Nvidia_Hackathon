@@ -2,6 +2,8 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
+  // A separate output folder lets a production build run while `next dev` is using .next
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   async headers() {
     return [
       {
