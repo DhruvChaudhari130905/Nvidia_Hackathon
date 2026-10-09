@@ -102,7 +102,7 @@ Limits: at most 10 room servers per room; a name can't be reused for a different
 
 Built in `RoomRuntime._run` next to the existing `CoderToolExecutor` and wrapping it:
 
-- `async __aenter__`: connects to every enabled server in parallel. A server that fails is left out and
+- `async __aenter__`: connects to every enabled server in turn (the SDK's connections must be opened and closed in the coder's own task). A server that fails is left out and
   the feed gets `mcp.unavailable` with the server name and the error. Tool lists come from the live
   session, filtered by the room's per-tool settings.
 - `schemas()`: built-in schemas plus one OpenAI-style function schema per MCP tool (its `inputSchema` as
