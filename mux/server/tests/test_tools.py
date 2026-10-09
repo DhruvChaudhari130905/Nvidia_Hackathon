@@ -541,3 +541,35 @@ def test_compaction_keeps_the_latest_skill_text():
                 {"role": "assistant", "content": "", "tool_calls": []}]
     out = compact(messages)
     assert out[1]["content"] == body and out[3]["content"].startswith("[previous tool result]")
+
+
+async def test_a_review_isnt_blocked_by_files_it_cannot_read(tmp_path):
+    (tmp_path / "a.js").write_text("x\n")
+    tools = CoderToolExecutor(FileTools(tmp_path), read_only=True, review_scope=["a.js", "gone.js"])
+    await tools.execute("read_file", {"path": "a.js"})
+    failed = await tools.execute("read_file", {"path": "gone.js"})  # deleted, or stored as binary
+    assert failed.get("ok") is False
+    assert (await tools.execute("finish_task", {"summary": GOOD_REVIEW}))["ok"] is True
+
+
+async def test_huge_skill_files_are_refused_without_reading_them(tmp_path):
+    skill = _skill(tmp_path)
+    with open(skill.root / "dataset.csv", "wb") as f:
+        f.truncate(3_000_000)  # sparse: big on paper, nothing to read
+    from mux.skills.library import load_skill
+    skill = load_skill(skill.root, "server")
+    tools = CoderToolExecutor(FileTools(tmp_path), skills={"frontend-design": skill})  # type: ignore[dict-item]
+    result = await tools.execute("read_skill_file", {"name": "frontend-design", "path": "dataset.csv"})
+    assert result["ok"] is False and "too large" in result["error"]
+
+
+def test_compaction_says_when_a_skill_text_was_dropped(monkeypatch):
+    import mux.agents.coder.compaction as compaction
+    monkeypatch.setattr(compaction, "KEPT_READS_BUDGET", 100)
+    body = json.dumps({"ok": True, "name": "frontend-design", "instructions": "I" * 500, "files": []})
+    messages = [{"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "s1", "type": "function", "function": {"name": "use_skill", "arguments": json.dumps({"name": "frontend-design"})}}]},
+                {"role": "tool", "tool_call_id": "s1", "content": body},
+                {"role": "assistant", "content": "", "tool_calls": []}]
+    out = compact(messages)
+    assert "use_skill" in out[1]["content"] and "frontend-design" in out[1]["content"]

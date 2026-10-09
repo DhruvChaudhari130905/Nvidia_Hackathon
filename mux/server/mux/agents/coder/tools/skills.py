@@ -7,6 +7,7 @@ from typing import Any
 from mux.skills.library import Skill
 
 MAX_SKILL_CHARS = 30_000
+MAX_SKILL_FILE_BYTES = 1_000_000  # bigger supporting files (datasets, assets) aren't read at all
 MAX_PROMPT_SKILLS = 30
 
 SKILL_TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -53,6 +54,8 @@ def read_skill_file(skills: dict[str, Skill], name: str, path: str) -> dict[str,
     if path not in skill.files:  # exact match against the listed files: no way out of the skill's folder
         return {"ok": False, "error": f"{path} isn't one of {skill.name}'s files; use a path use_skill listed"}
     try:
+        if (skill.root / path).stat().st_size > MAX_SKILL_FILE_BYTES:
+            return {"ok": False, "error": f"{path} is too large to read (over {MAX_SKILL_FILE_BYTES // 1_000_000} MB)"}
         text = (skill.root / path).read_bytes().decode("utf-8")
     except UnicodeDecodeError:
         return {"ok": False, "error": f"{path} isn't a text file"}

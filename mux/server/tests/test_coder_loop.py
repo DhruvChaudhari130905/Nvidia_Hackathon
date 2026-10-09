@@ -544,3 +544,10 @@ async def test_alternating_repeats_without_progress_are_a_loop():
     state = EscalationState()
     progress = [("run_build", {}), ("edit_file", {"path": "a"})] * 3
     assert not any(state.record_tool_call(n, a) for n, a in progress)
+
+
+def test_loading_a_skill_again_is_never_a_loop():
+    from mux.agents.coder.escalation import EscalationState
+    state = EscalationState()
+    calls = [("use_skill", {"name": "tdd"})] * 4 + [("read_skill_file", {"name": "tdd", "path": "a.md"})] * 4
+    assert not any(state.record_tool_call(n, a) for n, a in calls)

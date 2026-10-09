@@ -28,7 +28,9 @@ def compact(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for i, message in enumerate(result[:last_assistant]):
         if message.get("role") == "tool" and i not in kept:
             name, arguments = calls.get(str(message.get("tool_call_id", "")), ("", {}))
-            if name == "read_file" and arguments.get("path"):
+            if name == "use_skill" and arguments.get("name"):
+                message["content"] = f"[earlier use_skill of {arguments['name']}: dropped to save space; call use_skill again if you need it]"
+            elif name == "read_file" and arguments.get("path"):
                 message["content"] = f"[earlier read of {arguments['path']}: {why.get(i, 'dropped to save space')}; read it again if you need it]"
             else:
                 message["content"] = _stub(str(message.get("content", "")))

@@ -39,6 +39,8 @@ class EscalationState:
         if name in ("write_file", "edit_file", "delete_file", "add_image"):
             self._since_change.clear()
             return False
+        if name in ("use_skill", "read_skill_file"):
+            return False  # loading guidance again is cheap and harmless, e.g. after compaction dropped it
         key = f"{name}:{json.dumps(arguments, sort_keys=True, default=str)}"
         self._since_change[key] = self._since_change.get(key, 0) + 1
         return self._since_change[key] >= MAX_REPEATS

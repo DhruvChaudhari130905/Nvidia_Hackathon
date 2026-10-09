@@ -29,7 +29,10 @@ def test_loads_frontmatter_body_and_files(tmp_path):
 def test_name_defaults_to_the_folder_and_bad_skills_are_skipped(tmp_path):
     assert load_skill(write_skill(tmp_path, "Clean-Code", "---\ndescription: Tidy\n---\nbody"), "server").name == "clean-code"  # type: ignore[union-attr]
     assert load_skill(write_skill(tmp_path, "nodesc", "---\nname: nodesc\n---\nbody"), "server") is None
-    assert load_skill(write_skill(tmp_path, "badyaml", "---\nname: x\ndescription: a: b: [\n---\nbody"), "server") is None
+    # Not valid YAML (a colon in the value): read leniently as key: value lines, like hand-written Claude Code skills
+    lenient = load_skill(write_skill(tmp_path, "colon", "---\nname: colon\ndescription: Use when: the UI looks generic\n---\nbody"), "server")
+    assert lenient is not None and lenient.description == "Use when: the UI looks generic"
+    assert load_skill(write_skill(tmp_path, "garbage", "---\n[unclosed\n---\nbody"), "server") is None
     assert load_skill(write_skill(tmp_path, "nofront", "just text"), "server") is None
     assert load_skill(write_skill(tmp_path, "bad name!", "---\ndescription: d\n---\nb"), "server") is None
     big = write_skill(tmp_path, "big", "---\ndescription: d\n---\n" + "x" * 210_000)
@@ -61,3 +64,11 @@ def test_claude_code_issues():
     assert issues == ["uses Claude Code sub-agents", "uses Claude Code's task list", "uses git worktrees"]
     assert claude_code_issues("Call EnterPlanMode") == ["uses Claude Code's plan mode"]
     assert claude_code_issues("use the Bash tool") == ["runs shell commands"]
+
+
+def test_a_byte_order_mark_doesnt_hide_a_skill(tmp_path):
+    folder = tmp_path / "bom"
+    folder.mkdir()
+    (folder / "SKILL.md").write_bytes("\ufeff---\ndescription: Saved on Windows\n---\nbody".encode("utf-8"))
+    skill = load_skill(folder, "server")
+    assert skill is not None and skill.description == "Saved on Windows"

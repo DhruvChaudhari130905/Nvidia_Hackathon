@@ -294,13 +294,14 @@ class CoderToolExecutor:
         handler = handlers.get(name)
         if handler is None:
             return {"ok": False, "error": f"unknown tool: {name}"}
+        if name == "read_file" and self.review_scope is not None:
+            # An attempt counts: a file that can't be read (deleted, stored as binary) must not block the review
+            self._reviewed.add(str(arguments.get("path", "")))
         try:
             result = handler(**arguments)
             result = await result if inspect.isawaitable(result) else result
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        if name == "read_file" and self.review_scope is not None and isinstance(result, dict) and "content" in result:
-            self._reviewed.add(str(arguments.get("path", "")))
         if name in _CHANGES_FILES and isinstance(result, dict) and result.get("ok"):
             self.snapshot_uuid = None
             if name == "write_file":

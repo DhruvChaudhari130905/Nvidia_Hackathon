@@ -54,6 +54,17 @@ def _supporting_files(folder: Path) -> list[str]:
     return files
 
 
+def _simple_frontmatter(text: str) -> dict[str, str]:
+    """Hand-written frontmatter that isn't strict YAML (`description: Use when: ...`): one `key: value` a line."""
+    meta: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep or not re.fullmatch(r"[A-Za-z_][\w-]*", key.strip()):
+            return {}
+        meta[key.strip()] = value.strip().strip('"').strip("'")
+    return meta
+
+
 def load_skill(folder: Path, source: str) -> Optional[Skill]:
     """The skill in `folder`, or None (logged) when it can't be used."""
     path = folder / "SKILL.md"
@@ -61,7 +72,7 @@ def load_skill(folder: Path, source: str) -> Optional[Skill]:
         if path.stat().st_size > MAX_SKILL_BYTES:
             logger.warning(f"Skipping skill {folder.name}: SKILL.md is over {MAX_SKILL_BYTES} bytes")
             return None
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")  # -sig: files saved on Windows start with a BOM
     except (OSError, UnicodeDecodeError) as e:
         logger.warning(f"Skipping skill {folder.name}: {e}")
         return None
@@ -71,9 +82,11 @@ def load_skill(folder: Path, source: str) -> Optional[Skill]:
         return None
     try:
         meta = yaml.safe_load(match.group(1)) or {}
-    except yaml.YAMLError as e:
-        logger.warning(f"Skipping skill {folder.name}: frontmatter isn't valid YAML ({e})")
-        return None
+    except yaml.YAMLError:
+        meta = _simple_frontmatter(match.group(1))
+        if not meta:
+            logger.warning(f"Skipping skill {folder.name}: frontmatter isn't valid YAML or key: value lines")
+            return None
     if not isinstance(meta, dict):
         logger.warning(f"Skipping skill {folder.name}: frontmatter isn't a mapping")
         return None
