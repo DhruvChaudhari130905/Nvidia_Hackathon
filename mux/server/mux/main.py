@@ -2,7 +2,7 @@
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -36,21 +36,25 @@ room_registry.get_event_log = get_event_log
 STARTER_TEMPLATE = Path(__file__).resolve().parents[2] / "templates" / "fullstack-starter"
 
 
-def agent_runtime_factory() -> Optional[Callable[[RoomActor], RoomRuntime]]:
-    """The room agents, when Token Factory is configured; otherwise rooms run without agents."""
-    if not (settings.token_factory_api_key and settings.token_factory_base_url and settings.model_super):
-        logger.warning("Token Factory is not configured (TOKEN_FACTORY_* / MODEL_SUPER): rooms run without agents")
-        return None
+def agent_runtime_factory() -> Callable[[RoomActor], RoomRuntime]:
+    """The room agents. Each room uses its owner's AI provider, else Token Factory when configured; a room
+    with neither has its agents off (RoomLLM.available() is False)."""
     from mux.agents.coder.prompts import load_conventions
     from mux.agents.llm import TokenFactoryLLM
+    from mux.agents.room_llm import RoomLLM
     from mux.integrations.tavily import TavilySearch
 
-    llm = TokenFactoryLLM()
+    default = None
+    if settings.token_factory_api_key and settings.token_factory_base_url and settings.model_super:
+        default = TokenFactoryLLM()
+    else:
+        logger.warning("Token Factory is not configured (TOKEN_FACTORY_* / MODEL_SUPER): only rooms with their own AI key run agents")
     conventions = load_conventions(STARTER_TEMPLATE)
 
     def make(actor: RoomActor) -> RoomRuntime:
         search = TavilySearch() if settings.tavily_api_key else None  # one per room: the cache is per room
-        return RoomRuntime(actor, llm, search=search, conventions=conventions, publish=event_bus.publish_json)
+        return RoomRuntime(actor, RoomLLM(actor, default), search=search, conventions=conventions,
+                           publish=event_bus.publish_json)
 
     return make
 

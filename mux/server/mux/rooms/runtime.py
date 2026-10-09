@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -36,7 +37,7 @@ from mux.agents.coordinator.conflicts import Vote, research_conflict, tally, vot
 from mux.agents.coordinator.planner import next_task_id
 from mux.agents.coordinator.prompts import Message, PlanItem, RoomView
 from mux.agents.coordinator.schema import CoordinatorAction, Domain, DomainRole, OpenConflict
-from mux.agents.llm import LLM, Usage
+from mux.agents.llm import LLM, ModelError, Usage
 from mux.events.models import (
     BaseEvent,
     CommandAnswerQuestionEvent,
@@ -96,6 +97,7 @@ class RoomRuntime:
         vote_timeout: float = 60.0,
         question_timeout: float = 300.0,
         max_turns: int = 25,
+        model_error_interval: float = 60.0,
     ) -> None:
         self.actor = actor
         self.llm = llm
@@ -105,6 +107,8 @@ class RoomRuntime:
         self.vote_timeout = vote_timeout
         self.question_timeout = question_timeout
         self.max_turns = max_turns
+        self.model_error_interval = model_error_interval
+        self._last_model_error = float("-inf")
         self.coordinator = Coordinator(llm)
 
         self._events: asyncio.Queue[BaseEvent] = asyncio.Queue()
@@ -142,6 +146,19 @@ class RoomRuntime:
         """Wait until every observed event is handled (tests)."""
         await self._events.join()
 
+    def _model_available(self) -> bool:
+        """False when the room has no model (no room key, no server key): agents stay off, quietly."""
+        available = getattr(self.llm, "available", None)
+        return bool(available()) if callable(available) else True
+
+    async def _model_error(self, error: ModelError) -> None:
+        """Tell the room its model failed, at most once per model_error_interval."""
+        now = time.monotonic()
+        if now - self._last_model_error < self.model_error_interval:
+            return
+        self._last_model_error = now
+        await self.actor.post_notice("ai.error", {"error": str(error)[:300]})
+
     # ---- events ----
 
     async def _consume(self) -> None:
@@ -151,6 +168,8 @@ class RoomRuntime:
                 await self._handle(event)
             except asyncio.CancelledError:
                 raise
+            except ModelError as e:
+                await self._model_error(e)
             except Exception:
                 logger.exception(f"Room {self.actor.room_id}: runtime failed on {event.type}")
             finally:
@@ -158,6 +177,11 @@ class RoomRuntime:
 
     async def _handle(self, event: BaseEvent) -> None:
         t = event.type
+        if t == EventType.ROOM_AI_SETTINGS_SAVED:
+            self._wake.set()  # approved tasks waiting for a model can start
+            return
+        if not self._model_available():
+            return
         if t == EventType.USER_MESSAGE_SENT:
             e = cast(UserMessageSentEvent, event)
             message = Message(e.message_id, e.user_id, self._domain_role(e.user_id), e.content)
@@ -352,7 +376,7 @@ class RoomRuntime:
             self._wake.clear()
             while True:
                 task = await self._next_task()
-                if task is None or not await self.actor.check_budget_allowance():
+                if task is None or not self._model_available() or not await self.actor.check_budget_allowance():
                     break
                 await self._run(task)
 
@@ -400,6 +424,8 @@ class RoomRuntime:
             raise
         except Exception as e:
             logger.exception(f"Room {self.actor.room_id}: coder failed on {task_id}")
+            if isinstance(e, ModelError):
+                await self._model_error(e)
             await self._park(item, f"error: {e}")
         finally:
             self._current_task = None

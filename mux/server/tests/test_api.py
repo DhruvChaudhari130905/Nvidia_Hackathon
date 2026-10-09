@@ -418,7 +418,9 @@ def test_rehydration_restores_state(client):
     assert r.json()["owner_id"] == "alice"
     room = registry_call(client, reg.get_room, rid)
     plan = {i["id"]: i["status"] for i in registry_call(client, room.get_plan)}
-    assert plan == {"p1": "todo", "p2": "doing"}
+    # p2 was "doing": every room now has a runtime (main.agent_runtime_factory), and its start puts a task
+    # a restart interrupted back to "todo"
+    assert plan == {"p1": "todo", "p2": "todo"}
     assert client.get(f"/api/files/{rid}/files/f.py", headers=auth("bob")).json()["content"] == "x=1"
     assert len(room.manifest.list_checkpoints()) == 1
 

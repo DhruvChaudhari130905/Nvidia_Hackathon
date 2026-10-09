@@ -392,3 +392,69 @@ async def test_review_requests_become_read_only_tasks_that_report_in_the_feed(se
     assert offered == {"read_file", "list_files", "web_search", "finish_task"}
     assert not of_type(log, EventType.CHECKPOINT_CREATED)  # nothing changed, nothing to checkpoint
     await registry.shutdown_all()
+
+
+# --- room AI provider -------------------------------------------------------------
+
+class SwitchableLLM(FakeLLM):
+    """FakeLLM with RoomLLM's available() switch, and an optional error for every call."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on = False
+        self.error: Exception | None = None
+
+    def available(self) -> bool:
+        return self.on
+
+    async def chat(self, *args, **kwargs):
+        if self.error is not None:
+            raise self.error
+        return await super().chat(*args, **kwargs)
+
+
+@pytest.fixture
+def switchable(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    logs: dict[str, InMemoryEventLog] = {}
+    monkeypatch.setattr(room_registry, "get_event_log", lambda rid: logs.setdefault(rid, InMemoryEventLog(rid)))
+    llm = SwitchableLLM()
+
+    def factory(actor: RoomActor) -> RoomRuntime:
+        return RoomRuntime(actor, llm, vote_timeout=30, question_timeout=30, max_turns=3, model_error_interval=60)
+
+    return RoomRegistry(runtime_factory=factory), llm, logs
+
+
+@pytest.mark.asyncio
+async def test_no_model_means_no_agent_work_until_a_key_is_saved(switchable):
+    registry, llm, logs = switchable
+    actor = await new_room(registry, llm, logs)
+    log = logs[actor.room_id]
+    await actor.approve_plan_items(["t1"], "alice")
+    await actor.add_message("chat", "hello", message_id="m1", user_id="alice", enqueue=False)
+    await asyncio.sleep(0.2)
+    assert llm.calls == [] and not notices(log, "ai.error")
+    assert (await actor.get_plan())[0]["status"] == "todo"
+
+    llm.on = True
+    llm.push(tool_reply(("finish_task", {"summary": "done"})))
+    await actor.save_ai_settings("openai", "https://api.example.com/v1", "ENC", {"lightning": "a", "super": "b", "ultra": "b"}, "alice")
+    await until(lambda: of_type(log, EventType.CHECKPOINT_CREATED))
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_model_errors_reach_the_room_once_a_minute(switchable):
+    from mux.agents.llm import ModelError
+    registry, llm, logs = switchable
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    llm.on = True
+    llm.error = ModelError("401 invalid key [hidden]")
+    await actor.add_message("chat", "one", message_id="m1", user_id="alice", enqueue=False)
+    await actor.add_message("chat", "two", message_id="m2", user_id="alice", enqueue=False)
+    await until(lambda: notices(log, "ai.error"))
+    await asyncio.sleep(0.2)
+    assert notices(log, "ai.error") == [{"error": "401 invalid key [hidden]"}]
+    await registry.shutdown_all()
