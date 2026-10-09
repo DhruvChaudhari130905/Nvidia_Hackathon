@@ -218,6 +218,8 @@ export type EventType =
   | 'sharing.changed'
   | 'mcp.changed'
   | 'mcp.unavailable'
+  | 'ai.changed'
+  | 'ai.error'
   | 'message.posted'
   | 'message.labeled'
   | 'plan.drafted'

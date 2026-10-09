@@ -28,6 +28,8 @@ from mux.events.models import (
     RoomMcpServerSavedEvent,
     RoomMcpServerRemovedEvent,
     RoomMcpAdminToggledEvent,
+    RoomAiSettingsSavedEvent,
+    RoomAiSettingsClearedEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -213,6 +215,9 @@ class RoomActor:
         # server-wide servers this room uses (name -> enabled, settings)
         self.mcp_servers: dict[str, dict[str, Any]] = {}
         self.mcp_admin: dict[str, dict[str, Any]] = {}
+        # The room's own AI provider (mux/agents/room_llm.py): provider, base_url, encrypted api_key, models,
+        # version (the saving event's id, so clients are rebuilt when it changes). None: the server's model.
+        self.ai_settings: Optional[dict[str, Any]] = None
         self.closed = False
 
         # Initialize components
@@ -434,6 +439,25 @@ class RoomActor:
             await self._emit(RoomMcpAdminToggledEvent(
                 **self._event_fields(user_id), name=name, enabled=enabled, settings=settings,
             ))
+
+    async def save_ai_settings(self, provider: str, base_url: str, api_key: str, models: dict[str, str],
+                               user_id: str) -> None:
+        """Set the room's AI provider. `api_key` must already be encrypted."""
+        async with self._lock:
+            event = RoomAiSettingsSavedEvent(
+                **self._event_fields(user_id), provider=provider, base_url=base_url, api_key=api_key, models=models,
+            )
+            self.ai_settings = {"provider": provider, "base_url": base_url, "api_key": api_key, "models": models,
+                                "version": str(event.id)}
+            await self._emit(event)
+
+    async def clear_ai_settings(self, user_id: str) -> bool:
+        async with self._lock:
+            if self.ai_settings is None:
+                return False
+            self.ai_settings = None
+            await self._emit(RoomAiSettingsClearedEvent(**self._event_fields(user_id)))
+            return True
 
     async def close_room(self, user_id: str, reason: Optional[str] = None) -> None:
         async with self._lock:
@@ -1223,6 +1247,12 @@ class RoomActor:
             elif t == EventType.ROOM_MCP_ADMIN_TOGGLED:
                 e = cast(RoomMcpAdminToggledEvent, event)
                 self.mcp_admin[e.name] = {"enabled": e.enabled, "settings": e.settings}
+            elif t == EventType.ROOM_AI_SETTINGS_SAVED:
+                e = cast(RoomAiSettingsSavedEvent, event)
+                self.ai_settings = {"provider": e.provider, "base_url": e.base_url, "api_key": e.api_key,
+                                    "models": e.models, "version": str(e.id)}
+            elif t == EventType.ROOM_AI_SETTINGS_CLEARED:
+                self.ai_settings = None
             elif t == EventType.ROOM_CLOSED:
                 self.closed = True
 

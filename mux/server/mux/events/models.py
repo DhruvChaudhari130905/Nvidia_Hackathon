@@ -22,6 +22,8 @@ class EventType(str, Enum):
     ROOM_MCP_SERVER_SAVED = "room_mcp_server_saved"
     ROOM_MCP_SERVER_REMOVED = "room_mcp_server_removed"
     ROOM_MCP_ADMIN_TOGGLED = "room_mcp_admin_toggled"
+    ROOM_AI_SETTINGS_SAVED = "room_ai_settings_saved"
+    ROOM_AI_SETTINGS_CLEARED = "room_ai_settings_cleared"
 
     # User presence events
     USER_JOINED = "user_joined"
@@ -247,6 +249,20 @@ class RoomMcpAdminToggledEvent(BaseEvent):
     name: str = Field(..., description="Server name in mcp.json")
     enabled: bool = Field(..., description="Whether the coder gets this server's tools in this room")
     settings: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Tool -> {enabled, mode}")
+
+
+class RoomAiSettingsSavedEvent(BaseEvent):
+    """The owner set the room's AI provider. The key is encrypted (mux/secrets.py) and never sent to clients."""
+    type: EventType = EventType.ROOM_AI_SETTINGS_SAVED
+    provider: str = Field(..., description="Preset label (mux/agents/room_llm.py PROVIDERS)")
+    base_url: str = Field(..., description="OpenAI-compatible API base URL")
+    api_key: str = Field(..., description="Encrypted API key")
+    models: Dict[str, str] = Field(..., description="Role (lightning, super, ultra) -> model id")
+
+
+class RoomAiSettingsClearedEvent(BaseEvent):
+    """The owner switched the room back to the server's model."""
+    type: EventType = EventType.ROOM_AI_SETTINGS_CLEARED
 
 
 # Presence events
@@ -654,6 +670,8 @@ Event = Union[
     RoomMcpServerSavedEvent,
     RoomMcpServerRemovedEvent,
     RoomMcpAdminToggledEvent,
+    RoomAiSettingsSavedEvent,
+    RoomAiSettingsClearedEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -714,6 +732,8 @@ __all__ = [
     "RoomMcpServerSavedEvent",
     "RoomMcpServerRemovedEvent",
     "RoomMcpAdminToggledEvent",
+    "RoomAiSettingsSavedEvent",
+    "RoomAiSettingsClearedEvent",
     "UserJoinedEvent",
     "UserLeftEvent",
     "UserTypingEvent",

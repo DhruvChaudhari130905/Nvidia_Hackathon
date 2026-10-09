@@ -38,6 +38,7 @@ from mux.events.models import (
     QuestionAnsweredEvent,
     QuestionAskedEvent,
     RoomCreatedEvent,
+    RoomAiSettingsSavedEvent,
     RoomJoinedEvent,
     RoomMcpAdminToggledEvent,
     RoomMcpServerRemovedEvent,
@@ -130,6 +131,11 @@ def _payload(event: BaseEvent) -> Optional[tuple[str, dict[str, Any]]]:
     if t == EventType.ROOM_MCP_ADMIN_TOGGLED:
         e = cast(RoomMcpAdminToggledEvent, event)
         return "mcp.changed", {"admin": e.name, "enabled": e.enabled, "settings": e.settings}
+    if t == EventType.ROOM_AI_SETTINGS_SAVED:
+        e = cast(RoomAiSettingsSavedEvent, event)
+        return "ai.changed", {"provider": e.provider, "base_url": e.base_url, "models": e.models, "has_key": True}
+    if t == EventType.ROOM_AI_SETTINGS_CLEARED:
+        return "ai.changed", {"cleared": True}
     # Invites (room_invite_*) aren't sent: the emails are for the owner only (GET /rooms/{id}/invites)
 
     if t == EventType.USER_JOINED:
