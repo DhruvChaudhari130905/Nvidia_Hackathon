@@ -39,6 +39,9 @@ from mux.events.models import (
     QuestionAskedEvent,
     RoomCreatedEvent,
     RoomJoinedEvent,
+    RoomMcpAdminToggledEvent,
+    RoomMcpServerRemovedEvent,
+    RoomMcpServerSavedEvent,
     RoomPasswordSetEvent,
     RoomSharingUpdatedEvent,
     TaskFinishedEvent,
@@ -47,6 +50,7 @@ from mux.events.models import (
     UserMessageSentEvent,
     UserTypingEvent,
 )
+from mux.mcp.views import server_view
 
 DEFAULT_DOMAIN_ROLE = "eng"
 
@@ -117,6 +121,15 @@ def _payload(event: BaseEvent) -> Optional[tuple[str, dict[str, Any]]]:
     if t == EventType.ROOM_PASSWORD_SET:
         # Only whether there is one: the hash stays on the server
         return "sharing.changed", {"has_password": cast(RoomPasswordSetEvent, event).password_hash is not None}
+    if t == EventType.ROOM_MCP_SERVER_SAVED:
+        e = cast(RoomMcpServerSavedEvent, event)
+        return "mcp.changed", {"server": server_view(e.name, {"url": e.url, "headers": e.headers, "tools": e.tools,
+                                                              "settings": e.settings})}
+    if t == EventType.ROOM_MCP_SERVER_REMOVED:
+        return "mcp.changed", {"removed": cast(RoomMcpServerRemovedEvent, event).name}
+    if t == EventType.ROOM_MCP_ADMIN_TOGGLED:
+        e = cast(RoomMcpAdminToggledEvent, event)
+        return "mcp.changed", {"admin": e.name, "enabled": e.enabled, "settings": e.settings}
     # Invites (room_invite_*) aren't sent: the emails are for the owner only (GET /rooms/{id}/invites)
 
     if t == EventType.USER_JOINED:

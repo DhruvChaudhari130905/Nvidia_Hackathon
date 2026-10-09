@@ -19,6 +19,9 @@ class EventType(str, Enum):
     ROOM_INVITE_CREATED = "room_invite_created"
     ROOM_INVITE_REVOKED = "room_invite_revoked"
     ROOM_PASSWORD_SET = "room_password_set"
+    ROOM_MCP_SERVER_SAVED = "room_mcp_server_saved"
+    ROOM_MCP_SERVER_REMOVED = "room_mcp_server_removed"
+    ROOM_MCP_ADMIN_TOGGLED = "room_mcp_admin_toggled"
 
     # User presence events
     USER_JOINED = "user_joined"
@@ -220,6 +223,30 @@ class RoomPasswordSetEvent(BaseEvent):
     """The owner set, changed or removed the room password. Never sent to clients (mux/events/wire.py)."""
     type: EventType = EventType.ROOM_PASSWORD_SET
     password_hash: Optional[str] = Field(default=None, description="scrypt hash (mux/rooms/access.py); None removes it")
+
+
+class RoomMcpServerSavedEvent(BaseEvent):
+    """The owner added or changed one of the room's own MCP servers. Header values are encrypted."""
+    type: EventType = EventType.ROOM_MCP_SERVER_SAVED
+    name: str = Field(..., description="Server name, unique in the room")
+    url: str = Field(..., description="https URL of the server")
+    headers: Dict[str, str] = Field(default_factory=dict, description="Header name -> encrypted value (mux/mcp/secrets.py)")
+    tools: List[Dict[str, Any]] = Field(default_factory=list, description="Tools listed when it was added or refreshed")
+    settings: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Tool -> {enabled, mode}")
+
+
+class RoomMcpServerRemovedEvent(BaseEvent):
+    """The owner removed one of the room's MCP servers."""
+    type: EventType = EventType.ROOM_MCP_SERVER_REMOVED
+    name: str = Field(..., description="Server name")
+
+
+class RoomMcpAdminToggledEvent(BaseEvent):
+    """The owner turned a server-wide (mcp.json) server on or off for this room, or changed its tool settings."""
+    type: EventType = EventType.ROOM_MCP_ADMIN_TOGGLED
+    name: str = Field(..., description="Server name in mcp.json")
+    enabled: bool = Field(..., description="Whether the coder gets this server's tools in this room")
+    settings: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Tool -> {enabled, mode}")
 
 
 # Presence events
@@ -624,6 +651,9 @@ Event = Union[
     RoomInviteCreatedEvent,
     RoomInviteRevokedEvent,
     RoomPasswordSetEvent,
+    RoomMcpServerSavedEvent,
+    RoomMcpServerRemovedEvent,
+    RoomMcpAdminToggledEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -681,6 +711,9 @@ __all__ = [
     "RoomInviteCreatedEvent",
     "RoomInviteRevokedEvent",
     "RoomPasswordSetEvent",
+    "RoomMcpServerSavedEvent",
+    "RoomMcpServerRemovedEvent",
+    "RoomMcpAdminToggledEvent",
     "UserJoinedEvent",
     "UserLeftEvent",
     "UserTypingEvent",

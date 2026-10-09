@@ -25,6 +25,9 @@ from mux.events.models import (
     RoomInviteCreatedEvent,
     RoomInviteRevokedEvent,
     RoomPasswordSetEvent,
+    RoomMcpServerSavedEvent,
+    RoomMcpServerRemovedEvent,
+    RoomMcpAdminToggledEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -206,6 +209,10 @@ class RoomActor:
         self.allow_anonymous = False
         self.invites: dict[str, str] = {}  # lowercased email -> role, until the person joins or it's removed
         self.password_hash: Optional[str] = None  # mux/rooms/access.py; joining with the password grants editor
+        # MCP (mux/mcp): the room's own servers (name -> url, encrypted headers, tools, settings) and which
+        # server-wide servers this room uses (name -> enabled, settings)
+        self.mcp_servers: dict[str, dict[str, Any]] = {}
+        self.mcp_admin: dict[str, dict[str, Any]] = {}
         self.closed = False
 
         # Initialize components
@@ -404,6 +411,29 @@ class RoomActor:
         async with self._lock:
             self.password_hash = password_hash
             await self._emit(RoomPasswordSetEvent(**self._event_fields(user_id), password_hash=password_hash))
+
+    async def save_mcp_server(self, name: str, url: str, headers: dict[str, str], tools: list[dict[str, Any]],
+                              settings: dict[str, dict[str, Any]], user_id: str) -> None:
+        """Add or replace one of the room's MCP servers. `headers` values must already be encrypted."""
+        async with self._lock:
+            self.mcp_servers[name] = {"url": url, "headers": headers, "tools": tools, "settings": settings}
+            await self._emit(RoomMcpServerSavedEvent(
+                **self._event_fields(user_id), name=name, url=url, headers=headers, tools=tools, settings=settings,
+            ))
+
+    async def remove_mcp_server(self, name: str, user_id: str) -> bool:
+        async with self._lock:
+            if self.mcp_servers.pop(name, None) is None:
+                return False
+            await self._emit(RoomMcpServerRemovedEvent(**self._event_fields(user_id), name=name))
+            return True
+
+    async def set_mcp_admin(self, name: str, enabled: bool, settings: dict[str, dict[str, Any]], user_id: str) -> None:
+        async with self._lock:
+            self.mcp_admin[name] = {"enabled": enabled, "settings": settings}
+            await self._emit(RoomMcpAdminToggledEvent(
+                **self._event_fields(user_id), name=name, enabled=enabled, settings=settings,
+            ))
 
     async def close_room(self, user_id: str, reason: Optional[str] = None) -> None:
         async with self._lock:
@@ -1185,6 +1215,14 @@ class RoomActor:
                 self.invites.pop(cast(RoomInviteRevokedEvent, event).email, None)
             elif t == EventType.ROOM_PASSWORD_SET:
                 self.password_hash = cast(RoomPasswordSetEvent, event).password_hash
+            elif t == EventType.ROOM_MCP_SERVER_SAVED:
+                e = cast(RoomMcpServerSavedEvent, event)
+                self.mcp_servers[e.name] = {"url": e.url, "headers": e.headers, "tools": e.tools, "settings": e.settings}
+            elif t == EventType.ROOM_MCP_SERVER_REMOVED:
+                self.mcp_servers.pop(cast(RoomMcpServerRemovedEvent, event).name, None)
+            elif t == EventType.ROOM_MCP_ADMIN_TOGGLED:
+                e = cast(RoomMcpAdminToggledEvent, event)
+                self.mcp_admin[e.name] = {"enabled": e.enabled, "settings": e.settings}
             elif t == EventType.ROOM_CLOSED:
                 self.closed = True
 

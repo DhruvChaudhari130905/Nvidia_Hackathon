@@ -179,6 +179,8 @@ export type EventType =
   | 'member.joined'
   | 'member.role_changed'
   | 'sharing.changed'
+  | 'mcp.changed'
+  | 'mcp.unavailable'
   | 'message.posted'
   | 'message.labeled'
   | 'plan.drafted'
