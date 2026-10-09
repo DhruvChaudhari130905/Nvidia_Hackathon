@@ -1041,3 +1041,56 @@ def test_kickoff_is_recorded_and_not_run_twice(client, monkeypatch):
     assert r.status_code == 409 and r.json()["detail"] == "Planning is already running"
     with client.websocket_connect(f"/rooms/{rid}/ws?since=0&token={token('alice')}") as ws:
         assert '"kickoff.requested"' in ws.receive_text()
+
+
+# --- Skills ------------------------------------------------------------------
+
+@pytest.fixture
+def skills_dir(tmp_path, monkeypatch):
+    import mux.skills.library as skills_library
+    root = tmp_path / "skills"
+
+    def add(folder: str, description: str, body: str = "Do it well.") -> None:
+        (root / folder).mkdir(parents=True)
+        (root / folder / "SKILL.md").write_text(f"---\nname: {folder}\ndescription: {description}\n---\n{body}")
+
+    add("frontend-design", "Distinctive UIs")
+    add("subagent-dev", "Delegate", "Dispatch a subagent with the Task tool.")
+    lib = skills_library.SkillLibrary([(root, "server")])
+    monkeypatch.setattr(skills_library, "library", lambda: lib)
+    return add
+
+
+def test_owner_switches_skills_on(client, skills_dir):
+    rid = create_room(client)
+    listed = client.get(f"/rooms/{rid}/skills", headers=auth("alice")).json()
+    assert [s["name"] for s in listed] == ["frontend-design", "subagent-dev"] and not any(s["enabled"] for s in listed)
+    assert listed[1]["compatible"] is False and listed[1]["issues"] == ["uses Claude Code sub-agents"]
+    r = client.put(f"/rooms/{rid}/skills", json={"enabled": ["frontend-design"]}, headers=auth("alice"))
+    assert r.status_code == 200 and [s["name"] for s in r.json() if s["enabled"]] == ["frontend-design"]
+    client.post(f"/rooms/{rid}/members", json={"user_id": "bob", "role": "viewer"}, headers=auth("alice"))
+    assert client.get(f"/rooms/{rid}/skills", headers=auth("bob")).status_code == 200
+    assert client.put(f"/rooms/{rid}/skills", json={"enabled": []}, headers=auth("bob")).status_code == 403
+    assert client.put(f"/rooms/{rid}/skills", json={"enabled": ["nope"]}, headers=auth("alice")).status_code == 400
+
+
+def test_skills_reload_and_removed_skills_show_as_missing(client, skills_dir, tmp_path):
+    import shutil
+    rid = create_room(client)
+    client.put(f"/rooms/{rid}/skills", json={"enabled": ["frontend-design"]}, headers=auth("alice"))
+    skills_dir("tdd", "Tests first")
+    shutil.rmtree(tmp_path / "skills" / "frontend-design")
+    listed = client.post(f"/rooms/{rid}/skills/reload", headers=auth("alice")).json()
+    by_name = {s["name"]: s for s in listed}
+    assert "tdd" in by_name and by_name["frontend-design"]["missing"] is True and by_name["frontend-design"]["enabled"] is True
+    registry_call(client, room_registry.get_registry().stop_room, rid)
+    assert any(s["enabled"] for s in client.get(f"/rooms/{rid}/skills", headers=auth("alice")).json())
+
+
+def test_skill_limit(client, skills_dir):
+    for i in range(30):
+        skills_dir(f"s{i}", "x")
+    rid = create_room(client)
+    client.post(f"/rooms/{rid}/skills/reload", headers=auth("alice"))
+    names = [f"s{i}" for i in range(30)] + ["frontend-design"]
+    assert client.put(f"/rooms/{rid}/skills", json={"enabled": names}, headers=auth("alice")).status_code == 400
