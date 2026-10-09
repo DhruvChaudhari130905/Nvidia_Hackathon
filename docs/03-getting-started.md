@@ -98,6 +98,14 @@ By default every room's agents use the server's Token Factory settings (`TOKEN_F
 
 If the model fails during work (wrong key, quota, rate limit), the feed says so (at most once a minute). A server with no Token Factory settings still runs agents in rooms that have their own key; other rooms have their agents off.
 
+## 🧩 Skills
+
+Skills are guidance packs in Claude Code's format: a folder with a `SKILL.md` (a `name` and `description` header, then instructions) and any supporting files. Put skill folders in `mux/server/skills/` (or wherever `SKILLS_PATH` points). Skills you already have in Claude Code live under `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/`; copy a skill's folder across. Check each skill's license first.
+
+In a room, the owner opens **Tools** and switches skills on (they're off by default); **Reload** picks up folders added since the server started. The coder sees each enabled skill's name and description and loads the full instructions with `use_skill` when a task needs it; the feed shows "Using skill: …".
+
+Skills written for Claude Code's own tools (task lists, sub-agents, plan mode, git worktrees, the Bash tool) are marked **needs Claude Code**: MUX's coder can't do those parts. Guidance skills (design, testing practice, code review) work fully.
+
 ## ⚡ Shortcut: the Makefile
 
 From the repo root, `make help` lists everything. The usual flow:
