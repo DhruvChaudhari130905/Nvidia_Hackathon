@@ -32,6 +32,7 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
   }
   if (roomMatch && roomMatch[2] === '/ai') return { source: 'server', provider: null, base_url: null, models: null, has_key: false } as T;
   if (roomMatch && roomMatch[2]?.startsWith('/mcp')) return { admin: [], servers: [] } as T;
+  if (roomMatch && roomMatch[2] === '/kickoff') return { accepted: true } as T;
   if (path === '/github/connect' || path.endsWith('/export')) return { url: 'https://github.com' } as T;
   return { accepted: true, seq: nextDemoSeq(), version: (body.base_version ?? 0) + 1 } as T;
 }
@@ -131,6 +132,9 @@ export const api = {
     }),
   approvePlan: (roomId: string) =>
     fetchWithAuth<{ accepted: true; seq: number }>(`/rooms/${roomId}/plan/approve`, { method: 'POST' }),
+  // Owner only: "Plan it with me" (read the project, ask the team, draft a plan). 409 without an AI model
+  kickoff: (roomId: string) =>
+    fetchWithAuth<{ accepted: true }>(`/rooms/${roomId}/kickoff`, { method: 'POST' }),
 
   // Conflicts
   voteConflict: (roomId: string, conflictId: string, option: string) =>

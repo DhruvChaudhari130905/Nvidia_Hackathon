@@ -259,6 +259,20 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
       } as Message];
       break;
     }
+    case 'kickoff.step': {
+      const { text } = (event as unknown as { payload: { text: string } }).payload;
+      newState.messages = [...newState.messages, {
+        id: `kickoff-${event.seq}`,
+        room_id: newState.room.id,
+        user_id: 'coordinator',
+        text,
+        created_at: event.ts,
+        user: { id: 'coordinator', email: '', name: 'Coordinator', initials: 'CO', color: 'hsl(190, 70%, 60%)' },
+      } as Message];
+      break;
+    }
+    case 'kickoff.requested':
+      break;
     case 'ai.changed':
       // The AI model dialog loads the settings when it opens
       break;

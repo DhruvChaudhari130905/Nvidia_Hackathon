@@ -12,6 +12,7 @@ export interface ImportResult {
   name: string; // project name (folder or zip name)
   files: ImportedFile[];
   skipped: { ignored: number; binary: number; tooLarge: number; overLimit: number; secrets: number };
+  kickoff?: boolean; // "Plan it with me": the room page starts it once the files are saved
 }
 
 const IGNORED_DIRS = new Set([

@@ -86,3 +86,22 @@ export function setPanelOpen(panel: RoomPanel, open: boolean) {
     // storage unavailable; the layout just won't persist
   }
 }
+
+// "Plan it with me" in the create and import dialogs: on unless this browser turned it off
+const PLAN_WITH_ME_KEY = 'mux.planWithMe';
+
+export function getPlanWithMe(): boolean {
+  try {
+    return localStorage.getItem(PLAN_WITH_ME_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+export function setPlanWithMe(on: boolean): void {
+  try {
+    localStorage.setItem(PLAN_WITH_ME_KEY, on ? 'on' : 'off');
+  } catch {
+    // private window: the default (on) applies next time
+  }
+}

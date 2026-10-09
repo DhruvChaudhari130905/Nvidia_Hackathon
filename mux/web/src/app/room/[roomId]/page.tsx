@@ -228,11 +228,16 @@ export default function RoomPage() {
       void saveRoomFiles(roomId, initial);
       // The agents work from the server's copy, so the project goes there too (it used to stay in this browser
       // only, and the coordinator and coder never saw it). No base version: it replaces the empty room's files.
-      imported.files.forEach(f =>
+      const saves = imported.files.map(f =>
         api.saveFile(roomId, f.path, f.content, null)
           .then(({ version }) => writeLocal([{ path: f.path, content: f.content, version }]))
           .catch(error => console.error(`Could not save ${f.path} to the room:`, error)),
       );
+      // "Plan it with me": start once the agents can read every file
+      if (imported.kickoff) {
+        void Promise.allSettled(saves).then(() => api.kickoff(roomId))
+          .catch(error => console.error("Planning didn't start:", error));
+      }
     }
   };
   roomFns.current = { loadInitialFiles, pullServerFiles };
@@ -401,6 +406,14 @@ export default function RoomPage() {
     }
   }, [roomId]);
 
+  const handleKickoff = useCallback(async () => {
+    try {
+      await api.kickoff(roomId);
+    } catch (error) {
+      alert(error instanceof Error ? `Planning didn't start: ${error.message}` : "Planning didn't start");
+    }
+  }, [roomId]);
+
   const handlePlanApprove = useCallback(async () => {
     if (!roomId) return;
     try {
@@ -545,6 +558,7 @@ export default function RoomPage() {
             onAnswer={handleAnswer}
             onPlanUpdate={handlePlanUpdate}
             onPlanApprove={handlePlanApprove}
+            onKickoff={handleKickoff}
           />
         </main>
         <NotificationToasts />

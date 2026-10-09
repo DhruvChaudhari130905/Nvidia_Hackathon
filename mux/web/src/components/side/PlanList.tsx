@@ -11,6 +11,7 @@ interface PlanListProps {
   canApprove: boolean;
   onUpdate: (items: PlanItem[]) => void;
   onApprove: () => void;
+  onKickoff?: () => void;
 }
 
 const statusStyles: Record<string, string> = {
@@ -33,7 +34,7 @@ const statusLabels: Record<string, string> = {
 const isChangeable = (item: PlanItem) => item.status !== 'done' && item.status !== 'doing';
 
 // Each edit sends the whole plan, built from the latest plan the room has seen
-export function PlanList({ plan, canEdit, canApprove, onUpdate, onApprove }: PlanListProps) {
+export function PlanList({ plan, canEdit, canApprove, onUpdate, onApprove, onKickoff }: PlanListProps) {
   const [newTitle, setNewTitle] = useState('');
   const hasDrafts = plan.some(p => p.status === 'draft');
   const done = plan.filter(p => p.status === 'done').length;
@@ -116,7 +117,12 @@ export function PlanList({ plan, canEdit, canApprove, onUpdate, onApprove }: Pla
       })}
 
       {plan.length === 0 && (
-        <p className="text-[12px] text-[var(--faint)]">Tell the agent what to build in the chat. Each request shows up here as a task.</p>
+        <div className="space-y-2">
+          <p className="text-[12px] text-[var(--faint)]">Tell the agent what to build in the chat. Each request shows up here as a task.</p>
+          {canApprove && onKickoff && (
+            <button className="btn w-full" onClick={onKickoff} type="button">Plan it with me</button>
+          )}
+        </div>
       )}
 
       {canEdit && (

@@ -16,6 +16,7 @@ interface SidePanelProps {
   onAnswer: (questionId: string, answer: string) => void;
   onPlanUpdate: (items: PlanItem[]) => void;
   onPlanApprove: () => void;
+  onKickoff: () => void;
   // Hidden (still mounted) while collapsed to its rail
   collapsed?: boolean;
   onCollapse?: () => void;
@@ -30,6 +31,7 @@ export function SidePanel({
   onAnswer,
   onPlanUpdate,
   onPlanApprove,
+  onKickoff,
   collapsed,
   onCollapse,
 }: SidePanelProps) {
@@ -75,6 +77,7 @@ export function SidePanel({
             canApprove={currentUserRole === 'owner'}
             onUpdate={onPlanUpdate}
             onApprove={onPlanApprove}
+            onKickoff={onKickoff}
           />
         </div>
       </div>

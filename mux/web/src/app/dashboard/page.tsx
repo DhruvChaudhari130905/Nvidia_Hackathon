@@ -9,7 +9,7 @@ import { getUser, loginHref } from '@/lib/supabase';
 import { api, ApiError } from '@/lib/api';
 import { STARTER_TEMPLATES } from '@/lib/templates';
 import { describeSkipped, importFolder, importFromZip, pickZip, stashImport, type ImportResult } from '@/lib/projectImport';
-import { colorForId, getDefaultRole } from '@/lib/preferences';
+import { colorForId, getDefaultRole, getPlanWithMe, setPlanWithMe } from '@/lib/preferences';
 import { isDemoMode, isSampleRoom } from '@/lib/demo';
 import { AppShell, BTN_GHOST, BTN_PRIMARY, CARD, CountUp, CtaCard, FilterChip, IconTile, PageHero, Reveal, Spotlight, useTicker } from '@/components/shell';
 import type { Room, User } from '@/types';
@@ -59,6 +59,8 @@ export default function DashboardPage() {
   const [newRoomDesc, setNewRoomDesc] = useState('');
   const [newRoomRole, setNewRoomRole] = useState<'pm' | 'design' | 'eng'>('pm');
   const [newRoomPassword, setNewRoomPassword] = useState('');
+  const [planWithMe, setPlanWithMeState] = useState(true);
+  const choosePlanWithMe = (on: boolean) => { setPlanWithMeState(on); setPlanWithMe(on); };
   // Room id to prefill when the join dialog is open (null: closed)
   const [joinRoomId, setJoinRoomId] = useState<string | null>(null);
 
@@ -81,6 +83,7 @@ export default function DashboardPage() {
         };
         setUser(userData);
         setNewRoomRole(getDefaultRole());
+        setPlanWithMeState(getPlanWithMe());
 
         const roomsData = await api.listRooms();
         setRooms([...roomsData].sort((a, b) => lastActivity(b) - lastActivity(a)));
@@ -149,7 +152,7 @@ export default function DashboardPage() {
         return;
       }
       const room = await api.createRoom(`Imported project: ${result.name}`, getDefaultRole());
-      stashImport(room.id, result);
+      stashImport(room.id, { ...result, kickoff: getPlanWithMe() });
       router.push(`/room/${room.id}`);
     } catch (error) {
       console.error('Import failed:', error);
@@ -178,6 +181,9 @@ export default function DashboardPage() {
     setCreating(true);
     try {
       const room = await api.createRoom(newRoomDesc.trim(), newRoomRole, newRoomPassword || undefined);
+      if (planWithMe) {
+        api.kickoff(room.id).catch(error => alert(error instanceof Error ? `Planning didn't start: ${error.message}` : "Planning didn't start"));
+      }
       setRooms([room, ...rooms]);
       setNewRoomDesc('');
       setNewRoomPassword('');
@@ -286,6 +292,10 @@ export default function DashboardPage() {
             </div>
           )}
         </div>
+        <label className="flex items-center gap-1.5 text-label-md text-on-surface-variant" title="After creating or importing, read the project, ask a few questions and draft a plan">
+          <input type="checkbox" checked={planWithMe} onChange={e => choosePlanWithMe(e.target.checked)} />
+          Plan it with me
+        </label>
         <Link href="/sandbox" className="flex items-center gap-1.5 px-space-sm text-label-md text-primary hover:underline">
           Browse templates <ArrowRight className="h-3.5 w-3.5" />
         </Link>
@@ -474,6 +484,8 @@ export default function DashboardPage() {
           onDescriptionChange={setNewRoomDesc}
           onRoleChange={setNewRoomRole}
           onPasswordChange={setNewRoomPassword}
+          planWithMe={planWithMe}
+          onPlanWithMeChange={choosePlanWithMe}
           onCancel={() => { setShowCreate(false); setNewRoomDesc(''); setNewRoomPassword(''); }}
           onCreate={handleCreateRoom}
         />
@@ -693,6 +705,8 @@ interface CreateRoomDialogProps {
   onDescriptionChange: (value: string) => void;
   onRoleChange: (value: 'pm' | 'design' | 'eng') => void;
   onPasswordChange: (value: string) => void;
+  planWithMe: boolean;
+  onPlanWithMeChange: (on: boolean) => void;
   onCancel: () => void;
   onCreate: () => void;
 }
@@ -700,7 +714,7 @@ interface CreateRoomDialogProps {
 const FIELD_CLASS =
   'w-full rounded-md border border-surface-container-highest bg-bg px-3 py-2 text-body-md text-on-surface outline-none transition-colors focus:border-primary focus:shadow-[0_0_0_3px_rgba(6,182,212,0.15)]';
 
-function CreateRoomDialog({ description, role, password, creating, onDescriptionChange, onRoleChange, onPasswordChange, onCancel, onCreate }: CreateRoomDialogProps) {
+function CreateRoomDialog({ description, role, password, creating, onDescriptionChange, onRoleChange, onPasswordChange, planWithMe, onPlanWithMeChange, onCancel, onCreate }: CreateRoomDialogProps) {
   const fieldClass = FIELD_CLASS;
   // The server wants at least 4 characters; empty means no password
   const passwordTooShort = password.length > 0 && password.length < 4;
@@ -763,6 +777,10 @@ function CreateRoomDialog({ description, role, password, creating, onDescription
               {passwordTooShort ? 'Use at least 4 characters.' : 'You can set or change it later from Share.'}
             </p>
           </div>
+          <label className="flex items-start gap-2 text-body-sm text-on-surface-variant">
+            <input type="checkbox" className="mt-1" checked={planWithMe} onChange={e => onPlanWithMeChange(e.target.checked)} />
+            <span><span className="font-bold text-on-surface">Plan it with me</span> — the agents ask a few questions, then draft a plan for you to approve.</span>
+          </label>
           <div className="flex justify-end gap-space-sm border-t border-surface-container-highest pt-space-md">
             <button
               type="button"
