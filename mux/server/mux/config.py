@@ -44,5 +44,11 @@ class Settings(BaseSettings):
     # Where the web app runs; the GitHub connect flow returns the browser here
     web_app_url: str = "http://localhost:3000"
 
+    # MCP servers for the coder (mux.mcp). mcp_config_path: server-wide servers, relative to mux/server.
+    # mcp_encryption_key: Fernet key for room servers' header values. mcp_allow_private_urls: local dev only.
+    mcp_config_path: str = "mcp.json"
+    mcp_encryption_key: str = ""
+    mcp_allow_private_urls: bool = False
+
 
 settings = Settings()
