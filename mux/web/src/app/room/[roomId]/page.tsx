@@ -56,6 +56,8 @@ export default function RoomPage() {
   const [isRewound, setIsRewound] = useState(false);
   const [currentCheckpoint, setCurrentCheckpoint] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Set when the server won't let this user in (private room, no invite): shown instead of the room
+  const [accessError, setAccessError] = useState<string | null>(null);
 
   const socketRef = useRef<ReturnType<typeof getSocket> | null>(null);
 
@@ -117,6 +119,10 @@ export default function RoomPage() {
         };
         setCurrentUser(userData);
 
+        // Joining first is what lets invited people (their email), shared-link visitors and returning members in
+        setAccessError(null);
+        if (!isDemoMode()) await api.joinRoom(roomId, { user_name: userData.name });
+
         // Fetch room data
         const roomData = await api.getRoom(roomId);
         setRoom(roomData);
@@ -175,6 +181,10 @@ export default function RoomPage() {
           // A stale link (old bookmark or the header's last-room pill): forget it and go back quietly
           clearLastRoom(roomId);
           router.replace('/dashboard');
+          return;
+        }
+        if (error instanceof ApiError && (error.status === 403 || error.status === 429)) {
+          setAccessError(error.message);
           return;
         }
         console.error('Failed to load room:', error);
@@ -311,9 +321,15 @@ export default function RoomPage() {
 
   const handleUploadFiles = useCallback((uploaded: { path: string; content: string }[]) => {
     if (!uploaded.length) return;
-    writeLocal(uploaded.map(f => ({ ...f, version: 1 })));
+    writeLocal(uploaded.map(f => ({ ...f, version: (syncedVersions.current.versions.get(f.path) ?? 0) + 1 })));
     setActiveFile(uploaded[uploaded.length - 1].path);
-    uploaded.forEach(f => api.saveFile(roomId, f.path, f.content, 0).catch(error => console.error('Failed to upload file:', error)));
+    // Uploads and imports replace files of the same name, so no base version (0 would mean "new file" and
+    // the server refuses it for every file that already exists). Keep the version the server assigns.
+    uploaded.forEach(f =>
+      api.saveFile(roomId, f.path, f.content, null)
+        .then(({ version }) => writeLocal([{ ...f, version }]))
+        .catch(error => console.error(`Could not save ${f.path} to the room:`, error)),
+    );
   }, [roomId, writeLocal]);
 
   const handleDeleteFile = useCallback((path: string, isDirectory: boolean) => {
@@ -418,6 +434,24 @@ export default function RoomPage() {
     setIsRewound(false);
     setCurrentCheckpoint(null);
   }, []);
+
+  if (accessError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[var(--bg)] p-4">
+        <div className="w-full max-w-sm rounded-xl border border-[var(--line)] bg-[var(--panel)] p-6 text-center">
+          <h1 className="mb-2 text-lg font-semibold">You don&apos;t have access to this room</h1>
+          <p className="mb-1 text-sm text-[var(--muted)]">{accessError}</p>
+          <p className="mb-5 text-sm text-[var(--muted)]">
+            Ask the owner to invite your email, or join from the dashboard with the room ID and password.
+          </p>
+          <p className="mb-5 font-mono text-xs text-[var(--muted)]">Room ID: {roomId}</p>
+          <button type="button" className="btn primary" onClick={() => router.push(`/dashboard?join=${encodeURIComponent(roomId)}`)}>
+            Join with a password
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (loading || !room || !state || !currentUser || !currentUserMembership) {
     return (

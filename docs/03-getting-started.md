@@ -38,14 +38,29 @@ cp .env.example .env.local
 | Variable | What it is |
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | Your Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key (auth only) |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key, auth only (`NEXT_PUBLIC_SUPABASE_ANON_KEY` also works) |
 | `NEXT_PUBLIC_API_URL` | Backend base URL, default `http://localhost:8000` |
 | `NEXT_PUBLIC_DEMO_MODE` | `true` to force demo mode (default `false`) |
 
 In Supabase, enable the Google and GitHub providers and add `http://localhost:3000/auth/callback` as a redirect URL.
 
-> [!WARNING]
-> With `make server` running, signed-in rooms load from the API: create rooms, chat, edit the plan, save files (version-checked) and watch changes live. The coordinator and coder aren't driven by the room yet, so nothing gets built automatically. See [Status & roadmap](07-status-and-roadmap.md).
+With `make server` running, signed-in rooms load from the API, and the coordinator and coder run in every room (they need the Token Factory settings in `mux/server/.env`).
+
+## 👥 Working on one room together
+
+Everyone in a room shares one live session. There are three ways in; the owner manages all of them from **Share** in the room's top bar:
+
+| Way in | Who sets it up | What the teammate does | Role they get |
+|---|---|---|---|
+| **Link** | Owner picks "Anyone with the link" and whether link joiners can steer or only watch | Opens the link (Copy or WhatsApp) and signs in | Editor or viewer, as chosen |
+| **Email invite** | Owner enters their email and a role | Clicks the link in the email, signs in with that email | The invited role, even in a private room |
+| **Room ID + password** | Owner sets a password (when creating the room, or in Share) | Dashboard > **Join room**, enters the Room ID and password | Editor |
+
+Invite emails are sent by Supabase, which needs `SUPABASE_SERVICE_ROLE_KEY` in `mux/server/.env` and the web app's `/auth/callback` in Supabase's Redirect URLs. If an email can't be sent (no key, or Supabase's hourly email limit), the invite is still saved: send the link yourself and it works the same once they sign in with that email. Supabase's built-in mailer only sends a few emails an hour; add your own SMTP server in Supabase for more.
+
+### Teammates on other computers
+
+`localhost` only works on your machine. For a quick session, `make tunnel` (needs `brew install cloudflared`) gives the web app and API public https addresses and prints the two restart commands and the Supabase redirect URL to add. For something permanent, deploy the web app and API and set `NEXT_PUBLIC_API_URL` and `WEB_APP_URL` to their addresses.
 
 ## ⚡ Shortcut: the Makefile
 

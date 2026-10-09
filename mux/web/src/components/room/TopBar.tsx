@@ -113,7 +113,7 @@ export function TopBar({
           </button>
         )}
       </div>
-      <ShareDialog isOpen={showShare} onClose={() => setShowShare(false)} room={room} />
+      <ShareDialog isOpen={showShare} onClose={() => setShowShare(false)} room={room} isOwner={isOwner} />
       <ExportDialog isOpen={showExport} onClose={() => setShowExport(false)} room={room} />
       <DeleteRoomDialog
         room={showDelete ? { id: room.id, title: room.title } : null}

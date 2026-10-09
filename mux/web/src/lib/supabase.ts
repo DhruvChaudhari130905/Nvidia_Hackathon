@@ -4,14 +4,14 @@ import { DEMO_AUTH_USER, isDemoMode, setDemoMode } from './demo';
 
 // Placeholders keep the build and dev server working before .env.local is filled in; auth calls fail until it is.
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'http://localhost:54321';
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-anon-key';
+// .env.example names the newer publishable key; older setups use the anon key. Either works.
+const configuredKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const supabaseAnonKey = configuredKey || 'placeholder-anon-key';
 
-export const isSupabaseConfigured = Boolean(
-  process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
+export const isSupabaseConfigured = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && configuredKey);
 
 if (!isSupabaseConfigured) {
-  console.warn('NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY are not set; copy .env.example to .env.local.');
+  console.warn('NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY are not set; copy .env.example to .env.local.');
 }
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {

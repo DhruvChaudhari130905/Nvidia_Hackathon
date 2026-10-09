@@ -39,6 +39,7 @@ from mux.events.models import (
     QuestionAskedEvent,
     RoomCreatedEvent,
     RoomJoinedEvent,
+    RoomPasswordSetEvent,
     RoomSharingUpdatedEvent,
     TaskFinishedEvent,
     TaskStartedEvent,
@@ -111,8 +112,12 @@ def _payload(event: BaseEvent) -> Optional[tuple[str, dict[str, Any]]]:
         return "member.joined", membership_view(room, e.user_id, e.role, e.domain_role, e.user_name)
     if t == EventType.ROOM_SHARING_UPDATED:
         e = cast(RoomSharingUpdatedEvent, event)
-        # A public room is viewable by anyone signed in, and joining it grants editor (api/rooms.py)
-        return "sharing.changed", {"link_access": "anyone" if e.public else "restricted", "link_permission": "editor"}
+        # A public room is viewable by anyone signed in, and joining it grants link_permission (api/rooms.py)
+        return "sharing.changed", {"link_access": "anyone" if e.public else "restricted", "link_permission": e.link_permission}
+    if t == EventType.ROOM_PASSWORD_SET:
+        # Only whether there is one: the hash stays on the server
+        return "sharing.changed", {"has_password": cast(RoomPasswordSetEvent, event).password_hash is not None}
+    # Invites (room_invite_*) aren't sent: the emails are for the owner only (GET /rooms/{id}/invites)
 
     if t == EventType.USER_JOINED:
         e = cast(UserJoinedEvent, event)

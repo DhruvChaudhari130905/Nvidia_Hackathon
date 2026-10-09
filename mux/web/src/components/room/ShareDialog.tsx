@@ -1,194 +1,290 @@
 'use client';
 
-import React, { useState } from 'react';
-import { X, Copy, Mail, Link, UserPlus, UserCheck, UserX } from 'lucide-react';
-import type { Room } from '@/types';
+import React, { useEffect, useState } from 'react';
+import { X, Copy, UserPlus, UserCheck, MessageCircle, Trash2, KeyRound, Mail } from 'lucide-react';
+import type { Invite, Room } from '@/types';
 import { api } from '@/lib/api';
 
 interface ShareDialogProps {
   isOpen: boolean;
   onClose: () => void;
   room: Room;
+  isOwner: boolean;
 }
 
-export function ShareDialog({ isOpen, onClose, room }: ShareDialogProps) {
-  const [linkAccess, setLinkAccess] = useState(room.link_access);
-  const [linkPermission, setLinkPermission] = useState<'editor' | 'viewer'>(room.link_permission === 'viewer' ? 'viewer' : 'editor');
-  const [inviteEmail, setInviteEmail] = useState('');
+type Role = 'editor' | 'viewer';
+
+// Feedback under a section: green when it worked, red when it didn't
+type Notice = { ok: boolean; text: string } | null;
+
+function NoticeLine({ notice }: { notice: Notice }) {
+  if (!notice) return null;
+  return <p className={`text-sm ${notice.ok ? 'text-[var(--ok)]' : 'text-[var(--conflict)]'}`}>{notice.text}</p>;
+}
+
+function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  const shareUrl = `${window.location.origin}/room/${room.id}`;
-
-  const handleCopyLink = async () => {
-    await navigator.clipboard.writeText(shareUrl);
+  const copy = async () => {
+    await navigator.clipboard.writeText(value);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+  return (
+    <button className="btn" onClick={copy} type="button" aria-label={label} title={label}>
+      {copied ? <UserCheck className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+    </button>
+  );
+}
 
-  const handleSaveSharing = async () => {
-    setSaving(true);
-    try {
-      await api.updateSharing(room.id, { link_access: linkAccess, link_permission: linkPermission });
-      onClose();
-    } catch (error) {
-      console.error('Failed to update sharing:', error);
-      alert('Failed to update sharing settings');
-    } finally {
-      setSaving(false);
-    }
-  };
+export function ShareDialog({ isOpen, onClose, room: initialRoom, isOwner }: ShareDialogProps) {
+  // Each save returns the updated room; keep it so reopening shows the current settings
+  const [room, setRoom] = useState(initialRoom);
+  const [invites, setInvites] = useState<Invite[]>([]);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<Role>('editor');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [linkNotice, setLinkNotice] = useState<Notice>(null);
+  const [inviteNotice, setInviteNotice] = useState<Notice>(null);
+  const [passwordNotice, setPasswordNotice] = useState<Notice>(null);
 
-  const handleInvite = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inviteEmail.trim()) return;
-    setSaving(true);
-    try {
-      await api.updateSharing(room.id, {
-        link_access: linkAccess,
-        link_permission: linkPermission,
-        invites: [inviteEmail],
-      });
-      setInviteEmail('');
-    } catch (error) {
-      console.error('Failed to invite:', error);
-      alert('Failed to send invite');
-    } finally {
-      setSaving(false);
-    }
-  };
+  useEffect(() => setRoom(initialRoom), [initialRoom]);
+
+  useEffect(() => {
+    if (!isOpen || !isOwner) return;
+    setLinkNotice(null);
+    setInviteNotice(null);
+    setPasswordNotice(null);
+    api.listInvites(room.id).then(setInvites).catch(error => console.error('Failed to load invites:', error));
+  }, [isOpen, isOwner, room.id]);
 
   if (!isOpen) return null;
 
+  const shareUrl = `${window.location.origin}/room/${room.id}`;
+  const linkPermission: Role = room.link_permission === 'viewer' ? 'viewer' : 'editor';
+  const whatsappText = `Join my MUX room "${room.title}": ${shareUrl}\nRoom ID: ${room.id}`;
+
+  const run = async (action: () => Promise<void>, onError: (message: string) => void) => {
+    setBusy(true);
+    try {
+      await action();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveSharing = (link_access: Room['link_access'], link_permission: Role) =>
+    run(async () => {
+      setRoom(await api.updateSharing(room.id, { link_access, link_permission }));
+      setLinkNotice({ ok: true, text: 'Saved' });
+    }, text => setLinkNotice({ ok: false, text }));
+
+  const sendInvite = (e: React.FormEvent) => {
+    e.preventDefault();
+    const email = inviteEmail.trim();
+    if (!email) return;
+    run(async () => {
+      const result = await api.createInvite(room.id, email, inviteRole);
+      setInvites(prev => [...prev.filter(i => i.email !== result.email), { email: result.email, role: result.role }]);
+      setInviteEmail('');
+      setInviteNotice(result.email_sent
+        ? { ok: true, text: `Invite emailed to ${result.email}.` }
+        : { ok: false, text: `Invite saved, but the email wasn't sent: ${result.email_error ?? 'unknown error'}. Copy the link and send it yourself.` });
+    }, text => setInviteNotice({ ok: false, text }));
+  };
+
+  const removeInvite = (email: string) =>
+    run(async () => {
+      await api.revokeInvite(room.id, email);
+      setInvites(prev => prev.filter(i => i.email !== email));
+    }, text => setInviteNotice({ ok: false, text }));
+
+  const savePassword = (value: string | null) =>
+    run(async () => {
+      setRoom(await api.setRoomPassword(room.id, value));
+      setPassword('');
+      setPasswordNotice({ ok: true, text: value ? 'Password saved. Share it with the Room ID.' : 'Password removed.' });
+    }, text => setPasswordNotice({ ok: false, text }));
+
+  const section = 'space-y-3 mb-4 p-4 bg-[var(--raised)] rounded-lg';
+  const field = 'bg-[var(--bg)] border border-[var(--line)] rounded px-3 py-2 text-sm';
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div className="bg-[var(--panel)] rounded-xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-semibold">Share &ldquo;{room.title}&rdquo;</h2>
-          <button className="btn p-2" onClick={onClose} type="button">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div
+        className="bg-[var(--panel)] rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="share-title"
+      >
+        <div className="flex items-center justify-between mb-5">
+          <h2 id="share-title" className="text-lg font-semibold">Share &ldquo;{room.title}&rdquo;</h2>
+          <button className="btn p-2" onClick={onClose} type="button" aria-label="Close">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Link sharing */}
-        <div className="space-y-4 mb-6 p-4 bg-[var(--raised)] rounded-lg">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="font-medium">Link access</p>
-              <p className="text-sm text-[var(--muted)]">Control who can access via link</p>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <label className="flex items-center gap-3 p-3 bg-[var(--bg)] rounded-lg border border-[var(--line)] cursor-pointer">
-              <input
-                type="radio"
-                name="linkAccess"
-                value="restricted"
-                checked={linkAccess === 'restricted'}
-                onChange={e => setLinkAccess(e.target.value as 'restricted' | 'anyone')}
-                className="accent-[var(--coord)]"
-              />
-              <div>
-                <p className="font-medium">Restricted</p>
-                <p className="text-sm text-[var(--muted)]">Only invited people can access</p>
-              </div>
-            </label>
-            <label className="flex items-center gap-3 p-3 bg-[var(--bg)] rounded-lg border border-[var(--line)] cursor-pointer">
-              <input
-                type="radio"
-                name="linkAccess"
-                value="anyone"
-                checked={linkAccess === 'anyone'}
-                onChange={e => setLinkAccess(e.target.value as 'restricted' | 'anyone')}
-                className="accent-[var(--coord)]"
-              />
-              <div>
-                <p className="font-medium">Anyone with the link</p>
-                <p className="text-sm text-[var(--muted)]">Public link access</p>
-              </div>
-            </label>
-          </div>
-
-          {linkAccess === 'anyone' && (
-            <div className="space-y-2 pt-2 border-t border-[var(--line)]">
-              <p className="text-sm font-medium">Link permission</p>
-              <label className="flex items-center gap-3 p-3 bg-[var(--bg)] rounded-lg border border-[var(--line)] cursor-pointer">
-                <input
-                  type="radio"
-                  name="linkPermission"
-                  value="editor"
-                  checked={linkPermission === 'editor'}
-                  onChange={e => setLinkPermission(e.target.value as 'editor' | 'viewer')}
-                  className="accent-[var(--coord)]"
-                />
-                <div>
-                  <p className="font-medium">Editor</p>
-                  <p className="text-sm text-[var(--muted)]">Can steer, vote, edit code</p>
-                </div>
-              </label>
-              <label className="flex items-center gap-3 p-3 bg-[var(--bg)] rounded-lg border border-[var(--line)] cursor-pointer">
-                <input
-                  type="radio"
-                  name="linkPermission"
-                  value="viewer"
-                  checked={linkPermission === 'viewer'}
-                  onChange={e => setLinkPermission(e.target.value as 'editor' | 'viewer')}
-                  className="accent-[var(--coord)]"
-                />
-                <div>
-                  <p className="font-medium">Viewer</p>
-                  <p className="text-sm text-[var(--muted)]">Read-only access</p>
-                </div>
-              </label>
-            </div>
-          )}
-
-          <div className="flex items-center gap-2 pt-2 border-t border-[var(--line)]">
-            <input
-              type="text"
-              value={shareUrl}
-              readOnly
-              className="flex-1 bg-[var(--bg)] border border-[var(--line)] rounded px-3 py-2 text-sm font-mono"
-            />
-            <button
+        {/* Link and room id: anyone in the room can pass these on */}
+        <div className={section}>
+          <p className="font-medium">Send the link</p>
+          <div className="flex items-center gap-2">
+            <input type="text" value={shareUrl} readOnly className={`flex-1 min-w-0 font-mono ${field}`} aria-label="Room link" />
+            <CopyButton value={shareUrl} label="Copy link" />
+            <a
               className="btn"
-              onClick={handleCopyLink}
-              type="button"
+              href={`https://wa.me/?text=${encodeURIComponent(whatsappText)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Share on WhatsApp"
+              title="Share on WhatsApp"
             >
-              {copied ? <UserCheck className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-            </button>
+              <MessageCircle className="w-4 h-4" />
+            </a>
           </div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-[var(--muted)]">Room ID</span>
+            <code className="flex-1 min-w-0 truncate font-mono text-sm">{room.id}</code>
+            <CopyButton value={room.id} label="Copy room ID" />
+          </div>
+          {!isOwner && (
+            <p className="text-sm text-[var(--muted)]">Only the owner can change who can join.</p>
+          )}
         </div>
 
-        {/* Invite by email */}
-        <form onSubmit={handleInvite} className="space-y-4">
-          <h3 className="font-medium">Invite by email</h3>
-          <div className="flex gap-2">
-            <input
-              type="email"
-              value={inviteEmail}
-              onChange={e => setInviteEmail(e.target.value)}
-              placeholder="teammate@example.com"
-              className="flex-1 bg-[var(--bg)] border border-[var(--line)] rounded px-3 py-2"
-            />
-            <select
-              value={linkPermission}
-              onChange={e => setLinkPermission(e.target.value as 'editor' | 'viewer')}
-              className="bg-[var(--bg)] border border-[var(--line)] rounded px-3 py-2"
+        {isOwner && (
+          <>
+            {/* Link access */}
+            <div className={section}>
+              <div>
+                <p className="font-medium">Who can join with the link</p>
+                <p className="text-sm text-[var(--muted)]">Invited people and anyone with the password can always join.</p>
+              </div>
+              {(['restricted', 'anyone'] as const).map(access => (
+                <label key={access} className="flex items-center gap-3 p-3 bg-[var(--bg)] rounded-lg border border-[var(--line)] cursor-pointer">
+                  <input
+                    type="radio"
+                    name="linkAccess"
+                    checked={room.link_access === access}
+                    onChange={() => saveSharing(access, linkPermission)}
+                    disabled={busy}
+                    className="accent-[var(--coord)]"
+                  />
+                  <div>
+                    <p className="font-medium">{access === 'restricted' ? 'Only invited people' : 'Anyone with the link'}</p>
+                    <p className="text-sm text-[var(--muted)]">
+                      {access === 'restricted' ? 'The link alone doesn’t let anyone in' : 'Anyone signed in who opens it joins'}
+                    </p>
+                  </div>
+                </label>
+              ))}
+              {room.link_access === 'anyone' && (
+                <label className="flex items-center justify-between gap-3 text-sm">
+                  <span>People who join with the link can</span>
+                  <select
+                    value={linkPermission}
+                    onChange={e => saveSharing('anyone', e.target.value as Role)}
+                    disabled={busy}
+                    className={field}
+                  >
+                    <option value="editor">Steer and edit</option>
+                    <option value="viewer">Only watch</option>
+                  </select>
+                </label>
+              )}
+              <NoticeLine notice={linkNotice} />
+            </div>
+
+            {/* Email invites */}
+            <form onSubmit={sendInvite} className={section}>
+              <p className="font-medium flex items-center gap-2"><Mail className="w-4 h-4" /> Invite by email</p>
+              <div className="flex gap-2">
+                <input
+                  type="email"
+                  value={inviteEmail}
+                  onChange={e => setInviteEmail(e.target.value)}
+                  placeholder="teammate@example.com"
+                  className={`flex-1 min-w-0 ${field}`}
+                  aria-label="Email to invite"
+                />
+                <select value={inviteRole} onChange={e => setInviteRole(e.target.value as Role)} className={field} aria-label="Role">
+                  <option value="editor">Editor</option>
+                  <option value="viewer">Viewer</option>
+                </select>
+                <button type="submit" className="btn primary" disabled={busy || !inviteEmail.trim()} aria-label="Send invite" title="Send invite">
+                  <UserPlus className="w-4 h-4" />
+                </button>
+              </div>
+              <NoticeLine notice={inviteNotice} />
+              {invites.length > 0 && (
+                <div className="space-y-1 pt-2 border-t border-[var(--line)]">
+                  <p className="text-sm text-[var(--muted)]">Waiting to join</p>
+                  {invites.map(invite => (
+                    <div key={invite.email} className="flex items-center justify-between gap-2 text-sm">
+                      <span className="truncate">{invite.email}</span>
+                      <span className="flex items-center gap-2">
+                        <span className="text-[var(--muted)] capitalize">{invite.role}</span>
+                        <button
+                          type="button"
+                          className="btn p-1"
+                          onClick={() => removeInvite(invite.email)}
+                          disabled={busy}
+                          aria-label={`Remove invite for ${invite.email}`}
+                          title="Remove invite"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </form>
+
+            {/* Room password */}
+            <form
+              onSubmit={e => { e.preventDefault(); if (password) savePassword(password); }}
+              className={section}
             >
-              <option value="editor">Editor</option>
-              <option value="viewer">Viewer</option>
-            </select>
-            <button type="submit" className="btn primary" disabled={saving || !inviteEmail}>
-              <UserPlus className="w-4 h-4" />
-            </button>
-          </div>
-        </form>
+              <div>
+                <p className="font-medium flex items-center gap-2"><KeyRound className="w-4 h-4" /> Room password</p>
+                <p className="text-sm text-[var(--muted)]">
+                  {room.has_password
+                    ? 'On: anyone with the Room ID and password can join as an editor.'
+                    : 'Off. Set one so people can join from the dashboard with the Room ID and password.'}
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder={room.has_password ? 'New password' : 'At least 4 characters'}
+                  minLength={4}
+                  maxLength={128}
+                  autoComplete="new-password"
+                  className={`flex-1 min-w-0 ${field}`}
+                  aria-label="Room password"
+                />
+                <button type="submit" className="btn primary" disabled={busy || password.length < 4}>
+                  {room.has_password ? 'Change' : 'Set'}
+                </button>
+                {room.has_password && (
+                  <button type="button" className="btn" onClick={() => savePassword(null)} disabled={busy}>
+                    Remove
+                  </button>
+                )}
+              </div>
+              <NoticeLine notice={passwordNotice} />
+            </form>
+          </>
+        )}
 
         {/* Current members */}
-        <div className="mt-6 pt-4 border-t border-[var(--line)]">
-          <h3 className="font-medium mb-3">Current members</h3>
+        <div className="pt-2">
+          <h3 className="font-medium mb-3">In this room</h3>
           <div className="space-y-2 max-h-40 overflow-y-auto">
             {room.members.map(member => (
               <div key={member.user_id} className="flex items-center justify-between p-2 bg-[var(--raised)] rounded">
@@ -207,13 +303,8 @@ export function ShareDialog({ isOpen, onClose, room }: ShareDialogProps) {
           </div>
         </div>
 
-        <div className="flex justify-end gap-2 mt-6">
-          <button className="btn" onClick={onClose} type="button" disabled={saving}>
-            Cancel
-          </button>
-          <button className="btn primary" onClick={handleSaveSharing} type="button" disabled={saving}>
-            {saving ? 'Saving…' : 'Save'}
-          </button>
+        <div className="flex justify-end mt-5">
+          <button className="btn" onClick={onClose} type="button">Done</button>
         </div>
       </div>
     </div>

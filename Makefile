@@ -5,7 +5,7 @@ SERVER := mux/server
 WEB := mux/web
 VENV := $(SERVER)/.venv
 
-.PHONY: help setup setup-server setup-web demo web server db-up db-down test test-server typecheck-server check-web check
+.PHONY: help setup setup-server setup-web demo web server tunnel db-up db-down test test-server typecheck-server check-web check
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -28,6 +28,9 @@ web: ## Run the web app against the backend on :3000
 
 server: ## Run the API with reload on :8000
 	cd $(SERVER) && .venv/bin/uvicorn mux.main:app --reload --reload-dir mux --port 8000
+
+tunnel: ## Public URLs for the web app and API so teammates on other computers can join (needs cloudflared)
+	@./scripts/tunnel.sh
 
 db-up: ## Start the local Postgres (port 5433) used by the DB tests
 	cd $(SERVER) && docker compose up -d --wait

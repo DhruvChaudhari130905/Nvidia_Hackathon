@@ -3,10 +3,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { DoorOpen, Trash2, Plus, FolderInput, FolderOpen, FileArchive, Timer, Terminal, ArrowRight, Activity, Zap, PlusCircle, X, RefreshCw, Search, Crown, Users, Sparkles } from 'lucide-react';
+import { DoorOpen, Trash2, Plus, FolderInput, FolderOpen, FileArchive, Timer, Terminal, ArrowRight, Activity, Zap, PlusCircle, X, RefreshCw, Search, Crown, Users, Sparkles, LogIn } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { getUser, loginHref } from '@/lib/supabase';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import { STARTER_TEMPLATES } from '@/lib/templates';
 import { describeSkipped, importFolder, importFromZip, pickZip, stashImport, type ImportResult } from '@/lib/projectImport';
 import { colorForId, getDefaultRole } from '@/lib/preferences';
@@ -58,6 +58,9 @@ export default function DashboardPage() {
   const [creating, setCreating] = useState(false);
   const [newRoomDesc, setNewRoomDesc] = useState('');
   const [newRoomRole, setNewRoomRole] = useState<'pm' | 'design' | 'eng'>('pm');
+  const [newRoomPassword, setNewRoomPassword] = useState('');
+  // Room id to prefill when the join dialog is open (null: closed)
+  const [joinRoomId, setJoinRoomId] = useState<string | null>(null);
 
   useEffect(() => {
     const loadData = async () => {
@@ -88,6 +91,7 @@ export default function DashboardPage() {
         if (template) setNewRoomDesc(template.prompt);
         if (template || params.get('new')) setShowCreate(true);
         else if (params.get('export')) setShowExportPicker(true);
+        else if (params.has('join')) setJoinRoomId(params.get('join') ?? '');
       } catch (error) {
         console.error('Failed to load dashboard:', error);
       } finally {
@@ -173,9 +177,10 @@ export default function DashboardPage() {
     if (!newRoomDesc.trim()) return;
     setCreating(true);
     try {
-      const room = await api.createRoom(newRoomDesc.trim(), newRoomRole);
+      const room = await api.createRoom(newRoomDesc.trim(), newRoomRole, newRoomPassword || undefined);
       setRooms([room, ...rooms]);
       setNewRoomDesc('');
+      setNewRoomPassword('');
       router.push(`/room/${room.id}`);
     } catch (error) {
       console.error('Failed to create room:', error);
@@ -254,6 +259,9 @@ export default function DashboardPage() {
       <div className="flex flex-wrap items-center gap-space-sm">
         <button type="button" onClick={() => openCreate()} className={`group ${BTN_PRIMARY}`}>
           <Plus className="h-4 w-4 transition-transform duration-300 group-hover:rotate-90" /> New room
+        </button>
+        <button type="button" onClick={() => setJoinRoomId('')} className={BTN_GHOST}>
+          <LogIn className="h-4 w-4" /> Join room
         </button>
         <div className="relative">
           <button
@@ -461,11 +469,21 @@ export default function DashboardPage() {
         <CreateRoomDialog
           description={newRoomDesc}
           role={newRoomRole}
+          password={newRoomPassword}
           creating={creating}
           onDescriptionChange={setNewRoomDesc}
           onRoleChange={setNewRoomRole}
-          onCancel={() => { setShowCreate(false); setNewRoomDesc(''); }}
+          onPasswordChange={setNewRoomPassword}
+          onCancel={() => { setShowCreate(false); setNewRoomDesc(''); setNewRoomPassword(''); }}
           onCreate={handleCreateRoom}
+        />
+      )}
+
+      {joinRoomId !== null && (
+        <JoinRoomDialog
+          initialRoomId={joinRoomId}
+          onCancel={() => setJoinRoomId(null)}
+          onJoined={id => router.push(`/room/${id}`)}
         />
       )}
     </AppShell>
@@ -670,16 +688,22 @@ function ExportPicker({ rooms, onCancel, onCreate }: { rooms: Room[]; onCancel: 
 interface CreateRoomDialogProps {
   description: string;
   role: 'pm' | 'design' | 'eng';
+  password: string;
   creating: boolean;
   onDescriptionChange: (value: string) => void;
   onRoleChange: (value: 'pm' | 'design' | 'eng') => void;
+  onPasswordChange: (value: string) => void;
   onCancel: () => void;
   onCreate: () => void;
 }
 
-function CreateRoomDialog({ description, role, creating, onDescriptionChange, onRoleChange, onCancel, onCreate }: CreateRoomDialogProps) {
-  const fieldClass =
-    'w-full rounded-md border border-surface-container-highest bg-bg px-3 py-2 text-body-md text-on-surface outline-none transition-colors focus:border-primary focus:shadow-[0_0_0_3px_rgba(6,182,212,0.15)]';
+const FIELD_CLASS =
+  'w-full rounded-md border border-surface-container-highest bg-bg px-3 py-2 text-body-md text-on-surface outline-none transition-colors focus:border-primary focus:shadow-[0_0_0_3px_rgba(6,182,212,0.15)]';
+
+function CreateRoomDialog({ description, role, password, creating, onDescriptionChange, onRoleChange, onPasswordChange, onCancel, onCreate }: CreateRoomDialogProps) {
+  const fieldClass = FIELD_CLASS;
+  // The server wants at least 4 characters; empty means no password
+  const passwordTooShort = password.length > 0 && password.length < 4;
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onCancel}>
@@ -721,6 +745,24 @@ function CreateRoomDialog({ description, role, creating, onDescriptionChange, on
               <option value="eng">Engineer</option>
             </select>
           </div>
+          <div>
+            <label htmlFor="room-password" className="mb-1 block font-code text-label-md uppercase text-on-surface-variant">
+              Room password (optional)
+            </label>
+            <input
+              id="room-password"
+              type="password"
+              value={password}
+              onChange={e => onPasswordChange(e.target.value)}
+              placeholder="Lets people join with the Room ID"
+              maxLength={128}
+              autoComplete="new-password"
+              className={fieldClass}
+            />
+            <p className={`mt-1 text-body-sm ${passwordTooShort ? 'text-error' : 'text-outline'}`}>
+              {passwordTooShort ? 'Use at least 4 characters.' : 'You can set or change it later from Share.'}
+            </p>
+          </div>
           <div className="flex justify-end gap-space-sm border-t border-surface-container-highest pt-space-md">
             <button
               type="button"
@@ -732,7 +774,7 @@ function CreateRoomDialog({ description, role, creating, onDescriptionChange, on
             <button
               type="button"
               onClick={onCreate}
-              disabled={creating || !description.trim()}
+              disabled={creating || !description.trim() || passwordTooShort}
               className="rounded-lg bg-primary px-space-md py-space-sm text-label-md font-bold text-on-primary transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {creating ? 'Creating...' : 'Create Room'}
@@ -740,6 +782,107 @@ function CreateRoomDialog({ description, role, creating, onDescriptionChange, on
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+interface JoinRoomDialogProps {
+  initialRoomId: string;
+  onCancel: () => void;
+  onJoined: (roomId: string) => void;
+}
+
+// Join with the Room ID and the password the owner set (or, with no password, a room you're invited to)
+function JoinRoomDialog({ initialRoomId, onCancel, onJoined }: JoinRoomDialogProps) {
+  const [roomId, setRoomId] = useState(initialRoomId);
+  const [password, setPassword] = useState('');
+  const [joining, setJoining] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const join = async (e: React.FormEvent) => {
+    e.preventDefault();
+    // Accept a pasted link as well as a bare id
+    const id = roomId.trim().split('/room/').pop()?.split(/[?#/]/)[0] ?? '';
+    if (!id) return;
+    setJoining(true);
+    setError(null);
+    try {
+      await api.joinRoom(id, password ? { password } : {});
+      onJoined(id);
+    } catch (err) {
+      setError(err instanceof ApiError && err.status === 404 ? 'No room with that ID.' : err instanceof Error ? err.message : 'Could not join');
+      setJoining(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onCancel}>
+      <form
+        onSubmit={join}
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-surface-container p-space-lg shadow-2xl"
+        onClick={e => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="join-room-title"
+      >
+        <div className="mb-space-lg flex items-center justify-between">
+          <h2 id="join-room-title" className="font-headline text-headline-md">Join a room</h2>
+          <button type="button" onClick={onCancel} className="rounded-md p-1 text-outline hover:text-on-surface" aria-label="Close">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="space-y-space-md">
+          <div>
+            <label htmlFor="join-room-id" className="mb-1 block font-code text-label-md uppercase text-on-surface-variant">
+              Room ID
+            </label>
+            <input
+              id="join-room-id"
+              value={roomId}
+              onChange={e => setRoomId(e.target.value)}
+              placeholder="room_ab12cd34ef56"
+              autoFocus={!initialRoomId}
+              autoComplete="off"
+              spellCheck={false}
+              className={`${FIELD_CLASS} font-code`}
+            />
+          </div>
+          <div>
+            <label htmlFor="join-room-password" className="mb-1 block font-code text-label-md uppercase text-on-surface-variant">
+              Password
+            </label>
+            <input
+              id="join-room-password"
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="From the room's owner"
+              autoFocus={Boolean(initialRoomId)}
+              maxLength={128}
+              autoComplete="off"
+              className={FIELD_CLASS}
+            />
+            <p className="mt-1 text-body-sm text-outline">Leave it empty if you were invited by email or the room is open to anyone with the link.</p>
+          </div>
+          {error && <p className="text-body-sm text-error" role="alert">{error}</p>}
+          <div className="flex justify-end gap-space-sm border-t border-surface-container-highest pt-space-md">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded-lg bg-surface-container-high px-space-md py-space-sm text-label-md text-on-surface transition-colors hover:bg-surface-bright"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={joining || !roomId.trim()}
+              className="rounded-lg bg-primary px-space-md py-space-sm text-label-md font-bold text-on-primary transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {joining ? 'Joining...' : 'Join Room'}
+            </button>
+          </div>
+        </div>
+      </form>
     </div>
   );
 }

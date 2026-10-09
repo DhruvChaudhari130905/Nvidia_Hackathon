@@ -1,5 +1,5 @@
 // API client for REST commands
-import type { Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
+import type { Invite, InviteResult, Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
 
 import { createDemoRoom, deleteDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
 import { getSocket } from './socket';
@@ -22,6 +22,11 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
     return { room_id: roomMatch[1], closed: true } as T;
   }
   if (roomMatch && roomMatch[2] === '/sharing') return Object.assign(getDemoRoom(roomMatch[1]), body) as T;
+  if (roomMatch && roomMatch[2] === '/invites' && method === 'GET') return [] as T;
+  if (roomMatch && roomMatch[2] === '/invites') {
+    return { email: body.email, role: body.role, email_sent: false, email_error: 'Demo mode sends no email', link: `${window.location.origin}/room/${roomMatch[1]}` } as T;
+  }
+  if (roomMatch && roomMatch[2] === '/password') return Object.assign(getDemoRoom(roomMatch[1]), { has_password: Boolean(body.password) }) as T;
   if (roomMatch && roomMatch[2] === '/messages') {
     getSocket(roomMatch[1]).injectEvent(demoMessageEvent(roomMatch[1], body.text, body.to));
   }
@@ -62,19 +67,31 @@ export const api = {
   // Rooms
   listRooms: () => fetchWithAuth<Room[]>('/rooms'),
   getRoom: (id: string) => fetchWithAuth<Room>(`/rooms/${id}`),
-  createRoom: (description: string, domain_role: 'pm' | 'design' | 'eng') =>
+  createRoom: (description: string, domain_role: 'pm' | 'design' | 'eng', password?: string) =>
     fetchWithAuth<Room>('/rooms', {
       method: 'POST',
-      body: JSON.stringify({ description, domain_role }),
+      body: JSON.stringify({ description, domain_role, ...(password ? { password } : {}) }),
     }),
+  // Members, invited emails, a password or a public link let you in (403 otherwise; 429 after too many wrong passwords)
+  joinRoom: (id: string, data: { password?: string; user_name?: string } = {}) =>
+    fetchWithAuth<{ user_id: string }>(`/rooms/${id}/join`, { method: 'POST', body: JSON.stringify(data) }),
   // Owner only. The room stops and disappears for everyone; the server keeps its history but never reopens it
   closeRoom: (id: string, reason?: string) =>
     fetchWithAuth<{ room_id: string; closed: boolean }>(
       `/rooms/${id}/close${reason ? `?reason=${encodeURIComponent(reason)}` : ''}`,
       { method: 'POST' },
     ),
-  updateSharing: (id: string, data: { link_access: 'restricted' | 'anyone'; link_permission: 'editor' | 'viewer'; invites?: string[] }) =>
+  updateSharing: (id: string, data: { link_access: 'restricted' | 'anyone'; link_permission: 'editor' | 'viewer' }) =>
     fetchWithAuth<Room>(`/rooms/${id}/sharing`, { method: 'PATCH', body: JSON.stringify(data) }),
+  // Owner only. The invite is saved even when the email can't be sent (email_sent false, email_error says why)
+  listInvites: (id: string) => fetchWithAuth<Invite[]>(`/rooms/${id}/invites`),
+  createInvite: (id: string, email: string, role: 'editor' | 'viewer') =>
+    fetchWithAuth<InviteResult>(`/rooms/${id}/invites`, { method: 'POST', body: JSON.stringify({ email, role }) }),
+  revokeInvite: (id: string, email: string) =>
+    fetchWithAuth<void>(`/rooms/${id}/invites/${encodeURIComponent(email)}`, { method: 'DELETE' }),
+  // Owner only; null removes the password
+  setRoomPassword: (id: string, password: string | null) =>
+    fetchWithAuth<Room>(`/rooms/${id}/password`, { method: 'PUT', body: JSON.stringify({ password }) }),
 
   // Messages
   sendMessage: (roomId: string, text: string, to: MessageTo = 'agent') =>
@@ -126,7 +143,8 @@ export const api = {
     fetchWithAuth<{ path: string; content: string }>(
       `/api/files/${roomId}/files/${path.split('/').map(encodeURIComponent).join('/')}`,
     ),
-  saveFile: (roomId: string, path: string, content: string, baseVersion: number) =>
+  // baseVersion: the version the edit started from (0 for a new file); null overwrites whatever is there
+  saveFile: (roomId: string, path: string, content: string, baseVersion: number | null) =>
     fetchWithAuth<{ accepted: true; seq: number; version: number }>(`/rooms/${roomId}/files`, {
       method: 'PUT',
       body: JSON.stringify({ path, content, base_version: baseVersion }),

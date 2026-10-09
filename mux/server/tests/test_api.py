@@ -632,3 +632,157 @@ def test_only_the_owner_can_delete_a_room_and_it_leaves_the_list(client):
     r = client.post(f"/rooms/{rid}/close", params={"reason": "deleted_by_owner"}, headers=auth("alice"))
     assert r.status_code == 200 and r.json()["closed"] is True
     assert rid not in [r["id"] for r in client.get("/rooms", headers=auth("alice")).json()]
+
+
+# --- joining: links, invites, passwords -----------------------------------
+
+def auth_email(sub: str, email: str) -> dict:
+    payload = {"sub": sub, "aud": "authenticated", "exp": int(time.time()) + 3600, "email": email}
+    return {"Authorization": f"Bearer {jwt.encode(payload, SECRET, algorithm='HS256')}"}
+
+
+def role_in(c, rid: str, user: str) -> str | None:
+    room = c.get(f"/rooms/{rid}", headers=auth("alice")).json()
+    return next((m["permission"] for m in room["members"] if m["user_id"] == user), None)
+
+
+def test_viewer_link_grants_viewer(client):
+    rid = create_room(client)
+    r = client.patch(f"/rooms/{rid}/sharing", json={"link_access": "anyone", "link_permission": "viewer"}, headers=auth("alice"))
+    assert r.json()["link_permission"] == "viewer"
+    assert client.post(f"/rooms/{rid}/join", json={}, headers=auth("carol")).status_code == 200
+    assert role_in(client, rid, "carol") == "viewer"
+    assert client.post(f"/api/commands/{rid}/steer", json={"instructions": "x"}, headers=auth("carol")).status_code == 403
+
+
+def test_invite_lets_that_email_into_a_private_room(client, monkeypatch):
+    sent = []
+
+    async def fake_send(email, room_id, title, inviter):
+        sent.append(email)
+        from mux.integrations.invite_email import EmailResult
+        return EmailResult(True)
+
+    monkeypatch.setattr("mux.api.rooms.send_invite_email", fake_send)
+    rid = create_room(client)
+    r = client.post(f"/rooms/{rid}/invites", json={"email": " Bob@X.dev ", "role": "viewer"}, headers=auth("alice"))
+    assert r.status_code == 200, r.text
+    assert r.json()["email"] == "bob@x.dev" and r.json()["email_sent"] is True and r.json()["link"].endswith(f"/room/{rid}")
+    assert sent == ["bob@x.dev"]
+    assert client.get(f"/rooms/{rid}/invites", headers=auth("alice")).json() == [{"email": "bob@x.dev", "role": "viewer"}]
+    # Only the owner sees or makes invites
+    assert client.get(f"/rooms/{rid}/invites", headers=auth("bob")).status_code == 403
+    # Someone else with a different email is still refused
+    assert client.post(f"/rooms/{rid}/join", json={}, headers=auth_email("mallory", "m@x.dev")).status_code == 403
+    assert client.post(f"/rooms/{rid}/join", json={}, headers=auth_email("bob", "bob@x.dev")).status_code == 200
+    assert role_in(client, rid, "bob") == "viewer"
+    # Used up once accepted
+    assert client.get(f"/rooms/{rid}/invites", headers=auth("alice")).json() == []
+
+
+def test_invite_is_kept_when_email_fails(client, monkeypatch):
+    monkeypatch.setattr(settings, "supabase_service_role_key", "")
+    rid = create_room(client)
+    r = client.post(f"/rooms/{rid}/invites", json={"email": "bob@x.dev"}, headers=auth("alice"))
+    assert r.status_code == 200
+    assert r.json()["email_sent"] is False and "SUPABASE_SERVICE_ROLE_KEY" in r.json()["email_error"]
+    assert client.post(f"/rooms/{rid}/join", json={}, headers=auth_email("bob", "bob@x.dev")).status_code == 200
+    assert role_in(client, rid, "bob") == "editor"
+
+
+def test_revoked_invite_no_longer_admits(client, monkeypatch):
+    monkeypatch.setattr(settings, "supabase_service_role_key", "")
+    rid = create_room(client)
+    client.post(f"/rooms/{rid}/invites", json={"email": "bob@x.dev"}, headers=auth("alice"))
+    assert client.delete(f"/rooms/{rid}/invites/bob@x.dev", headers=auth("alice")).status_code == 204
+    assert client.delete(f"/rooms/{rid}/invites/bob@x.dev", headers=auth("alice")).status_code == 404
+    assert client.post(f"/rooms/{rid}/join", json={}, headers=auth_email("bob", "bob@x.dev")).status_code == 403
+    assert client.post(f"/rooms/{rid}/invites", json={"email": "not-an-email"}, headers=auth("alice")).status_code == 400
+
+
+def test_room_password_join(client):
+    rid = create_room(client, password="hunter22")
+    assert client.get(f"/rooms/{rid}", headers=auth("alice")).json()["has_password"] is True
+    assert client.post(f"/rooms/{rid}/join", json={}, headers=auth("dave")).status_code == 403
+    assert client.post(f"/rooms/{rid}/join", json={"password": "nope"}, headers=auth("dave")).status_code == 403
+    assert client.post(f"/rooms/{rid}/join", json={"password": "hunter22"}, headers=auth("dave")).status_code == 200
+    assert role_in(client, rid, "dave") == "editor"
+
+    # Owner changes and then removes it
+    assert client.put(f"/rooms/{rid}/password", json={"password": "newpass"}, headers=auth("dave")).status_code == 403
+    assert client.put(f"/rooms/{rid}/password", json={"password": "newpass"}, headers=auth("alice")).status_code == 200
+    assert client.post(f"/rooms/{rid}/join", json={"password": "hunter22"}, headers=auth("erin")).status_code == 403
+    assert client.post(f"/rooms/{rid}/join", json={"password": "newpass"}, headers=auth("erin")).status_code == 200
+    r = client.put(f"/rooms/{rid}/password", json={"password": None}, headers=auth("alice"))
+    assert r.json()["has_password"] is False
+    assert client.post(f"/rooms/{rid}/join", json={"password": "newpass"}, headers=auth("frank")).status_code == 403
+
+
+def test_password_guessing_is_locked_out(client):
+    from mux.rooms.access import password_attempts
+    rid = create_room(client, password="hunter22")
+    for _ in range(5):
+        assert client.post(f"/rooms/{rid}/join", json={"password": "wrong"}, headers=auth("mallory")).status_code == 403
+    r = client.post(f"/rooms/{rid}/join", json={"password": "hunter22"}, headers=auth("mallory"))
+    assert r.status_code == 429 and "Retry-After" in r.headers
+    # Another user isn't affected
+    assert client.post(f"/rooms/{rid}/join", json={"password": "hunter22"}, headers=auth("dave")).status_code == 200
+    password_attempts.reset(rid, "mallory")
+
+
+def test_password_hash_and_invites_never_reach_clients(client, monkeypatch):
+    monkeypatch.setattr(settings, "supabase_service_role_key", "")
+    rid = create_room(client, password="hunter22")
+    client.post(f"/rooms/{rid}/invites", json={"email": "secret@x.dev"}, headers=auth("alice"))
+    room_text = client.get(f"/rooms/{rid}", headers=auth("alice")).text
+    with client.websocket_connect(f"/rooms/{rid}/ws?since=0&token={token('alice')}") as ws:
+        dump = ws.receive_text()
+    for text in (room_text, dump):
+        assert "scrypt" not in text and "secret@x.dev" not in text
+    assert '"has_password": true' in dump or '"has_password":true' in dump
+
+
+def test_old_sharing_events_replay_as_editor_links():
+    from mux.events.models import RoomSharingUpdatedEvent
+    e = RoomSharingUpdatedEvent.model_validate({"room_id": "r", "sequence": 1, "public": True, "updated_by": "a"})
+    assert e.link_permission == "editor"
+
+
+def test_password_hashes_verify():
+    from mux.rooms.access import hash_password, verify_password
+    h = hash_password("hunter22")
+    assert h != hash_password("hunter22")  # salted
+    assert verify_password("hunter22", h) and not verify_password("hunter23", h)
+    assert not verify_password("hunter22", "garbage")
+
+
+def test_rehydration_restores_access_settings(client, monkeypatch):
+    monkeypatch.setattr(settings, "supabase_service_role_key", "")
+    rid = create_room(client, password="hunter22")
+    client.patch(f"/rooms/{rid}/sharing", json={"link_access": "anyone", "link_permission": "viewer"}, headers=auth("alice"))
+    client.post(f"/rooms/{rid}/invites", json={"email": "bob@x.dev"}, headers=auth("alice"))
+    registry_call(client, room_registry.get_registry().stop_room, rid)
+
+    room = client.get(f"/rooms/{rid}", headers=auth("alice")).json()
+    assert room["link_permission"] == "viewer" and room["has_password"] is True
+    assert client.get(f"/rooms/{rid}/invites", headers=auth("alice")).json() == [{"email": "bob@x.dev", "role": "editor"}]
+    assert client.post(f"/rooms/{rid}/join", json={"password": "hunter22"}, headers=auth("dave")).status_code == 200
+
+
+def test_room_list_shows_only_your_rooms(client):
+    rid = create_room(client)
+    client.patch(f"/rooms/{rid}/sharing", json={"link_access": "anyone"}, headers=auth("alice"))
+    assert [r["id"] for r in client.get("/rooms", headers=auth("carol")).json()] == []
+    client.post(f"/rooms/{rid}/join", json={}, headers=auth("carol"))
+    assert [r["id"] for r in client.get("/rooms", headers=auth("carol")).json()] == [rid]
+
+
+def test_uploading_over_an_existing_file_overwrites_without_a_base_version(client):
+    # The web app's upload/import sends no base_version: those files replace what's there
+    rid = create_room(client)
+    put = lambda body: client.put(f"/rooms/{rid}/files", json={"path": "src/App.jsx", **body}, headers=auth("alice"))
+    assert put({"content": "v1", "base_version": 0}).status_code == 200
+    assert put({"content": "v2", "base_version": 0}).status_code == 409  # "new file" over an existing one
+    r = put({"content": "v2"})
+    assert r.status_code == 200 and r.json()["version"] == 2
+    assert client.get(f"/api/files/{rid}/files/src/App.jsx", headers=auth("alice")).json()["content"] == "v2"

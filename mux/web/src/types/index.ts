@@ -33,12 +33,26 @@ export interface Room {
   owner_id: string;
   link_access: 'restricted' | 'anyone';
   link_permission: UserRole;
+  // A room password lets anyone with the room id join as editor (the password itself never leaves the server)
+  has_password?: boolean;
   budget_tokens_cap: number;
   budget_runs_cap: number;
   head_checkpoint_id: string | null;
   created_at: string;
   updated_at?: string;
   members: Membership[];
+}
+
+// A pending email invite (owner only)
+export interface Invite {
+  email: string;
+  role: 'editor' | 'viewer';
+}
+
+export interface InviteResult extends Invite {
+  email_sent: boolean;
+  email_error?: string | null;
+  link: string;
 }
 
 export interface PlanItem {

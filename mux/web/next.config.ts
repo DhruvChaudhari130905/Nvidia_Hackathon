@@ -4,6 +4,8 @@ import type { NextConfig } from 'next';
 const nextConfig: NextConfig = {
   // A separate output folder lets a production build run while `next dev` is using .next
   distDir: process.env.NEXT_DIST_DIR || '.next',
+  // `make tunnel` serves the dev server on a trycloudflare.com address so teammates can join
+  allowedDevOrigins: ['*.trycloudflare.com'],
   async headers() {
     return [
       {

@@ -22,6 +22,9 @@ from mux.events.models import (
     RoomJoinedEvent,
     RoomClosedEvent,
     RoomSharingUpdatedEvent,
+    RoomInviteCreatedEvent,
+    RoomInviteRevokedEvent,
+    RoomPasswordSetEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -199,7 +202,10 @@ class RoomActor:
         self.member_names: dict[str, str] = {}  # user_id -> display name, when one was given
         self.created_at: Optional[datetime] = None
         self.public = False
+        self.link_permission = "editor"  # role joining through the link grants when public
         self.allow_anonymous = False
+        self.invites: dict[str, str] = {}  # lowercased email -> role, until the person joins or it's removed
+        self.password_hash: Optional[str] = None  # mux/rooms/access.py; joining with the password grants editor
         self.closed = False
 
         # Initialize components
@@ -358,16 +364,46 @@ class RoomActor:
                 domain_role=domain_role,
             ))
 
-    async def set_sharing(self, public: bool, allow_anonymous: bool, user_id: str) -> None:
+    async def set_sharing(self, public: bool, allow_anonymous: bool, user_id: str, link_permission: str = "editor") -> None:
+        if link_permission not in MEMBER_ROLES:
+            raise ValueError(f"Invalid link permission {link_permission!r}")
         async with self._lock:
             self.public = public
             self.allow_anonymous = allow_anonymous
+            self.link_permission = link_permission
             await self._emit(RoomSharingUpdatedEvent(
                 **self._event_fields(user_id),
                 public=public,
                 allow_anonymous=allow_anonymous,
                 updated_by=user_id,
+                link_permission=link_permission,
             ))
+
+    async def create_invite(self, email: str, role: str, invited_by: str) -> None:
+        """Invite an email address (inviting it again changes the role)."""
+        if role not in MEMBER_ROLES:
+            raise ValueError(f"Invalid role {role!r}. Must be one of {sorted(MEMBER_ROLES)}")
+        email = email.strip().lower()
+        async with self._lock:
+            self.invites[email] = role
+            await self._emit(RoomInviteCreatedEvent(
+                **self._event_fields(invited_by), email=email, role=role, invited_by=invited_by,
+            ))
+
+    async def revoke_invite(self, email: str, user_id: str, accepted: bool = False) -> bool:
+        """End a pending invite. False if there was none for this email."""
+        email = email.strip().lower()
+        async with self._lock:
+            if self.invites.pop(email, None) is None:
+                return False
+            await self._emit(RoomInviteRevokedEvent(**self._event_fields(user_id), email=email, accepted=accepted))
+            return True
+
+    async def set_password(self, password_hash: Optional[str], user_id: str) -> None:
+        """Set or (with None) remove the room password. Takes the hash, never the password."""
+        async with self._lock:
+            self.password_hash = password_hash
+            await self._emit(RoomPasswordSetEvent(**self._event_fields(user_id), password_hash=password_hash))
 
     async def close_room(self, user_id: str, reason: Optional[str] = None) -> None:
         async with self._lock:
@@ -1141,6 +1177,14 @@ class RoomActor:
                 e = cast(RoomSharingUpdatedEvent, event)
                 self.public = e.public
                 self.allow_anonymous = e.allow_anonymous
+                self.link_permission = e.link_permission
+            elif t == EventType.ROOM_INVITE_CREATED:
+                e = cast(RoomInviteCreatedEvent, event)
+                self.invites[e.email] = e.role
+            elif t == EventType.ROOM_INVITE_REVOKED:
+                self.invites.pop(cast(RoomInviteRevokedEvent, event).email, None)
+            elif t == EventType.ROOM_PASSWORD_SET:
+                self.password_hash = cast(RoomPasswordSetEvent, event).password_hash
             elif t == EventType.ROOM_CLOSED:
                 self.closed = True
 

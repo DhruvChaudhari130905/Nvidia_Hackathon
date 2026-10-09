@@ -6,7 +6,9 @@ event envelope (mux/events/wire.py). Rooms and members are returned in the web a
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
@@ -19,6 +21,8 @@ from mux.api.deps import get_room_actor_dep, get_current_user, require_editor, r
 from mux.events.file_log import stored_room_ids
 from mux.events.wire import membership_view
 from mux.integrations.github import get_github_integration
+from mux.integrations.invite_email import room_link, send_invite_email
+from mux.rooms.access import hash_password, password_attempts, verify_password
 from mux.rooms.actor import PathConflictError, RoomActor
 from mux.rooms.registry import get_registry
 
@@ -30,6 +34,9 @@ router = APIRouter()
 github_router = APIRouter()
 
 DomainRole = Literal["pm", "design", "eng"]
+MemberRole = Literal["editor", "viewer"]
+# Loose on purpose: Supabase is the real check when the email is sent
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 # =============================================================================
@@ -42,6 +49,8 @@ class RoomCreateRequest(BaseModel):
     domain_role: Optional[DomainRole] = Field(None, description="The creator's domain role")
     name: Optional[str] = Field(None, min_length=1, max_length=200, description="Room name")
     initial_plan: Optional[list[dict]] = Field(None, description="Initial plan items")
+    password: Optional[str] = Field(None, min_length=4, max_length=128,
+                                    description="Lets anyone with the room id and this password join as editor")
 
     @model_validator(mode="after")
     def _needs_name_or_description(self) -> "RoomCreateRequest":
@@ -60,6 +69,7 @@ class RoomJoinRequest(BaseModel):
     user_name: Optional[str] = Field(None, max_length=100, description="Display name")
     avatar_url: Optional[str] = Field(None, description="Avatar URL")
     domain_role: Optional[DomainRole] = Field(None, description="Domain role when joining a public room")
+    password: Optional[str] = Field(None, max_length=128, description="The room password, when joining with the room id")
 
 
 class RoomJoinResponse(BaseModel):
@@ -118,9 +128,30 @@ class MemberResponse(BaseModel):
 class SharingUpdateRequest(BaseModel):
     """`PATCH /rooms/{id}/sharing`."""
     link_access: Literal["restricted", "anyone"]
-    # Joining a shared room grants editor; a viewer-only link isn't supported yet
-    link_permission: Literal["editor", "viewer"] = "editor"
-    invites: list[str] = Field(default_factory=list, description="Emails to invite (not supported yet)")
+    link_permission: MemberRole = Field("editor", description="Role granted by joining through the link")
+
+
+class InviteRequest(BaseModel):
+    """`POST /rooms/{id}/invites`."""
+    email: str = Field(..., min_length=3, max_length=320)
+    role: MemberRole = "editor"
+
+
+class InviteView(BaseModel):
+    email: str
+    role: str
+
+
+class InviteResponse(InviteView):
+    """The invite is saved even when the email couldn't be sent; `link` is what to send instead."""
+    email_sent: bool
+    email_error: Optional[str] = None
+    link: str
+
+
+class PasswordRequest(BaseModel):
+    """`PUT /rooms/{id}/password`. null removes the password."""
+    password: Optional[str] = Field(None, min_length=4, max_length=128)
 
 
 class MessageCreateRequest(BaseModel):
@@ -220,7 +251,8 @@ async def room_view(actor: RoomActor) -> dict[str, Any]:
         "description": meta.get("description") or "",
         "owner_id": actor.owner_id,
         "link_access": "anyone" if actor.public else "restricted",
-        "link_permission": "editor",
+        "link_permission": actor.link_permission,
+        "has_password": actor.password_hash is not None,
         "budget_tokens_cap": budget["token_cap"],
         "budget_runs_cap": budget["sandbox_run_cap"],
         "head_checkpoint_id": head,
@@ -256,18 +288,23 @@ async def create_room(
             await actor.close_room(current_user.id, "invalid initial plan")
             await registry.stop_room(room_id, reason="invalid initial plan")
             raise
+    if request.password:
+        await actor.set_password(await asyncio.to_thread(hash_password, request.password), current_user.id)
 
     return await room_view(actor)
 
 
 @router.get("")
 async def list_rooms(current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
-    """Rooms the current user can access: running rooms and rooms saved on disk (rebuilt on first use)."""
+    """Rooms the current user owns or has joined: running rooms and rooms saved on disk (rebuilt on first use).
+
+    Public rooms they haven't joined are left out, so a link-only room stays findable only through its link.
+    """
     registry = get_registry()
     rooms = []
     for room_id in sorted(set(await registry.list_rooms()) | set(stored_room_ids())):
         actor = await registry.get_room_or_rehydrate(room_id)
-        if actor and actor.role_of(current_user.id) is not None:
+        if actor and (current_user.id == actor.owner_id or current_user.id in actor.members):
             rooms.append(await room_view(actor))
     return rooms
 
@@ -302,18 +339,32 @@ async def join_room(
     """
     Join a room as a participant.
 
-    Owners and members can always join. In a public room, joining grants editor
-    membership. Private rooms require the owner to add you first (POST /members).
+    Owners and members can always join. Anyone else needs one of, in this order:
+    an invite for the email they signed in with (grants the invited role), the room
+    password (grants editor), or a public link (grants the link's permission).
     """
-    role = actor.role_of(current_user.id)
-    if role is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This room is private; ask the owner to add you"
-        )
-    if actor.public and current_user.id != actor.owner_id and current_user.id not in actor.members:
-        await actor.add_member(current_user.id, "editor", granted_by=current_user.id, user_name=request.user_name,
-                               domain_role=request.domain_role)
+    user_id = current_user.id
+    # Viewers go through this too: an invite or the password can raise them to editor
+    if user_id != actor.owner_id and actor.members.get(user_id) != "editor":
+        email = (current_user.email or "").strip().lower()
+        invited_role = actor.invites.get(email) if email else None
+        if invited_role:
+            await actor.add_member(user_id, invited_role, granted_by=user_id, user_name=request.user_name,
+                                   domain_role=request.domain_role)
+            await actor.revoke_invite(email, user_id, accepted=True)
+        elif request.password is not None:
+            await _check_password(actor, user_id, request.password)
+            await actor.add_member(user_id, "editor", granted_by=user_id, user_name=request.user_name,
+                                   domain_role=request.domain_role)
+        elif user_id in actor.members:
+            pass  # already a viewer
+        elif actor.public:
+            await actor.add_member(user_id, actor.link_permission, granted_by=user_id, user_name=request.user_name,
+                                   domain_role=request.domain_role)
+        else:
+            detail = ("This room needs a password, or an invite from the owner" if actor.password_hash
+                      else "This room is private; ask the owner to invite you")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
     presence = await actor.user_join(
         user_id=current_user.id,
@@ -329,6 +380,21 @@ async def join_room(
         # presence.joined_at is a monotonic clock value, not wall time
         joined_at=datetime.now(timezone.utc).isoformat(),
     )
+
+
+async def _check_password(actor: RoomActor, user_id: str, password: str) -> None:
+    """403 on a wrong password; 429 after too many wrong ones."""
+    if actor.password_hash is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This room doesn't have a password")
+    wait = password_attempts.retry_after(actor.room_id, user_id)
+    if wait > 0:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail=f"Too many wrong passwords; try again in {int(wait // 60) + 1} min",
+                            headers={"Retry-After": str(int(wait) + 1)})
+    if not await asyncio.to_thread(verify_password, password, actor.password_hash):
+        password_attempts.record_failure(actor.room_id, user_id)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Wrong room id or password")
+    password_attempts.reset(actor.room_id, user_id)
 
 
 @router.post("/{room_id}/leave", response_model=RoomLeaveResponse)
@@ -425,11 +491,65 @@ async def update_room_sharing(
     current_user: User = Depends(require_owner),
     actor: RoomActor = Depends(get_room_actor),
 ) -> dict[str, Any]:
-    """Owner only. "anyone": any signed-in user with the link can view, and joining grants editor."""
-    if request.invites:
-        # Invites are emails and we keep no email -> user mapping yet; add people with POST /members
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email invites are not supported yet")
-    await actor.set_sharing(request.link_access == "anyone", False, current_user.id)
+    """Owner only. "anyone": any signed-in user with the link can view, and joining grants link_permission."""
+    await actor.set_sharing(request.link_access == "anyone", False, current_user.id, request.link_permission)
+    return await room_view(actor)
+
+
+@router.get("/{room_id}/invites", response_model=list[InviteView])
+async def list_invites(
+    room_id: str,
+    current_user: User = Depends(require_owner),
+    actor: RoomActor = Depends(get_room_actor),
+) -> list[InviteView]:
+    """Pending invites (owner only: they're other people's email addresses)."""
+    return [InviteView(email=e, role=r) for e, r in sorted(actor.invites.items())]
+
+
+@router.post("/{room_id}/invites", response_model=InviteResponse)
+async def create_invite(
+    room_id: str,
+    request: InviteRequest,
+    current_user: User = Depends(require_owner),
+    actor: RoomActor = Depends(get_room_actor),
+) -> InviteResponse:
+    """Invite an email address and email them a sign-in link into the room.
+
+    Whoever signs in with that address and opens the room joins with `role`, even in a private room.
+    """
+    email = request.email.strip().lower()
+    if not EMAIL_PATTERN.match(email):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That doesn't look like an email address")
+    if current_user.email and email == current_user.email.strip().lower():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You're already in this room")
+    await actor.create_invite(email, request.role, current_user.id)
+    title = actor.manifest.get_room_metadata().get("name") or actor.room_id
+    result = await send_invite_email(email, actor.room_id, title, current_user.name)
+    return InviteResponse(email=email, role=request.role, email_sent=result.sent, email_error=result.error,
+                          link=room_link(actor.room_id))
+
+
+@router.delete("/{room_id}/invites/{email}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_invite(
+    room_id: str,
+    email: str,
+    current_user: User = Depends(require_owner),
+    actor: RoomActor = Depends(get_room_actor),
+) -> None:
+    if not await actor.revoke_invite(email, current_user.id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending invite for that email")
+
+
+@router.put("/{room_id}/password")
+async def set_room_password(
+    room_id: str,
+    request: PasswordRequest,
+    current_user: User = Depends(require_owner),
+    actor: RoomActor = Depends(get_room_actor),
+) -> dict[str, Any]:
+    """Owner only. With the room id and this password anyone signed in can join as editor; null removes it."""
+    password_hash = await asyncio.to_thread(hash_password, request.password) if request.password else None
+    await actor.set_password(password_hash, current_user.id)
     return await room_view(actor)
 
 

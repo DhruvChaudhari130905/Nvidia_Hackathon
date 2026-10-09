@@ -213,7 +213,9 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
       break;
     }
     case 'presence.join': {
-      newState.presence = [...newState.presence, event.payload];
+      // The server keeps one presence per user and re-sends presence.join on every join (the REST join,
+      // the socket, a second tab): replace the user's entry instead of adding another
+      newState.presence = [...newState.presence.filter(p => p.user_id !== event.payload.user_id), event.payload];
       break;
     }
     case 'presence.leave': {

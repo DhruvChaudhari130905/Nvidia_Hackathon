@@ -16,6 +16,9 @@ class EventType(str, Enum):
     ROOM_LEFT = "room_left"
     ROOM_CLOSED = "room_closed"
     ROOM_SHARING_UPDATED = "room_sharing_updated"
+    ROOM_INVITE_CREATED = "room_invite_created"
+    ROOM_INVITE_REVOKED = "room_invite_revoked"
+    ROOM_PASSWORD_SET = "room_password_set"
 
     # User presence events
     USER_JOINED = "user_joined"
@@ -194,6 +197,29 @@ class RoomSharingUpdatedEvent(BaseEvent):
     public: bool = Field(..., description="Whether any authenticated user can view and join the room")
     allow_anonymous: bool = Field(False, description="Allow anonymous access")
     updated_by: str = Field(..., description="User who changed the settings")
+    # Events written before link permissions existed replay as "editor", which is what joining granted then
+    link_permission: str = Field("editor", description="Role granted by joining through the link (editor or viewer)")
+
+
+class RoomInviteCreatedEvent(BaseEvent):
+    """The owner invited an email address; whoever signs in with it and joins gets the role."""
+    type: EventType = EventType.ROOM_INVITE_CREATED
+    email: str = Field(..., description="Invited email address, lowercased")
+    role: str = Field("editor", description="Role granted on joining (editor or viewer)")
+    invited_by: str = Field(..., description="User who sent the invite")
+
+
+class RoomInviteRevokedEvent(BaseEvent):
+    """A pending invite ended: the owner removed it, or the invited person joined."""
+    type: EventType = EventType.ROOM_INVITE_REVOKED
+    email: str = Field(..., description="Invited email address, lowercased")
+    accepted: bool = Field(False, description="True when the invite ended because the person joined")
+
+
+class RoomPasswordSetEvent(BaseEvent):
+    """The owner set, changed or removed the room password. Never sent to clients (mux/events/wire.py)."""
+    type: EventType = EventType.ROOM_PASSWORD_SET
+    password_hash: Optional[str] = Field(default=None, description="scrypt hash (mux/rooms/access.py); None removes it")
 
 
 # Presence events
@@ -595,6 +621,9 @@ Event = Union[
     RoomLeftEvent,
     RoomClosedEvent,
     RoomSharingUpdatedEvent,
+    RoomInviteCreatedEvent,
+    RoomInviteRevokedEvent,
+    RoomPasswordSetEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -649,6 +678,9 @@ __all__ = [
     "RoomLeftEvent",
     "RoomClosedEvent",
     "RoomSharingUpdatedEvent",
+    "RoomInviteCreatedEvent",
+    "RoomInviteRevokedEvent",
+    "RoomPasswordSetEvent",
     "UserJoinedEvent",
     "UserLeftEvent",
     "UserTypingEvent",
