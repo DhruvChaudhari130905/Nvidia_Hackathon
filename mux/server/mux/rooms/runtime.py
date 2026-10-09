@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable, Optional, cast
 from uuid import uuid4
 
 from mux.agents.coder.context import CoderContext, build_context
-from mux.agents.coder.loop import CoderLoop, CoderTask, TurnBoundary
+from mux.agents.coder.loop import CoderLoop, CoderTask, ToolExecutor, TurnBoundary
 from mux.agents.coder.prompts import coder_system_prompt
 from mux.agents.coder.tools import CoderToolExecutor
 from mux.agents.coder.tools.files import ActorFileTools
@@ -48,6 +48,8 @@ from mux.events.models import (
 )
 from mux.events.wire import ephemeral, user_view
 from mux.integrations.tavily import WebSearch
+from mux.mcp.catalog import enabled_servers
+from mux.mcp.toolset import ALLOW, DENY, McpToolset
 from mux.rooms.actor import RoomActor
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,7 @@ class _Question:
     default: str
     parked: bool  # True: the runtime asked "Retry or skip?" about a stopped task
     timer: Optional[asyncio.Task] = None
+    waiter: Optional[asyncio.Future[str]] = None  # set by ask_and_wait: the answer goes here instead of the plan
 
 
 class RoomRuntime:
@@ -287,15 +290,22 @@ class RoomRuntime:
 
     # ---- questions ----
 
-    async def _ask(self, question: str, options: list[str], default: str, task_id: Optional[str], *, parked: bool) -> str:
+    async def _ask(self, question: str, options: list[str], default: str, task_id: Optional[str], *, parked: bool,
+                   waiter: Optional[asyncio.Future[str]] = None) -> str:
         expires = datetime.now(timezone.utc) + timedelta(seconds=self.question_timeout)
         qid = await self.actor.ask_question(
             question, CODER, options=options, default_option=default, task_id=task_id, expires_at=expires,
         )
-        state = _Question(task_id, options, default, parked)
+        state = _Question(task_id, options, default, parked, waiter=waiter)
         self._questions[qid] = state
         state.timer = self._later(self.question_timeout, lambda: self._default_answer(qid))
         return qid
+
+    async def ask_and_wait(self, question: str, options: list[str], default: str, task_id: Optional[str]) -> str:
+        """Ask the room and wait for the answer (the default when the card expires). Leaves the plan alone."""
+        waiter: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        await self._ask(question, options, default, task_id, parked=False, waiter=waiter)
+        return await waiter
 
     async def _default_answer(self, qid: str) -> None:
         state = self._questions.get(qid)
@@ -310,6 +320,10 @@ class RoomRuntime:
             return
         if state.timer is not None and state.timer is not asyncio.current_task():
             state.timer.cancel()
+        if state.waiter is not None:
+            if not state.waiter.done():
+                state.waiter.set_result(answer)
+            return
         if state.task_id is None:
             return
         if state.parked and answer == SKIP:
@@ -345,11 +359,19 @@ class RoomRuntime:
             asked.append(await self._ask(card["question"], card["options"], card["default"], task_id, parked=False))
 
         executor = CoderToolExecutor(ActorFileTools(self.actor), search=self.search, on_question=on_question)
-        tools = _Narrated(self.actor, executor)
-        loop = CoderLoop(self.llm, tools, _Boundary(self.actor), executor.schemas(),
-                         max_turns=self.max_turns, on_text_delta=self._delta(task_id))
+
+        async def ask_first(question: str) -> str:
+            return await self.ask_and_wait(question, [ALLOW, DENY], DENY, task_id)
+
+        async def unavailable(server: str, reason: str) -> None:
+            await self.actor.post_notice("mcp.unavailable", {"server": server, "error": reason, "task_id": task_id}, CODER)
+
         try:
-            result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build))
+            # MCP servers connect for this task only and disconnect when it ends (mux/mcp/toolset.py)
+            async with McpToolset(executor, enabled_servers(self.actor), ask=ask_first, on_unavailable=unavailable) as toolset:
+                loop = CoderLoop(self.llm, _Narrated(self.actor, toolset), _Boundary(self.actor), toolset.schemas(),
+                                 max_turns=self.max_turns, on_text_delta=self._delta(task_id))
+                result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build))
             await self._spend(result.usage, CODER)
             await self.actor.post_notice("agent.text", {"task_id": task_id, "text": result.summary}, CODER)
             if asked:
@@ -452,7 +474,7 @@ class _Boundary:
 class _Narrated:
     """Wraps the tool executor so each call shows in the feed as tool.called / tool.result (and build.result)."""
 
-    def __init__(self, actor: RoomActor, inner: CoderToolExecutor) -> None:
+    def __init__(self, actor: RoomActor, inner: ToolExecutor) -> None:
         self.actor = actor
         self.inner = inner
 
@@ -481,4 +503,6 @@ def _summary(name: str, result: Any) -> str:
         return f"{result['path']}{version}"
     if name == "list_files":
         return f"{len(result.get('files', []))} files"
+    if "content" in result:  # MCP tool output
+        return str(result["content"])[:200]
     return str(result.get("summary") or "ok")[:200]

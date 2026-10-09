@@ -284,3 +284,81 @@ async def test_deleting_a_file_reaches_the_web_app(setup):
     assert deleted is not None
     assert deleted["type"] == "file.deleted" and deleted["payload"]["path"] == "index.html"
     await registry.shutdown_all()
+
+
+# --- MCP tools ------------------------------------------------------------------
+
+@pytest.fixture
+def docs_mcp(monkeypatch):
+    from mcp.server.mcpserver import MCPServer
+
+    import mux.mcp.client as mcp_client
+
+    server = MCPServer("docs")
+
+    @server.tool()
+    def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    monkeypatch.setattr(mcp_client, "default_connect", lambda spec: mcp_client.open_client(spec, target=server))
+    return server
+
+
+ADD_TOOL = [{"name": "add", "description": "Add two numbers.", "input_schema": {"type": "object"}}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer, ok", [("Allow", True), ("Deny", False)])
+async def test_coder_uses_room_mcp_tools_after_asking(setup, docs_mcp, answer, ok):
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs)
+    log = logs[actor.room_id]
+    await actor.save_mcp_server("docs", "https://93.184.216.34/mcp", {}, ADD_TOOL, {"add": {"enabled": True, "mode": "ask"}}, "alice")
+
+    llm.push(tool_reply(("docs__add", {"a": 1, "b": 2})), tool_reply(("finish_task", {"summary": "added"})))
+    await actor.approve_plan_items(["t1"], "alice")
+    await until(lambda: of_type(log, EventType.QUESTION_ASKED))
+    asked = to_envelope(of_type(log, EventType.QUESTION_ASKED)[0])
+    assert asked is not None and asked["payload"]["options"] == ["Allow", "Deny"] and asked["payload"]["default_option"] == "Deny"
+    await actor.command_answer_question(asked["payload"]["id"], answer, "alice")
+    await until(lambda: of_type(log, EventType.CHECKPOINT_CREATED))
+
+    offered = {t["function"]["name"] for t in next(c for c in llm.calls if c.tools).tools or []}
+    assert "docs__add" in offered and "write_file" in offered
+    result = next(d for d in notices(log, "tool.result") if d["tool"] == "docs__add")
+    assert result["ok"] is ok and (result["summary"] == "3" if ok else "denied" in result["summary"])
+    assert (await actor.get_plan())[0]["status"] == "done"  # the answer didn't re-queue or skip the task
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_unreachable_mcp_server_is_reported_and_removed_servers_are_gone_next_task(setup, docs_mcp, monkeypatch):
+    import mux.mcp.client as mcp_client
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs, plan=[{"id": "t1", "title": "One", "status": "draft"},
+                                                      {"id": "t2", "title": "Two", "status": "draft"}])
+    log = logs[actor.room_id]
+    await actor.save_mcp_server("docs", "https://93.184.216.34/mcp", {}, ADD_TOOL, {}, "alice")
+    await actor.save_mcp_server("down", "https://93.184.216.34/down", {}, [], {}, "alice")
+    real = mcp_client.default_connect
+
+    def connect(spec):
+        if spec.name == "down":
+            raise ConnectionError("refused")
+        return real(spec)
+
+    monkeypatch.setattr(mcp_client, "default_connect", connect)
+    llm.push(tool_reply(("finish_task", {"summary": "one"})))
+    await actor.approve_plan_items(["t1"], "alice")
+    await until(lambda: notices(log, "mcp.unavailable"))
+    assert notices(log, "mcp.unavailable")[0] == {"server": "down", "error": "refused", "task_id": "t1"}
+    await until(lambda: of_type(log, EventType.CHECKPOINT_CREATED))
+    assert "docs__add" in {t["function"]["name"] for t in [c for c in llm.calls if c.tools][-1].tools or []}
+
+    await actor.remove_mcp_server("docs", "alice")
+    llm.push(tool_reply(("finish_task", {"summary": "two"})))
+    await actor.approve_plan_items(["t2"], "alice")
+    await until(lambda: len(of_type(log, EventType.CHECKPOINT_CREATED)) == 2)
+    assert "docs__add" not in {t["function"]["name"] for t in [c for c in llm.calls if c.tools][-1].tools or []}
+    await registry.shutdown_all()
