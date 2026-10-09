@@ -26,6 +26,8 @@ dependencies = [
   # MCP servers' tools for the coder (mux.mcp); httpx2 is the HTTP client its transport takes
   "mcp>=2.3,<3",
   "httpx2",
+  # SKILL.md frontmatter (mux.skills)
+  "pyyaml",
 ]
 
 [project.optional-dependencies]

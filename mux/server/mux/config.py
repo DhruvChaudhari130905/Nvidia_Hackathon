@@ -53,5 +53,8 @@ class Settings(BaseSettings):
     mcp_encryption_key: str = ""
     mcp_allow_private_urls: bool = False
 
+    # Skill folders (each with a SKILL.md) the coder can use when a room switches them on (mux.skills)
+    skills_path: str = "skills"
+
 
 settings = Settings()
