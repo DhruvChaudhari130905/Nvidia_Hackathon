@@ -475,3 +475,157 @@ async def test_reviews_get_no_mcp_tools(setup, docs_mcp):
     offered = {t["function"]["name"] for t in [c for c in llm.calls if c.tools][-1].tools or []}
     assert "docs__add" not in offered and offered == {"read_file", "list_files", "web_search", "finish_task"}
     await registry.shutdown_all()
+
+
+# --- kickoff ----------------------------------------------------------------------
+
+@pytest.fixture
+def quick(tmp_path, monkeypatch):
+    """Like `setup`, with question cards that expire after 0.3 s."""
+    monkeypatch.chdir(tmp_path)
+    logs: dict[str, InMemoryEventLog] = {}
+    monkeypatch.setattr(room_registry, "get_event_log", lambda rid: logs.setdefault(rid, InMemoryEventLog(rid)))
+    llm = FakeLLM()
+    return RoomRegistry(runtime_factory=lambda a: RoomRuntime(a, llm, vote_timeout=30, question_timeout=0.3, max_turns=3)), llm, logs
+
+
+def kickoff_steps(log) -> list[str]:
+    return [d["text"] for d in notices(log, "kickoff.step")]
+
+
+def two_questions():
+    from mux.agents.coordinator.schema import KickoffQuestion, KickoffQuestions
+    return KickoffQuestions(questions=[
+        KickoffQuestion(question="Who is it for?", options=["Students", "Studios"], default="Studios"),
+        KickoffQuestion(question="First version?", options=["Booking only", "Booking and payments"], default="Booking only"),
+    ])
+
+
+@pytest.mark.asyncio
+async def test_kickoff_from_an_idea_asks_one_question_at_a_time_then_drafts_a_plan(setup):
+    from mux.agents.coordinator.schema import PlanDraft
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    llm.push(two_questions())
+    await actor.request_kickoff("alice")
+
+    await until(lambda: of_type(log, EventType.QUESTION_ASKED))
+    first = to_envelope(of_type(log, EventType.QUESTION_ASKED)[0])
+    assert first is not None and first["payload"]["text"] == "Who is it for?"
+    await asyncio.sleep(0.1)
+    assert len(of_type(log, EventType.QUESTION_ASKED)) == 1  # the second waits for the first answer
+    # A message during the kickoff is still labelled as usual (queued before the planner's answer, so the
+    # fake model hands each call its own reply)
+    llm.push(CoordinatorAction(label="chat", rationale="a question", reply="Yes."))
+    await actor.add_message("chat", "is this working?", message_id="m1", user_id="alice", enqueue=False)
+    await until(lambda: notices(log, "message.labeled"))
+    await actor.command_answer_question(first["payload"]["id"], "Students", "alice")
+    await until(lambda: len(of_type(log, EventType.QUESTION_ASKED)) == 2)
+    second = to_envelope(of_type(log, EventType.QUESTION_ASKED)[1])
+    assert second is not None
+    llm.push(PlanDraft(tasks=[{"title": "Class schedule page"}, {"title": "Booking form"}]))  # type: ignore[list-item]
+    await actor.command_answer_question(second["payload"]["id"], "Booking and payments", "bob")
+    await until(lambda: any("Plan drafted" in s for s in kickoff_steps(log)))
+
+    plan = await actor.get_plan()
+    assert [(p["title"], p["status"]) for p in plan] == [("Class schedule page", "draft"), ("Booking form", "draft")]
+    planner_prompt = "\n".join(m["content"] for m in llm.calls[-1].messages)
+    assert "Who is it for? Students" in planner_prompt and "First version? Booking and payments" in planner_prompt
+    assert kickoff_steps(log) == ["Question 1 of 2", "Question 2 of 2", "Plan drafted from your answers — approve it to start"]
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_kickoff_reads_an_imported_project_first(setup):
+    from mux.agents.coordinator.schema import PlanDraft
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    await actor.create_file("src/App.jsx", "export default function Shop() { return null; }\n", "alice")
+    llm.push(
+        tool_reply(("read_file", {"path": "src/App.jsx"})),
+        tool_reply(("finish_task", {"summary": "A shop app with one empty page; no cart yet."})),
+        two_questions(),
+        PlanDraft(tasks=[{"title": "Add a cart"}]),  # type: ignore[list-item]
+    )
+    await actor.request_kickoff("alice")
+    await until(lambda: len(of_type(log, EventType.QUESTION_ASKED)) == 1)
+
+    understand = next(p for p in await actor.get_plan() if p.get("kind") == "understand")
+    assert understand["status"] == "done"
+    coder_tools = {t["function"]["name"] for t in next(c for c in llm.calls if c.tools).tools or []}
+    assert "write_file" not in coder_tools
+    questions_prompt = "\n".join(m["content"] for m in llm.calls[2].messages)
+    assert "A shop app with one empty page" in questions_prompt
+    assert kickoff_steps(log)[0] == "Reading your project…"
+    assert not of_type(log, EventType.CHECKPOINT_CREATED)
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_unanswered_questions_take_their_default(quick):
+    from mux.agents.coordinator.schema import PlanDraft
+    registry, llm, logs = quick
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    llm.push(two_questions(), PlanDraft(tasks=[{"title": "Studio dashboard"}]))  # type: ignore[list-item]
+    await actor.request_kickoff("alice")
+    await until(lambda: any("Plan drafted" in s for s in kickoff_steps(log)), timeout=5)
+    planner_prompt = "\n".join(m["content"] for m in llm.calls[-1].messages)
+    assert "Who is it for? Studios" in planner_prompt and "First version? Booking only" in planner_prompt
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_kickoff_without_usable_questions_still_plans(setup):
+    from mux.agents.coordinator.schema import PlanDraft
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    llm.push("not json", "still not json", PlanDraft(tasks=[{"title": "Home page"}]))  # type: ignore[list-item]
+    await actor.request_kickoff("alice")
+    await until(lambda: any("Plan drafted" in s for s in kickoff_steps(log)))
+    assert not of_type(log, EventType.QUESTION_ASKED)
+    assert [p["title"] for p in await actor.get_plan()] == ["Home page"]
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_understand_task_falls_back_to_the_description(setup):
+    from mux.agents.coordinator.schema import PlanDraft
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    await actor.create_file("a.js", "x", "alice")
+    # max_turns=3 and the coder never finishes: the understand task parks
+    llm.push("thinking", "still thinking", "hmm", "not json", "nope", PlanDraft(tasks=[{"title": "Home page"}]))  # type: ignore[list-item]
+    await actor.request_kickoff("alice")
+    await until(lambda: any("Plan drafted" in s for s in kickoff_steps(log)))
+    assert "Couldn't read the project; planning from the description" in kickoff_steps(log)
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_model_errors_stop_the_kickoff_cleanly(switchable):
+    from mux.agents.llm import ModelError
+    registry, llm, logs = switchable
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    llm.on = True
+    llm.error = ModelError("429 rate limited")
+    await actor.request_kickoff("alice")
+    await until(lambda: any(s.startswith("Kickoff stopped") for s in kickoff_steps(log)))
+    assert notices(log, "ai.error") == [{"error": "429 rate limited"}]
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_room_mid_kickoff_is_clean(setup):
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    llm.push(two_questions())
+    await actor.request_kickoff("alice")
+    await until(lambda: of_type(log, EventType.QUESTION_ASKED))
+    await registry.shutdown_all()  # cancels the waiting kickoff without errors

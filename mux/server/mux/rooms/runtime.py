@@ -29,12 +29,13 @@ from uuid import uuid4
 
 from mux.agents.coder.context import CoderContext, build_context
 from mux.agents.coder.loop import CoderLoop, CoderTask, ToolExecutor, TurnBoundary
-from mux.agents.coder.prompts import REVIEW_SYSTEM_PROMPT, coder_system_prompt
+from mux.agents.coder.prompts import REVIEW_SYSTEM_PROMPT, UNDERSTAND_SYSTEM_PROMPT, coder_system_prompt
 from mux.agents.coder.tools import CoderToolExecutor
 from mux.agents.coder.tools.files import ActorFileTools
 from mux.agents.coordinator.agent import Coordinator
 from mux.agents.coordinator.conflicts import Vote, research_conflict, tally, vote_weight
-from mux.agents.coordinator.planner import next_task_id
+from mux.agents.coordinator.kickoff import ask_kickoff_questions
+from mux.agents.coordinator.planner import create_plan, next_task_id
 from mux.agents.coordinator.prompts import Message, PlanItem, RoomView
 from mux.agents.coordinator.schema import CoordinatorAction, Domain, DomainRole, OpenConflict
 from mux.agents.llm import LLM, ModelError, Usage
@@ -162,8 +163,61 @@ class RoomRuntime:
         return self._kickoff_task is not None and not self._kickoff_task.done()
 
     async def _kickoff(self) -> None:
-        """Plan the room with the team. Filled in by the next task."""
-        return None
+        """"Plan it with me": understand the project, ask the team, draft a plan (spec 2026-10-10)."""
+        try:
+            meta = self.actor.manifest.get_room_metadata()
+            description = (meta.get("description") or meta.get("name") or "").strip()
+            summary = description
+            if await self.actor.list_files():
+                await self._step("Reading your project…")
+                status, text = await self._understand()
+                if status == "done" and text:
+                    summary = text
+                else:
+                    await self._step("Couldn't read the project; planning from the description")
+            questions, usage = await ask_kickoff_questions(self.llm, description, summary)
+            await self._spend(usage, COORDINATOR)
+            answers: list[tuple[str, str]] = []
+            if questions is not None:
+                total = len(questions.questions)
+                for n, q in enumerate(questions.questions, 1):
+                    await self._step(f"Question {n} of {total}")
+                    answers.append((q.question, await self.ask_and_wait(q.question, q.options, q.default, None)))
+            context = f"Project summary:\n{summary or '(none)'}"
+            if answers:
+                context += "\n\nThe team's answers:\n" + "\n".join(f"- {q} {a}" for q, a in answers)
+            result = await create_plan(self.llm, description or "(no description)", context=context)
+            await self._spend(result.usage, COORDINATOR)
+            for item in result.items:
+                new: dict[str, Any] = {"id": next_task_id(await self._plan_items()), "title": item.title, "status": "draft"}
+                if getattr(item, "notes", None):
+                    new["notes"] = item.notes
+                if getattr(item, "owner_role", None):
+                    new["owner_role"] = item.owner_role
+                await self.actor.add_plan_item(new, COORDINATOR)
+            await self._step("Plan drafted from your answers — approve it to start")
+        except asyncio.CancelledError:
+            raise
+        except ModelError as e:
+            await self._model_error(e)
+            await self._step(f"Kickoff stopped: {e}")
+        except Exception:
+            logger.exception(f"Room {self.actor.room_id}: kickoff failed")
+            await self._step("Kickoff stopped: something went wrong")
+
+    async def _understand(self) -> tuple[str, str]:
+        """Run a read-only "understand" task and wait for it: (status, summary)."""
+        item_id = next_task_id(await self._plan_items())
+        waiter: asyncio.Future[tuple[str, str]] = asyncio.get_running_loop().create_future()
+        self._task_waiters[item_id] = waiter
+        await self.actor.add_plan_item(
+            {"id": item_id, "title": "Understand the project", "status": "todo", "kind": "understand"}, COORDINATOR,
+        )
+        self._wake.set()
+        return await waiter
+
+    async def _step(self, text: str) -> None:
+        await self.actor.post_notice("kickoff.step", {"text": text})
 
     async def _model_error(self, error: ModelError) -> None:
         """Tell the room its model failed, at most once per model_error_interval."""
@@ -410,7 +464,9 @@ class RoomRuntime:
         async def on_question(card: dict[str, Any]) -> None:
             asked.append(await self._ask(card["question"], card["options"], card["default"], task_id, parked=False))
 
-        review = item.get("kind") == "review"
+        kind = item.get("kind")
+        review = kind in ("review", "understand")  # read-only tasks: no write tools, no MCP, no checkpoint
+        outcome: tuple[str, str] = ("stopped", "")
         executor = CoderToolExecutor(ActorFileTools(self.actor), search=self.search, on_question=on_question,
                                      read_only=review)
 
@@ -427,8 +483,9 @@ class RoomRuntime:
             async with McpToolset(executor, servers, ask=ask_first, on_unavailable=unavailable) as toolset:
                 loop = CoderLoop(self.llm, _Narrated(self.actor, toolset), _Boundary(self.actor), toolset.schemas(),
                                  max_turns=self.max_turns, on_text_delta=self._delta(task_id))
-                result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build, review=review))
+                result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build, kind=kind))
             await self._spend(result.usage, CODER)
+            outcome = (result.status, result.summary)
             await self.actor.post_notice("agent.text", {"task_id": task_id, "text": result.summary}, CODER)
             if asked:
                 await self.actor.update_plan_item(task_id, {"status": "skipped_question"}, CODER)
@@ -443,6 +500,7 @@ class RoomRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            outcome = ("stopped", str(e))
             if isinstance(e, ModelError):
                 # No traceback: the text is already safe to show, the original error may not be
                 logger.warning(f"Room {self.actor.room_id}: coder's model failed on {task_id}: {e}")
@@ -452,18 +510,22 @@ class RoomRuntime:
             await self._park(item, f"error: {e}")
         finally:
             self._current_task = None
+            waiter = self._task_waiters.pop(task_id, None)
+            if waiter is not None and not waiter.done():
+                waiter.set_result(outcome)
 
     async def _park(self, item: dict[str, Any], why: str) -> None:
         await self.actor.update_plan_item(item["id"], {"status": "skipped_question", "notes": why[:200]}, CODER)
         await self._ask(f"The coder stopped on \"{item['title']}\" ({why}). Retry it?", [RETRY, SKIP], SKIP,
                         item["id"], parked=True)
 
-    async def _context(self, item: dict[str, Any], can_build: bool, *, review: bool = False) -> list[dict[str, Any]]:
+    async def _context(self, item: dict[str, Any], can_build: bool, *, kind: Optional[str] = None) -> list[dict[str, Any]]:
         plan = await self.actor.get_plan()
         files = await self.actor.list_files()
         task = item["title"] + (f"\n{item['notes']}" if item.get("notes") else "")
         return build_context(CoderContext(
-            system_prompt=REVIEW_SYSTEM_PROMPT if review else coder_system_prompt(can_build),
+            system_prompt={"review": REVIEW_SYSTEM_PROMPT, "understand": UNDERSTAND_SYSTEM_PROMPT}.get(kind or "")
+            or coder_system_prompt(can_build),
             conventions=self.conventions,
             plan="\n".join(f"- [{p['id']}] {p['title']} ({p['status']})" for p in plan),
             current_task=f"[{item['id']}] {task}",
