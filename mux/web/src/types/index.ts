@@ -90,6 +90,17 @@ export interface RoomMcp {
   servers: McpServerView[];
 }
 
+// The AI provider a room's agents use: the owner's own key, the MUX server's model, or none
+export type AiRole = 'lightning' | 'super' | 'ultra';
+
+export interface RoomAi {
+  source: 'room' | 'server' | 'none';
+  provider: string | null;
+  base_url: string | null;
+  models: Record<AiRole, string> | null;
+  has_key: boolean;
+}
+
 export interface PlanItem {
   id: string;
   title: string;

@@ -247,6 +247,21 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
       } as Message];
       break;
     }
+    case 'ai.error': {
+      const { error } = (event as unknown as { payload: { error: string } }).payload;
+      newState.messages = [...newState.messages, {
+        id: `ai-${event.seq}`,
+        room_id: newState.room.id,
+        user_id: 'coordinator',
+        text: `The AI model failed (${error}). The room's owner can change it in AI model.`,
+        created_at: event.ts,
+        user: { id: 'coordinator', email: '', name: 'Coordinator', initials: 'CO', color: 'hsl(190, 70%, 60%)' },
+      } as Message];
+      break;
+    }
+    case 'ai.changed':
+      // The AI model dialog loads the settings when it opens
+      break;
     case 'mcp.changed':
       // The Tools dialog loads MCP settings when it opens
       break;

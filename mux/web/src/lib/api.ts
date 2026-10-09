@@ -1,5 +1,5 @@
 // API client for REST commands
-import type { Invite, InviteResult, McpToolSetting, RoomMcp, Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
+import type { AiRole, Invite, InviteResult, McpToolSetting, RoomAi, RoomMcp, Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
 
 import { createDemoRoom, deleteDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
 import { getSocket } from './socket';
@@ -30,6 +30,7 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
   if (roomMatch && roomMatch[2] === '/messages') {
     getSocket(roomMatch[1]).injectEvent(demoMessageEvent(roomMatch[1], body.text, body.to));
   }
+  if (roomMatch && roomMatch[2] === '/ai') return { source: 'server', provider: null, base_url: null, models: null, has_key: false } as T;
   if (roomMatch && roomMatch[2]?.startsWith('/mcp')) return { admin: [], servers: [] } as T;
   if (path === '/github/connect' || path.endsWith('/export')) return { url: 'https://github.com' } as T;
   return { accepted: true, seq: nextDemoSeq(), version: (body.base_version ?? 0) + 1 } as T;
@@ -108,6 +109,12 @@ export const api = {
     fetchWithAuth<RoomMcp>(`/rooms/${id}/mcp/admin/${name}`, { method: 'PATCH', body: JSON.stringify(data) }),
   refreshMcpAdmin: (id: string, name: string) =>
     fetchWithAuth<RoomMcp>(`/rooms/${id}/mcp/admin/${name}/refresh`, { method: 'POST' }),
+
+  // The room's AI provider: anyone in the room reads it, only the owner sets it (the key is never returned)
+  getAi: (id: string) => fetchWithAuth<RoomAi>(`/rooms/${id}/ai`),
+  setAi: (id: string, data: { provider: string; base_url: string; api_key: string; models: Record<AiRole, string> }) =>
+    fetchWithAuth<RoomAi>(`/rooms/${id}/ai`, { method: 'PUT', body: JSON.stringify(data) }),
+  clearAi: (id: string) => fetchWithAuth<RoomAi>(`/rooms/${id}/ai`, { method: 'DELETE' }),
 
   // Messages
   sendMessage: (roomId: string, text: string, to: MessageTo = 'agent') =>
