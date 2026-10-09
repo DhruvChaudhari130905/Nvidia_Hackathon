@@ -58,6 +58,16 @@ Everyone in a room shares one live session. There are three ways in; the owner m
 
 Invite emails are sent by Supabase, which needs `SUPABASE_SERVICE_ROLE_KEY` in `mux/server/.env` and the web app's `/auth/callback` in Supabase's Redirect URLs. If an email can't be sent (no key, or Supabase's hourly email limit), the invite is still saved: send the link yourself and it works the same once they sign in with that email. Supabase's built-in mailer only sends a few emails an hour; add your own SMTP server in Supabase for more.
 
+## 🧭 Plan it with me
+
+When you create a room or import a project with **Plan it with me** ticked (it is by default), MUX plans with you before building:
+
+1. **Understand:** for an imported project, the coder reads it (README, package files, entry points, main pages) without changing anything and posts a summary.
+2. **Ask:** the coordinator asks 2–3 multiple-choice questions, one at a time, as cards in **Decisions & plan**. Anyone in the room can answer; an unanswered card takes its default.
+3. **Plan:** it drafts tasks from your idea, the summary and the answers. The owner reviews them and presses **Approve plan** to start building.
+
+The feed shows each step. An empty plan has a **Plan it with me** button for rooms created without it. It needs an AI model (the server's or the room's own); without one, nothing starts.
+
 ### Teammates on other computers
 
 `localhost` only works on your machine. For a quick session, `make tunnel` (needs `brew install cloudflared`) gives the web app and API public https addresses and prints the two restart commands and the Supabase redirect URL to add. For something permanent, deploy the web app and API and set `NEXT_PUBLIC_API_URL` and `WEB_APP_URL` to their addresses.
