@@ -3,11 +3,12 @@
 import React, { useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Share2, Github, ArrowLeft, Trash2 } from 'lucide-react';
+import { Share2, Github, ArrowLeft, Trash2, Plug } from 'lucide-react';
 import type { User, Room, Membership } from '@/types';
 import { BudgetMeter } from './BudgetMeter';
 import { Presence } from './Presence';
 import { ShareDialog } from './ShareDialog';
+import { ToolsDialog } from './ToolsDialog';
 import { ExportDialog } from './ExportDialog';
 import { DeleteRoomDialog } from './DeleteRoomDialog';
 import { NotificationBell } from './Notifications';
@@ -30,6 +31,7 @@ export function TopBar({
   presence,
 }: TopBarProps) {
   const [showShare, setShowShare] = React.useState(false);
+  const [showTools, setShowTools] = React.useState(false);
   const [showExport, setShowExport] = React.useState(false);
   const [showDelete, setShowDelete] = React.useState(false);
   const router = useRouter();
@@ -91,6 +93,10 @@ export function TopBar({
       />
       <div className="flex items-center gap-2">
         <NotificationBell />
+        <button className="btn flex items-center gap-1.5" onClick={() => setShowTools(true)} type="button" title="MCP tools for the coder">
+          <Plug className="w-4 h-4" />
+          <span className="hidden sm:inline">Tools</span>
+        </button>
         <button className="btn flex items-center gap-1.5" onClick={() => setShowShare(true)} type="button">
           <Share2 className="w-4 h-4" />
           <span className="hidden sm:inline">Share</span>
@@ -114,6 +120,7 @@ export function TopBar({
         )}
       </div>
       <ShareDialog isOpen={showShare} onClose={() => setShowShare(false)} room={room} isOwner={isOwner} />
+      <ToolsDialog isOpen={showTools} onClose={() => setShowTools(false)} roomId={room.id} isOwner={isOwner} />
       <ExportDialog isOpen={showExport} onClose={() => setShowExport(false)} room={room} />
       <DeleteRoomDialog
         room={showDelete ? { id: room.id, title: room.title } : null}

@@ -1,5 +1,5 @@
 // API client for REST commands
-import type { Invite, InviteResult, Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
+import type { Invite, InviteResult, McpToolSetting, RoomMcp, Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
 
 import { createDemoRoom, deleteDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
 import { getSocket } from './socket';
@@ -30,6 +30,7 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
   if (roomMatch && roomMatch[2] === '/messages') {
     getSocket(roomMatch[1]).injectEvent(demoMessageEvent(roomMatch[1], body.text, body.to));
   }
+  if (roomMatch && roomMatch[2]?.startsWith('/mcp')) return { admin: [], servers: [] } as T;
   if (path === '/github/connect' || path.endsWith('/export')) return { url: 'https://github.com' } as T;
   return { accepted: true, seq: nextDemoSeq(), version: (body.base_version ?? 0) + 1 } as T;
 }
@@ -92,6 +93,21 @@ export const api = {
   // Owner only; null removes the password
   setRoomPassword: (id: string, password: string | null) =>
     fetchWithAuth<Room>(`/rooms/${id}/password`, { method: 'PUT', body: JSON.stringify({ password }) }),
+
+  // MCP servers for the coder: anyone in the room reads them, only the owner changes them
+  getMcp: (id: string) => fetchWithAuth<RoomMcp>(`/rooms/${id}/mcp`),
+  addMcpServer: (id: string, data: { name: string; url: string; headers: Record<string, string> }) =>
+    fetchWithAuth<RoomMcp>(`/rooms/${id}/mcp/servers`, { method: 'POST', body: JSON.stringify(data) }),
+  refreshMcpServer: (id: string, name: string) =>
+    fetchWithAuth<RoomMcp>(`/rooms/${id}/mcp/servers/${name}/refresh`, { method: 'POST' }),
+  updateMcpServer: (id: string, name: string, data: { headers?: Record<string, string>; settings?: Record<string, McpToolSetting> }) =>
+    fetchWithAuth<RoomMcp>(`/rooms/${id}/mcp/servers/${name}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  removeMcpServer: (id: string, name: string) =>
+    fetchWithAuth<RoomMcp>(`/rooms/${id}/mcp/servers/${name}`, { method: 'DELETE' }),
+  updateMcpAdmin: (id: string, name: string, data: { enabled: boolean; settings?: Record<string, McpToolSetting> }) =>
+    fetchWithAuth<RoomMcp>(`/rooms/${id}/mcp/admin/${name}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  refreshMcpAdmin: (id: string, name: string) =>
+    fetchWithAuth<RoomMcp>(`/rooms/${id}/mcp/admin/${name}/refresh`, { method: 'POST' }),
 
   // Messages
   sendMessage: (roomId: string, text: string, to: MessageTo = 'agent') =>

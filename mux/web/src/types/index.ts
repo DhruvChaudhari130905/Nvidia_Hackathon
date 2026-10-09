@@ -55,6 +55,41 @@ export interface InviteResult extends Invite {
   link: string;
 }
 
+// MCP servers whose tools the coder can use in a room (owner manages them in the Tools dialog)
+export interface McpTool {
+  name: string;
+  description: string;
+  input_schema?: Record<string, unknown>;
+}
+
+export interface McpToolSetting {
+  enabled: boolean;
+  mode: 'auto' | 'ask';
+}
+
+export interface McpServerView {
+  name: string;
+  url: string;
+  header_names: string[];
+  tools: McpTool[];
+  settings: Record<string, McpToolSetting>;
+}
+
+// A server from the MUX server's mcp.json, off in a room until its owner turns it on
+export interface McpAdminView {
+  name: string;
+  kind: 'stdio' | 'http';
+  enabled: boolean;
+  settings: Record<string, McpToolSetting>;
+  tools: McpTool[];
+  tools_loaded: boolean;
+}
+
+export interface RoomMcp {
+  admin: McpAdminView[];
+  servers: McpServerView[];
+}
+
 export interface PlanItem {
   id: string;
   title: string;

@@ -234,6 +234,22 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
       );
       break;
     }
+    case 'mcp.unavailable': {
+      // Shown in the feed like a coordinator reply, so the room knows the coder worked without those tools
+      const { server, error } = (event as unknown as { payload: { server: string; error: string } }).payload;
+      newState.messages = [...newState.messages, {
+        id: `mcp-${event.seq}`,
+        room_id: newState.room.id,
+        user_id: 'coordinator',
+        text: `MCP server "${server}" is unavailable (${error}). The coder carried on without its tools.`,
+        created_at: event.ts,
+        user: { id: 'coordinator', email: '', name: 'Coordinator', initials: 'CO', color: 'hsl(190, 70%, 60%)' },
+      } as Message];
+      break;
+    }
+    case 'mcp.changed':
+      // The Tools dialog loads MCP settings when it opens
+      break;
     case 'agent.text':
     case 'tool.called':
     case 'tool.result':
