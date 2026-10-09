@@ -145,3 +145,20 @@ def test_insert_item_goes_to_end_when_id_missing_or_unknown():
 def test_next_task_id():
     assert next_task_id([]) == "t1"
     assert next_task_id([PlanItem("t1", "a", "done"), PlanItem("t7", "b", "todo")]) == "t8"
+
+
+def test_room_state_says_when_building_waits_for_approval():
+    from mux.agents.coordinator.prompts import Message as M, PlanItem as P, RoomView as R, render_room
+    new = M("m9", "alice", "pm", "go for it")
+    drafts = R(plan=[P("t1", "Header", "draft"), P("t2", "Footer", "draft")], current_task_id=None)
+    assert "Building: not started" in render_room(drafts, new) and "Approve plan" in render_room(drafts, new)
+    working = R(plan=[P("t1", "Header", "doing"), P("t2", "Footer", "todo")], current_task_id="t1")
+    assert "Building: in progress (t1)" in render_room(working, new)
+    finished = R(plan=[P("t1", "Header", "done")], current_task_id=None)
+    assert "Building: idle" in render_room(finished, new)
+
+
+def test_coordinator_never_promises_work_it_cannot_do():
+    from mux.agents.coordinator.prompts import SYSTEM
+    assert "You can't read files or run anything" in SYSTEM
+    assert "Approve plan" in SYSTEM
