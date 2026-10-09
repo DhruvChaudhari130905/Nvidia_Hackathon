@@ -404,7 +404,9 @@ class RoomRuntime:
 
         try:
             # MCP servers connect for this task only and disconnect when it ends (mux/mcp/toolset.py)
-            async with McpToolset(executor, enabled_servers(self.actor), ask=ask_first, on_unavailable=unavailable) as toolset:
+            # A review is read-only, and MCP tools can change things elsewhere, so it gets none
+            servers = [] if review else enabled_servers(self.actor)
+            async with McpToolset(executor, servers, ask=ask_first, on_unavailable=unavailable) as toolset:
                 loop = CoderLoop(self.llm, _Narrated(self.actor, toolset), _Boundary(self.actor), toolset.schemas(),
                                  max_turns=self.max_turns, on_text_delta=self._delta(task_id))
                 result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build, review=review))
@@ -423,9 +425,12 @@ class RoomRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.exception(f"Room {self.actor.room_id}: coder failed on {task_id}")
             if isinstance(e, ModelError):
+                # No traceback: the text is already safe to show, the original error may not be
+                logger.warning(f"Room {self.actor.room_id}: coder's model failed on {task_id}: {e}")
                 await self._model_error(e)
+            else:
+                logger.exception(f"Room {self.actor.room_id}: coder failed on {task_id}")
             await self._park(item, f"error: {e}")
         finally:
             self._current_task = None

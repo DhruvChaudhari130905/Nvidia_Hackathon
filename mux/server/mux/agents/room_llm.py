@@ -6,7 +6,9 @@ import logging
 from typing import Any, Callable, Optional
 
 from mux.agents.llm import LLM, LLMReply, ModelError, ModelRole, NoModel, OpenAILLM
+from mux.config import settings
 from mux.secrets import SecretsUnavailable, decrypt_value
+from mux.urls import UrlNotAllowed, check_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +38,12 @@ class RoomLLM:
     def available(self) -> bool:
         return self.actor.ai_settings is not None or self.default is not None
 
-    def _room_client(self, ai: dict[str, Any]) -> Any:
+    async def _room_client(self, ai: dict[str, Any]) -> Any:
         if self._client is None or self._version != ai["version"]:
+            try:
+                await check_url_async(ai["base_url"])  # again: the address may resolve differently by now
+            except UrlNotAllowed as e:
+                raise NoModel(f"the room's model address isn't allowed ({e}); the owner can change it") from None
             try:
                 self._key = decrypt_value(ai["api_key"])
             except SecretsUnavailable as e:
@@ -51,17 +57,18 @@ class RoomLLM:
     async def chat(self, role: ModelRole, messages: list[dict[str, Any]], **kwargs: Any) -> LLMReply:
         ai = self.actor.ai_settings
         if ai is not None:
-            client, secret = self._room_client(ai), self._key
+            client, secret = await self._room_client(ai), self._key
         elif self.default is not None:
-            client, secret = self.default, ""
+            client, secret = self.default, settings.token_factory_api_key
         else:
             raise NoModel("no AI model is set up for this room")
         try:
             return await client.chat(role, messages, **kwargs)
+        # `from None`: a chained original error would put the unredacted key in logged tracebacks
         except ModelError as e:
-            raise ModelError(redact(str(e), secret)) from e
+            raise ModelError(redact(str(e), secret)) from None
         except Exception as e:  # openai.APIError and transport errors
-            raise ModelError(redact(f"{type(e).__name__}: {e}", secret)) from e
+            raise ModelError(redact(f"{type(e).__name__}: {e}", secret)) from None
 
 
 async def check_models(llm: Any, models: dict[ModelRole, str], secret: str) -> dict[str, str]:

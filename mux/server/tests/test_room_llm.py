@@ -62,7 +62,7 @@ def room(settings_: dict | None) -> Any:
 
 
 def saved(key: str = "sk-room", version: str = "v1", provider: str = "openai") -> dict:
-    return {"provider": provider, "base_url": "https://api.example.com/v1", "api_key": encrypt_value(key),
+    return {"provider": provider, "base_url": "https://93.184.216.34/v1", "api_key": encrypt_value(key),
             "models": MODELS, "version": version}
 
 
@@ -70,7 +70,7 @@ async def test_room_settings_win_over_the_server(secrets_key):
     llm = RoomLLM(room(saved()), Default(), make=Recorder)  # type: ignore[arg-type]
     assert llm.available()
     assert (await llm.chat(ModelRole.SUPER, [])).text == "room:super"
-    assert Recorder.built == [("https://api.example.com/v1", "sk-room", MODELS, False)]
+    assert Recorder.built == [("https://93.184.216.34/v1", "sk-room", MODELS, False)]
 
 
 async def test_server_default_and_no_model(secrets_key):
@@ -139,3 +139,52 @@ async def test_check_models_reports_per_role_with_the_key_hidden():
 def test_redact():
     assert redact("key sk-1 and 'sk-1'", "sk-1") == "key [hidden] and '[hidden]'"
     assert redact("nothing", "") == "nothing"
+
+
+# --- review fixes -----------------------------------------------------------------
+
+async def test_provider_redirects_are_not_followed():
+    import httpx2 as httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "provider.example":
+            return httpx.Response(307, headers={"location": "http://169.254.169.254/latest/meta-data"})
+        return httpx.Response(400, json={"error": {"message": "INTERNAL-METADATA token=AKIA"}})
+
+    llm = OpenAILLM("https://provider.example/v1", "k", {ModelRole.SUPER: "m"}, transport=httpx.MockTransport(handler))
+    with pytest.raises(Exception) as caught:
+        await llm.chat(ModelRole.SUPER, [])
+    assert "INTERNAL-METADATA" not in str(caught.value)
+
+
+async def test_room_base_url_is_checked_again_before_use(secrets_key, monkeypatch):
+    monkeypatch.setattr(settings, "allow_private_urls", False)
+    bad = saved() | {"base_url": "https://10.0.0.5/v1"}
+    with pytest.raises(NoModel, match="address"):
+        await RoomLLM(room(bad), Default(), make=Recorder).chat(ModelRole.SUPER, [])  # type: ignore[arg-type]
+
+
+async def test_errors_carry_no_unredacted_cause(secrets_key):
+    import traceback
+
+    class Leaky:
+        def __init__(self, *a: Any, **k: Any) -> None: ...
+
+        async def chat(self, *a: Any, **k: Any) -> LLMReply:
+            raise RuntimeError("401 bad key sk-room")
+
+    with pytest.raises(ModelError) as caught:
+        await RoomLLM(room(saved()), None, make=Leaky).chat(ModelRole.SUPER, [])
+    assert "sk-room" not in "".join(traceback.format_exception(caught.value))
+
+
+async def test_the_servers_key_is_hidden_too(monkeypatch):
+    monkeypatch.setattr(settings, "token_factory_api_key", "tf-server-key")
+
+    class LeakyDefault:
+        async def chat(self, *a: Any, **k: Any) -> LLMReply:
+            raise RuntimeError("bad key tf-server-key")
+
+    with pytest.raises(ModelError) as caught:
+        await RoomLLM(room(None), LeakyDefault()).chat(ModelRole.SUPER, [])  # type: ignore[arg-type]
+    assert "tf-server-key" not in str(caught.value)

@@ -995,3 +995,17 @@ def test_clearing_and_restart(client, ai_checks, monkeypatch):
     r = client.delete(f"/rooms/{rid}/ai", headers=auth("alice"))
     assert r.status_code == 200 and r.json() == {"source": "server", "provider": None, "base_url": None,
                                                  "models": None, "has_key": False}
+
+
+def test_saving_checks_models_quickly(client, ai_checks, monkeypatch):
+    import mux.api.ai as ai_api
+    built: list[dict] = []
+
+    class Recording:
+        def __init__(self, *args, **kwargs):
+            built.append(kwargs)
+
+    monkeypatch.setattr(ai_api, "OpenAILLM", Recording)
+    rid = create_room(client)
+    assert client.put(f"/rooms/{rid}/ai", json=AI_BODY, headers=auth("alice")).status_code == 200
+    assert built[0]["max_retries"] == 0 and built[0]["timeout"] <= 30

@@ -21,6 +21,8 @@ router = APIRouter()
 Provider = Literal["token_factory", "openai", "anthropic", "openrouter", "groq", "together", "custom"]
 _MODEL_ID = re.compile(r"^\S{1,200}$")
 _API_KEY = re.compile(r"^[\x21-\x7e]{1,500}$")
+# The save check gives up fast: no retries, and a wrong or slow address answers within this
+CHECK_TIMEOUT = 20.0
 
 
 class Models(BaseModel):
@@ -87,7 +89,8 @@ async def set_ai(room_id: str, request: AiSettingsRequest, current_user: User = 
     except SecretsUnavailable as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     models = {ModelRole(role): model for role, model in request.models.model_dump().items()}
-    llm = OpenAILLM(request.base_url, key, models, thinking=request.provider == "token_factory")
+    llm = OpenAILLM(request.base_url, key, models, thinking=request.provider == "token_factory",
+                    max_retries=0, timeout=CHECK_TIMEOUT)
     errors = await room_llm.check_models(llm, models, key)
     if errors:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"errors": errors})

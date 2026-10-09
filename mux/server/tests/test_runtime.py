@@ -458,3 +458,20 @@ async def test_model_errors_reach_the_room_once_a_minute(switchable):
     await asyncio.sleep(0.2)
     assert notices(log, "ai.error") == [{"error": "401 invalid key [hidden]"}]
     await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_reviews_get_no_mcp_tools(setup, docs_mcp):
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs)
+    log = logs[actor.room_id]
+    await actor.save_mcp_server("docs", "https://93.184.216.34/mcp", {}, ADD_TOOL, {}, "alice")
+    llm.push(
+        CoordinatorAction(label="review", rationale="asks for a review", review=Review(focus="the whole project")),
+        tool_reply(("finish_task", {"summary": "Looks fine"})),
+    )
+    await actor.add_message("chat", "review my project", message_id="m1", user_id="alice", enqueue=False)
+    await until(lambda: notices(log, "agent.text"))
+    offered = {t["function"]["name"] for t in [c for c in llm.calls if c.tools][-1].tools or []}
+    assert "docs__add" not in offered and offered == {"read_file", "list_files", "web_search", "finish_task"}
+    await registry.shutdown_all()

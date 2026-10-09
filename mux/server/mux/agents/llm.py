@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Protocol
 
+import httpx2
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -68,8 +69,13 @@ class OpenAILLM:
     """Any OpenAI-compatible chat completions API. `thinking` sends Nemotron's switch (Token Factory only)."""
 
     def __init__(self, base_url: str, api_key: str, models: dict[ModelRole, str], *, thinking: bool = False,
-                 client: Any = None) -> None:
-        self._client = client or AsyncOpenAI(base_url=base_url, api_key=api_key, max_retries=3, timeout=120)
+                 client: Any = None, max_retries: int = 3, timeout: float = 120.0,
+                 transport: httpx2.AsyncBaseTransport | None = None) -> None:
+        # Redirects aren't followed: a room's provider could otherwise send requests (and show their answers)
+        # to addresses the URL check refused, like the cloud metadata service
+        http = httpx2.AsyncClient(follow_redirects=False, timeout=timeout, transport=transport)
+        self._client = client or AsyncOpenAI(base_url=base_url, api_key=api_key, max_retries=max_retries,
+                                             timeout=timeout, http_client=http)
         self._models = models
         self._thinking = thinking
 

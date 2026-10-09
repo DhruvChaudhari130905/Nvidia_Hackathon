@@ -30,3 +30,13 @@ def test_new_names_take_over(monkeypatch):
     monkeypatch.setattr(settings, "allow_private_urls", False)
     with pytest.raises(UrlNotAllowed):
         check_url("http://localhost:11434/v1")
+
+
+def test_setting_the_new_key_keeps_values_saved_under_the_old_one(monkeypatch):
+    old = Fernet.generate_key().decode()
+    monkeypatch.setattr(settings, "room_secrets_key", "")
+    monkeypatch.setattr(settings, "mcp_encryption_key", old)
+    saved = encrypt_value("mcp-token")
+    monkeypatch.setattr(settings, "room_secrets_key", Fernet.generate_key().decode())
+    assert decrypt_value(saved) == "mcp-token"
+    assert decrypt_value(encrypt_value("new")) == "new"
