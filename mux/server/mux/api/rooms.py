@@ -397,6 +397,22 @@ async def _check_password(actor: RoomActor, user_id: str, password: str) -> None
     password_attempts.reset(actor.room_id, user_id)
 
 
+@router.post("/{room_id}/kickoff")
+async def kickoff(
+    room_id: str,
+    current_user: User = Depends(require_owner),
+    actor: RoomActor = Depends(get_room_actor),
+) -> dict[str, Any]:
+    """Owner only: "Plan it with me". The room's runtime reads the project, asks the team and drafts a plan."""
+    runtime = get_registry().runtime(room_id)
+    if runtime is None or not runtime.model_available():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This room has no AI model, so planning can't start")
+    if runtime.kickoff_running:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Planning is already running")
+    await actor.request_kickoff(current_user.id)
+    return {"accepted": True}
+
+
 @router.post("/{room_id}/leave", response_model=RoomLeaveResponse)
 async def leave_room(
     room_id: str,

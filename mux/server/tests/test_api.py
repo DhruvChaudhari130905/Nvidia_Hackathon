@@ -1009,3 +1009,35 @@ def test_saving_checks_models_quickly(client, ai_checks, monkeypatch):
     rid = create_room(client)
     assert client.put(f"/rooms/{rid}/ai", json=AI_BODY, headers=auth("alice")).status_code == 200
     assert built[0]["max_retries"] == 0 and built[0]["timeout"] <= 30
+
+
+# --- kickoff -------------------------------------------------------------------
+
+def test_kickoff_needs_the_owner_and_a_model(client):
+    rid = create_room(client)
+    client.post(f"/rooms/{rid}/members", json={"user_id": "bob", "role": "editor"}, headers=auth("alice"))
+    assert client.post(f"/rooms/{rid}/kickoff", headers=auth("bob")).status_code == 403
+    r = client.post(f"/rooms/{rid}/kickoff", headers=auth("alice"))
+    assert r.status_code == 409 and "no AI model" in r.json()["detail"]
+
+
+def test_kickoff_is_recorded_and_not_run_twice(client, monkeypatch):
+    import asyncio
+    rid = create_room(client)
+    runtime = room_registry.get_registry().runtime(rid)
+    assert runtime is not None
+    monkeypatch.setattr(runtime, "_model_available", lambda: True)
+
+    async def no_kickoff() -> None:
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(runtime, "_kickoff", no_kickoff)
+    assert client.post(f"/rooms/{rid}/kickoff", headers=auth("alice")).json() == {"accepted": True}
+    for _ in range(50):
+        if runtime.kickoff_running:
+            break
+        time.sleep(0.02)
+    r = client.post(f"/rooms/{rid}/kickoff", headers=auth("alice"))
+    assert r.status_code == 409 and r.json()["detail"] == "Planning is already running"
+    with client.websocket_connect(f"/rooms/{rid}/ws?since=0&token={token('alice')}") as ws:
+        assert '"kickoff.requested"' in ws.receive_text()

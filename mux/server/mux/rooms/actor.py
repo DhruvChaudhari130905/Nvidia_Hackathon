@@ -30,6 +30,7 @@ from mux.events.models import (
     RoomMcpAdminToggledEvent,
     RoomAiSettingsSavedEvent,
     RoomAiSettingsClearedEvent,
+    KickoffRequestedEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -458,6 +459,11 @@ class RoomActor:
             self.ai_settings = None
             await self._emit(RoomAiSettingsClearedEvent(**self._event_fields(user_id)))
             return True
+
+    async def request_kickoff(self, user_id: str) -> None:
+        """Ask the room's runtime to plan the room with the team (rooms/runtime.py _kickoff)."""
+        async with self._lock:
+            await self._emit(KickoffRequestedEvent(**self._event_fields(user_id), requested_by=user_id))
 
     async def close_room(self, user_id: str, reason: Optional[str] = None) -> None:
         async with self._lock:

@@ -231,6 +231,8 @@ export type EventType =
   | 'mcp.unavailable'
   | 'ai.changed'
   | 'ai.error'
+  | 'kickoff.requested'
+  | 'kickoff.step'
   | 'message.posted'
   | 'message.labeled'
   | 'plan.drafted'

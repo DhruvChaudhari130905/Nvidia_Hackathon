@@ -24,6 +24,7 @@ class EventType(str, Enum):
     ROOM_MCP_ADMIN_TOGGLED = "room_mcp_admin_toggled"
     ROOM_AI_SETTINGS_SAVED = "room_ai_settings_saved"
     ROOM_AI_SETTINGS_CLEARED = "room_ai_settings_cleared"
+    KICKOFF_REQUESTED = "kickoff_requested"
 
     # User presence events
     USER_JOINED = "user_joined"
@@ -263,6 +264,12 @@ class RoomAiSettingsSavedEvent(BaseEvent):
 class RoomAiSettingsClearedEvent(BaseEvent):
     """The owner switched the room back to the server's model."""
     type: EventType = EventType.ROOM_AI_SETTINGS_CLEARED
+
+
+class KickoffRequestedEvent(BaseEvent):
+    """The owner asked MUX to plan the room with the team ("Plan it with me")."""
+    type: EventType = EventType.KICKOFF_REQUESTED
+    requested_by: str = Field(..., description="User who asked")
 
 
 # Presence events
@@ -672,6 +679,7 @@ Event = Union[
     RoomMcpAdminToggledEvent,
     RoomAiSettingsSavedEvent,
     RoomAiSettingsClearedEvent,
+    KickoffRequestedEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -734,6 +742,7 @@ __all__ = [
     "RoomMcpAdminToggledEvent",
     "RoomAiSettingsSavedEvent",
     "RoomAiSettingsClearedEvent",
+    "KickoffRequestedEvent",
     "UserJoinedEvent",
     "UserLeftEvent",
     "UserTypingEvent",

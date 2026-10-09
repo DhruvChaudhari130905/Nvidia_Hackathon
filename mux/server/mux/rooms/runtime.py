@@ -109,6 +109,8 @@ class RoomRuntime:
         self.max_turns = max_turns
         self.model_error_interval = model_error_interval
         self._last_model_error = float("-inf")
+        self._kickoff_task: Optional[asyncio.Task] = None
+        self._task_waiters: dict[str, asyncio.Future[tuple[str, str]]] = {}  # plan item id -> (status, summary)
         self.coordinator = Coordinator(llm)
 
         self._events: asyncio.Queue[BaseEvent] = asyncio.Queue()
@@ -132,9 +134,10 @@ class RoomRuntime:
         self._wake.set()
 
     async def stop(self) -> None:
-        for task in [*self._tasks, *self._timers]:
+        kickoff = [self._kickoff_task] if self._kickoff_task is not None else []
+        for task in [*self._tasks, *self._timers, *kickoff]:
             task.cancel()
-        await asyncio.gather(*self._tasks, *self._timers, return_exceptions=True)
+        await asyncio.gather(*self._tasks, *self._timers, *kickoff, return_exceptions=True)
         self._tasks.clear()
         self._timers.clear()
 
@@ -150,6 +153,17 @@ class RoomRuntime:
         """False when the room has no model (no room key, no server key): agents stay off, quietly."""
         available = getattr(self.llm, "available", None)
         return bool(available()) if callable(available) else True
+
+    def model_available(self) -> bool:
+        return self._model_available()
+
+    @property
+    def kickoff_running(self) -> bool:
+        return self._kickoff_task is not None and not self._kickoff_task.done()
+
+    async def _kickoff(self) -> None:
+        """Plan the room with the team. Filled in by the next task."""
+        return None
 
     async def _model_error(self, error: ModelError) -> None:
         """Tell the room its model failed, at most once per model_error_interval."""
@@ -181,6 +195,10 @@ class RoomRuntime:
             self._wake.set()  # approved tasks waiting for a model can start
             return
         if not self._model_available():
+            return
+        if t == EventType.KICKOFF_REQUESTED:
+            if not self.kickoff_running:
+                self._kickoff_task = asyncio.create_task(self._kickoff())
             return
         if t == EventType.USER_MESSAGE_SENT:
             e = cast(UserMessageSentEvent, event)
