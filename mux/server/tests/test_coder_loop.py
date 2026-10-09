@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -498,3 +499,48 @@ async def test_invalid_tool_arguments_are_not_sent_back_to_the_api():
     echoed = next(m for m in history if m.get("tool_calls"))["tool_calls"][0]["function"]["arguments"]
     assert echoed == "{}"
     assert any(m["role"] == "tool" and m["tool_call_id"] == "call-1" and "Invalid JSON" in m["content"] for m in history)
+
+
+class ReadsUntilItSeesBothFiles:
+    """A model that, like the real one in room_f0c75b04aff2, re-reads a file whenever its content isn't
+    in the conversation any more, and finishes once it can see both files at once."""
+
+    def __init__(self) -> None:
+        self.turns = 0
+
+    async def chat(self, role: ModelRole, messages: list[dict[str, Any]], **kwargs: Any) -> LLMReply:
+        self.turns += 1
+        visible = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "tool")
+        for path, marker in (("src/main.jsx", "MAIN-BODY"), ("index.html", "INDEX-BODY")):
+            if marker not in visible:
+                return LLMReply(text="", model="fake", usage=Usage(1, 1), finish_reason="tool_calls",
+                                tool_calls=[ToolCall(f"c{self.turns}", "read_file", {"path": path}, json.dumps({"path": path}))])
+        return LLMReply(text="", model="fake", usage=Usage(1, 1), finish_reason="tool_calls",
+                        tool_calls=[ToolCall(f"c{self.turns}", "finish_task", {"summary": "done"}, '{"summary": "done"}')])
+
+
+@pytest.mark.asyncio
+async def test_files_read_earlier_stay_readable_so_the_coder_does_not_ping_pong():
+    async def files(name: str, arguments: dict[str, Any]) -> Any:
+        if name == "read_file":
+            marker = "MAIN-BODY" if arguments["path"] == "src/main.jsx" else "INDEX-BODY"
+            # What the model needs sits past the first 100 characters, as in a real file
+            return {"path": arguments["path"], "content": "import x;\n" * 40 + marker, "version": 1,
+                    "start_line": 1, "end_line": 41}
+        return {"ok": True, "summary": arguments.get("summary", "")}
+
+    llm = ReadsUntilItSeesBothFiles()
+    result = await CoderLoop(llm, FakeTools(files), FakeActor(), [], max_turns=25).run_task(CoderTask("t1", "Fix the page"), [])
+    assert result.status == "done" and result.turns == 3
+
+
+@pytest.mark.asyncio
+async def test_alternating_repeats_without_progress_are_a_loop():
+    from mux.agents.coder.escalation import EscalationState
+    state = EscalationState()
+    calls = [("read_file", {"path": "a"}), ("read_file", {"path": "b"})] * 2 + [("read_file", {"path": "a"})]
+    assert [state.record_tool_call(n, a) for n, a in calls] == [False, False, False, False, True]
+    # A change in between is progress: build, edit, build, edit, build never trips it
+    state = EscalationState()
+    progress = [("run_build", {}), ("edit_file", {"path": "a"})] * 3
+    assert not any(state.record_tool_call(n, a) for n, a in progress)

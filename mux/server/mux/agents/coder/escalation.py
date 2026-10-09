@@ -20,8 +20,7 @@ class EscalationState:
     model: ModelRole = ModelRole.SUPER
     turns: int = 0
     consecutive_failed_builds: int = 0
-    _last_call: str = ""
-    _repeats: int = 0
+    _since_change: dict[str, int] = field(default_factory=dict)  # call -> times since the last file change
     _ultra_errors: dict[str, int] = field(default_factory=dict)
 
     def next_turn(self) -> bool:
@@ -32,14 +31,17 @@ class EscalationState:
         return True
 
     def record_tool_call(self, name: str, arguments: dict[str, Any]) -> bool:
-        """Return True when the same call with the same arguments comes 3 times in a row.
+        """Return True when the same call with the same arguments comes 3 times with no file change between.
 
-        Only back-to-back repeats count: build, edit, build is progress, not a loop.
+        A change resets the count: build, edit, build is progress, not a loop. Reading two files in turn
+        (a, b, a, b, a) with nothing changing is a loop.
         """
+        if name in ("write_file", "edit_file", "delete_file", "add_image"):
+            self._since_change.clear()
+            return False
         key = f"{name}:{json.dumps(arguments, sort_keys=True, default=str)}"
-        self._repeats = self._repeats + 1 if key == self._last_call else 1
-        self._last_call = key
-        return self._repeats >= MAX_REPEATS
+        self._since_change[key] = self._since_change.get(key, 0) + 1
+        return self._since_change[key] >= MAX_REPEATS
 
     def record_build(self, passed: bool) -> bool:
         """Record a build result. Return True when this result moves the task to Ultra."""

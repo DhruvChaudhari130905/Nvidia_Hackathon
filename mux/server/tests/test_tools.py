@@ -355,3 +355,45 @@ def test_code_check_accepts_a_bare_ampersand_in_jsx_text_and_points_at_the_first
     broken = "import React from 'react';\n\nexport const A = () => {\n  return (\n    <div>\n      {[1].map(i => (\n        <p>{i}</p>\n      )}\n    </div>\n  );\n};\n"
     (error,) = syntax_errors("src/A.tsx", broken)
     assert not error.startswith("src/A.tsx:1:")
+
+
+def _read(call_id: str, path: str, body: str) -> list[dict]:
+    return [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": call_id, "type": "function", "function": {"name": "read_file", "arguments": json.dumps({"path": path})}}]},
+        {"role": "tool", "tool_call_id": call_id, "content": json.dumps({"path": path, "content": body, "version": 1})},
+    ]
+
+
+def _edit(call_id: str, path: str) -> list[dict]:
+    return [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": call_id, "type": "function", "function": {"name": "edit_file", "arguments": json.dumps({"path": path, "base_version": 1, "edits": []})}}]},
+        {"role": "tool", "tool_call_id": call_id, "content": json.dumps({"ok": True, "path": path, "version": 2})},
+    ]
+
+
+def test_compaction_keeps_the_latest_read_of_each_file():
+    a, b = "A" * 500, "B" * 500
+    messages = [*_read("r1", "a.ts", a), *_read("r2", "b.ts", b), *_read("r3", "a.ts", a),
+                {"role": "assistant", "content": "", "tool_calls": []}]
+    out = compact(messages)
+    assert out[1]["content"].startswith("[earlier read of a.ts")  # a newer read of a.ts is below
+    assert json.loads(out[3]["content"])["content"] == b
+    assert json.loads(out[5]["content"])["content"] == a
+
+
+def test_compaction_drops_reads_of_files_that_changed_since():
+    messages = [*_read("r1", "a.ts", "A" * 500), *_edit("e1", "a.ts"), {"role": "assistant", "content": "", "tool_calls": []}]
+    out = compact(messages)
+    assert out[1]["content"].startswith("[earlier read of a.ts") and "changed" in out[1]["content"]
+
+
+def test_compaction_keeps_reads_within_a_budget(monkeypatch):
+    import mux.agents.coder.compaction as compaction
+    monkeypatch.setattr(compaction, "KEPT_READS_BUDGET", 1500)
+    messages = [*_read("r1", "a.ts", "A" * 1000), *_read("r2", "b.ts", "B" * 1000),
+                {"role": "assistant", "content": "", "tool_calls": []}]
+    out = compact(messages)
+    assert out[1]["content"].startswith("[earlier read of a.ts")  # the oldest goes first
+    assert json.loads(out[3]["content"])["content"] == "B" * 1000
