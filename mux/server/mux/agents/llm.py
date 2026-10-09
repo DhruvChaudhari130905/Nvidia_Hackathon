@@ -1,4 +1,4 @@
-"""Token Factory client (OpenAI-compatible). Model selection, reasoning on/off, usage tracking, stable prompt prefixes for caching."""
+"""OpenAI-compatible model client (Token Factory by default). Model selection, reasoning on/off, usage tracking."""
 
 from __future__ import annotations
 
@@ -56,19 +56,22 @@ class LLM(Protocol):
             on_delta : DeltaCallback | None = None,
     ) -> LLMReply: ...
 
-class TokenFactoryLLM:
-    def __init__(self) -> None:
-        self._client = AsyncOpenAI(
-            base_url = settings.token_factory_base_url,
-            api_key = settings.token_factory_api_key,
-            max_retries =3,
-            timeout = 120,
-        )
-        self._models = {
-            ModelRole.LIGHTNING: settings.model_lightning,
-            ModelRole.SUPER: settings.model_super,
-            ModelRole.ULTRA: settings.model_ultra,
-        }
+class ModelError(Exception):
+    """A model call failed (bad key, unknown model, rate limit, provider down). The text is safe to show."""
+
+
+class NoModel(ModelError):
+    """The room has no model to use."""
+
+
+class OpenAILLM:
+    """Any OpenAI-compatible chat completions API. `thinking` sends Nemotron's switch (Token Factory only)."""
+
+    def __init__(self, base_url: str, api_key: str, models: dict[ModelRole, str], *, thinking: bool = False,
+                 client: Any = None) -> None:
+        self._client = client or AsyncOpenAI(base_url=base_url, api_key=api_key, max_retries=3, timeout=120)
+        self._models = models
+        self._thinking = thinking
 
     async def chat(self, role, messages, *, tools=None, schema=None,
                    reasoning=None, max_tokens=None, on_delta=None) -> LLMReply:
@@ -81,7 +84,7 @@ class TokenFactoryLLM:
                 "type":"json_schema",
                 "json_schema" : {"name": schema.__name__, "schema": schema.model_json_schema(), "strict": False},
             }
-        if reasoning is not None:
+        if reasoning is not None and self._thinking:
             #(spike) confirm the switch name Token Factory accepts for Nemotron
             kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": reasoning}}
         if max_tokens is not None:
@@ -131,6 +134,16 @@ class TokenFactoryLLM:
                 finish = choice.finish_reason
         calls = [_tool_call(s["id"], s["name"], s["args"]) for _, s in sorted(slots.items())]
         return LLMReply(text="".join(text), model=model, usage=usage, tool_calls=calls, finish_reason=finish)
+
+
+def TokenFactoryLLM() -> OpenAILLM:
+    """The server's own model client, from the TOKEN_FACTORY_* and MODEL_* settings."""
+    return OpenAILLM(
+        settings.token_factory_base_url, settings.token_factory_api_key,
+        {ModelRole.LIGHTNING: settings.model_lightning, ModelRole.SUPER: settings.model_super,
+         ModelRole.ULTRA: settings.model_ultra},
+        thinking=True,
+    )
 
 
 def _usage(u) -> Usage:

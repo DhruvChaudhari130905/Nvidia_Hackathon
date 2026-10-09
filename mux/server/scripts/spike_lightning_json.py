@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
-from mux.agents.llm import ModelRole, TokenFactoryLLM
+from mux.agents.llm import ModelRole, OpenAILLM, TokenFactoryLLM
 
 
 class SpikeAction(BaseModel):
@@ -83,7 +83,7 @@ def validates(text: str) -> SpikeAction | None:
     except ValidationError:
         return None
     
-async def run_one(llm: TokenFactoryLLM, role: ModelRole, reasoning: bool | None,
+async def run_one(llm: OpenAILLM, role: ModelRole, reasoning: bool | None,
                   sc: dict[str, Any], sem: asyncio.Semaphore) -> dict[str, Any]:
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": render(sc)}]
     async with sem:
