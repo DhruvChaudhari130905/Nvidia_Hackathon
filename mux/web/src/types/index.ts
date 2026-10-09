@@ -233,6 +233,8 @@ export type EventType =
   | 'ai.error'
   | 'kickoff.requested'
   | 'kickoff.step'
+  | 'skills.changed'
+  | 'skill.used'
   | 'message.posted'
   | 'message.labeled'
   | 'plan.drafted'

@@ -31,6 +31,7 @@ from mux.events.models import (
     RoomAiSettingsSavedEvent,
     RoomAiSettingsClearedEvent,
     KickoffRequestedEvent,
+    RoomSkillsSetEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -219,6 +220,7 @@ class RoomActor:
         # The room's own AI provider (mux/agents/room_llm.py): provider, base_url, encrypted api_key, models,
         # version (the saving event's id, so clients are rebuilt when it changes). None: the server's model.
         self.ai_settings: Optional[dict[str, Any]] = None
+        self.skills_enabled: set[str] = set()  # skills (mux/skills) the room's coder may use
         self.closed = False
 
         # Initialize components
@@ -459,6 +461,12 @@ class RoomActor:
             self.ai_settings = None
             await self._emit(RoomAiSettingsClearedEvent(**self._event_fields(user_id)))
             return True
+
+    async def set_skills(self, enabled: list[str], user_id: str) -> None:
+        async with self._lock:
+            names = sorted(set(enabled))
+            self.skills_enabled = set(names)
+            await self._emit(RoomSkillsSetEvent(**self._event_fields(user_id), enabled=names))
 
     async def request_kickoff(self, user_id: str) -> None:
         """Ask the room's runtime to plan the room with the team (rooms/runtime.py _kickoff)."""
@@ -1265,6 +1273,8 @@ class RoomActor:
                                     "models": e.models, "version": str(e.id)}
             elif t == EventType.ROOM_AI_SETTINGS_CLEARED:
                 self.ai_settings = None
+            elif t == EventType.ROOM_SKILLS_SET:
+                self.skills_enabled = set(cast(RoomSkillsSetEvent, event).enabled)
             elif t == EventType.ROOM_CLOSED:
                 self.closed = True
 

@@ -25,6 +25,7 @@ class EventType(str, Enum):
     ROOM_AI_SETTINGS_SAVED = "room_ai_settings_saved"
     ROOM_AI_SETTINGS_CLEARED = "room_ai_settings_cleared"
     KICKOFF_REQUESTED = "kickoff_requested"
+    ROOM_SKILLS_SET = "room_skills_set"
 
     # User presence events
     USER_JOINED = "user_joined"
@@ -270,6 +271,12 @@ class KickoffRequestedEvent(BaseEvent):
     """The owner asked MUX to plan the room with the team ("Plan it with me")."""
     type: EventType = EventType.KICKOFF_REQUESTED
     requested_by: str = Field(..., description="User who asked")
+
+
+class RoomSkillsSetEvent(BaseEvent):
+    """The owner chose which skills (mux/skills) the room's coder may use."""
+    type: EventType = EventType.ROOM_SKILLS_SET
+    enabled: List[str] = Field(default_factory=list, description="Skill names, sorted")
 
 
 # Presence events
@@ -680,6 +687,7 @@ Event = Union[
     RoomAiSettingsSavedEvent,
     RoomAiSettingsClearedEvent,
     KickoffRequestedEvent,
+    RoomSkillsSetEvent,
     UserJoinedEvent,
     UserLeftEvent,
     UserTypingEvent,
@@ -743,6 +751,7 @@ __all__ = [
     "RoomAiSettingsSavedEvent",
     "RoomAiSettingsClearedEvent",
     "KickoffRequestedEvent",
+    "RoomSkillsSetEvent",
     "UserJoinedEvent",
     "UserLeftEvent",
     "UserTypingEvent",

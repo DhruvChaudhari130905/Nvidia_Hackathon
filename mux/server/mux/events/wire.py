@@ -45,6 +45,7 @@ from mux.events.models import (
     RoomMcpServerSavedEvent,
     RoomPasswordSetEvent,
     RoomSharingUpdatedEvent,
+    RoomSkillsSetEvent,
     TaskFinishedEvent,
     TaskStartedEvent,
     UserJoinedEvent,
@@ -136,6 +137,8 @@ def _payload(event: BaseEvent) -> Optional[tuple[str, dict[str, Any]]]:
         return "ai.changed", {"provider": e.provider, "base_url": e.base_url, "models": e.models, "has_key": True}
     if t == EventType.ROOM_AI_SETTINGS_CLEARED:
         return "ai.changed", {"cleared": True}
+    if t == EventType.ROOM_SKILLS_SET:
+        return "skills.changed", {"enabled": cast(RoomSkillsSetEvent, event).enabled}
     if t == EventType.KICKOFF_REQUESTED:
         return "kickoff.requested", {}
     # Invites (room_invite_*) aren't sent: the emails are for the owner only (GET /rooms/{id}/invites)
