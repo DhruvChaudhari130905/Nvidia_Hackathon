@@ -27,7 +27,7 @@ def compact(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     for i, message in enumerate(result[:last_assistant]):
         if message.get("role") == "tool" and i not in kept:
-            name, arguments = calls.get(message.get("tool_call_id"), ("", {}))
+            name, arguments = calls.get(str(message.get("tool_call_id", "")), ("", {}))
             if name == "read_file" and arguments.get("path"):
                 message["content"] = f"[earlier read of {arguments['path']}: {why.get(i, 'dropped to save space')}; read it again if you need it]"
             else:
@@ -70,7 +70,7 @@ def _reads_to_keep(messages: list[dict[str, Any]], calls: dict[str, tuple[str, d
         message = messages[i]
         if message.get("role") != "tool":
             continue
-        name, arguments = calls.get(message.get("tool_call_id"), ("", {}))
+        name, arguments = calls.get(str(message.get("tool_call_id", "")), ("", {}))
         path = arguments.get("path")
         if not path:
             continue
