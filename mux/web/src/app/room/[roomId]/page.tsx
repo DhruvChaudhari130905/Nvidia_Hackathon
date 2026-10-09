@@ -236,7 +236,7 @@ export default function RoomPage() {
       // "Plan it with me": start once the agents can read every file
       if (imported.kickoff) {
         void Promise.allSettled(saves).then(() => api.kickoff(roomId))
-          .catch(error => console.error("Planning didn't start:", error));
+          .catch(error => alert(error instanceof Error ? `Planning didn't start: ${error.message}` : "Planning didn't start"));
       }
     }
   };

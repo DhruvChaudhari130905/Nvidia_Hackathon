@@ -111,6 +111,8 @@ class RoomRuntime:
         self.model_error_interval = model_error_interval
         self._last_model_error = float("-inf")
         self._kickoff_task: Optional[asyncio.Task] = None
+        self._current_kind: Optional[str] = None  # kind of the running task ("review", "understand" or None)
+        self.understand_timeout = 600.0  # the kickoff stops waiting for the project read after this long
         self._task_waiters: dict[str, asyncio.Future[tuple[str, str]]] = {}  # plan item id -> (status, summary)
         self.coordinator = Coordinator(llm)
 
@@ -214,7 +216,22 @@ class RoomRuntime:
             {"id": item_id, "title": "Understand the project", "status": "todo", "kind": "understand"}, COORDINATOR,
         )
         self._wake.set()
-        return await waiter
+        try:
+            # Bounded: the item may never run (deleted from the plan, budget paused, model removed)
+            return await asyncio.wait_for(waiter, self.understand_timeout)
+        except asyncio.TimeoutError:
+            return ("stopped", "timed out")
+        finally:
+            self._task_waiters.pop(item_id, None)
+
+    async def _release_removed_waiters(self) -> None:
+        """A waited-on task that left the plan (deleted, rewound away) will never run: stop waiting for it."""
+        if not self._task_waiters:
+            return
+        waiting = {i["id"] for i in await self.actor.get_plan() if i.get("status") in ("todo", "doing")}
+        for item_id, waiter in list(self._task_waiters.items()):
+            if item_id not in waiting and not waiter.done():
+                waiter.set_result(("stopped", "removed from the plan"))
 
     async def _step(self, text: str) -> None:
         await self.actor.post_notice("kickoff.step", {"text": text})
@@ -271,6 +288,7 @@ class RoomRuntime:
             await self._answered(e.question_id, e.answer)
         elif t in (EventType.COMMAND_APPROVE_PLAN, EventType.PLAN_ITEM_ADDED, EventType.PLAN_UPDATED,
                    EventType.BUDGET_RESUMED, EventType.COMMAND_REWIND):
+            await self._release_removed_waiters()
             self._wake.set()
 
     # ---- coordinator ----
@@ -294,9 +312,10 @@ class RoomRuntime:
         await self._apply(action, message, plan)
 
     async def _apply(self, action: CoordinatorAction, message: Message, plan: list[PlanItem]) -> None:
-        if action.label in ("merge", "interrupt") and self._current_task is None:
-            # Nothing is running to merge it into (e.g. every task is done): it becomes a task of its own,
-            # so a change asked for in the feed still gets built
+        if action.label in ("merge", "interrupt") and (self._current_task is None
+                                                       or self._current_kind in ("review", "understand")):
+            # Nothing is running to merge it into (e.g. every task is done), or only a read-only task that can't
+            # make changes: it becomes a task of its own, so a change asked for in the feed still gets built
             await self._add_task(message.text, plan)
         elif action.label in ("merge", "interrupt"):
             await self.actor.enqueue_message(
@@ -458,6 +477,7 @@ class RoomRuntime:
     async def _run(self, item: dict[str, Any]) -> None:
         task_id = item["id"]
         self._current_task = task_id
+        self._current_kind = item.get("kind")
         await self.actor.update_plan_item(task_id, {"status": "doing"}, CODER)
         asked: list[str] = []
 
@@ -510,6 +530,7 @@ class RoomRuntime:
             await self._park(item, f"error: {e}")
         finally:
             self._current_task = None
+            self._current_kind = None
             waiter = self._task_waiters.pop(task_id, None)
             if waiter is not None and not waiter.done():
                 waiter.set_result(outcome)

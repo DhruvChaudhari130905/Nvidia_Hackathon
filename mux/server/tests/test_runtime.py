@@ -629,3 +629,71 @@ async def test_stopping_the_room_mid_kickoff_is_clean(setup):
     await actor.request_kickoff("alice")
     await until(lambda: of_type(log, EventType.QUESTION_ASKED))
     await registry.shutdown_all()  # cancels the waiting kickoff without errors
+
+
+# --- kickoff review fixes ------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_kickoff_goes_on_when_the_understand_item_is_removed(setup):
+    from mux.agents.coordinator.schema import PlanDraft
+    registry, llm, logs, runtimes = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    await actor.create_file("a.js", "x", "alice")
+    runtime = runtimes[-1]
+
+    async def nothing_runs() -> None:
+        return None
+    runtime._next_task = nothing_runs  # type: ignore[method-assign]  # the coder is busy elsewhere
+    llm.push("not json", "nope", PlanDraft(tasks=[{"title": "Home page"}]))  # type: ignore[list-item]
+    await actor.request_kickoff("alice")
+    await until(lambda: any(p.get("kind") == "understand" for p in actor.plan._items))
+    await actor.replace_plan([], "alice")  # someone deletes the queued item
+    await until(lambda: any("Plan drafted" in s for s in kickoff_steps(log)))
+    assert "Couldn't read the project; planning from the description" in kickoff_steps(log)
+    assert not runtime.kickoff_running
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_kickoff_stops_waiting_for_the_project_after_a_timeout(setup):
+    from mux.agents.coordinator.schema import PlanDraft
+    registry, llm, logs, runtimes = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    log = logs[actor.room_id]
+    await actor.create_file("a.js", "x", "alice")
+    runtime = runtimes[-1]
+    runtime.understand_timeout = 0.2
+
+    async def nothing_runs() -> None:
+        return None
+    runtime._next_task = nothing_runs  # type: ignore[method-assign]  # e.g. the budget is paused
+    llm.push("not json", "nope", PlanDraft(tasks=[{"title": "Home page"}]))  # type: ignore[list-item]
+    await actor.request_kickoff("alice")
+    await until(lambda: any("Plan drafted" in s for s in kickoff_steps(log)))
+    assert "Couldn't read the project; planning from the description" in kickoff_steps(log)
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_plan_ids_never_clash(setup):
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    await actor.add_plan_item({"id": "t1", "title": "Home page", "status": "draft"}, "coordinator")
+    added = await actor.add_plan_item({"id": "t1", "title": "Contact form", "status": "draft"}, "coordinator")
+    assert added["id"] == "t2"
+    assert [(p["id"], p["title"]) for p in await actor.get_plan()] == [("t1", "Home page"), ("t2", "Contact form")]
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_changes_asked_during_a_read_only_task_become_tasks(setup):
+    from mux.agents.coordinator.prompts import Message as CoordMessage
+    registry, llm, logs, runtimes = setup
+    actor = await new_room(registry, llm, logs, plan=None)
+    runtime = runtimes[-1]
+    runtime._current_task, runtime._current_kind = "t9", "understand"
+    action = CoordinatorAction(label="merge", rationale="small change")
+    await runtime._apply(action, CoordMessage("m1", "alice", "design", "make the header blue"), [])
+    assert [p["title"] for p in await actor.get_plan()] == ["make the header blue"]
+    await registry.shutdown_all()

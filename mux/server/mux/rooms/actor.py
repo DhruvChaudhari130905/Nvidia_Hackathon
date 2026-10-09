@@ -598,6 +598,12 @@ class RoomActor:
 
     async def add_plan_item(self, item: dict, user_id: str) -> dict:
         async with self._lock:
+            # Agents pick ids from a plan they read earlier; another add may have taken it since (a chat task
+            # while the kickoff drafts). Take the next free id instead of failing and losing the item.
+            taken = {i["id"] for i in await self.plan.get_items()}
+            if item.get("id") in taken:
+                numbers = [int(i[1:]) for i in taken if i[:1] == "t" and i[1:].isdigit()]
+                item = {**item, "id": f"t{max(numbers, default=0) + 1}"}
             added = await self.plan.add_item(item)
             items_list = await self.plan.get_items()
             position = len(items_list) - 1

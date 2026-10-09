@@ -42,7 +42,8 @@ export function QuestionCard({ question, currentUser, currentUserRole, onAnswer 
   return (
     <div className="card ask">
       <div className="card-head">
-        <span className="card-kind">Agent question · task {question.task_id}</span>
+        {/* No task: a planning question from "Plan it with me" (or an approval), not one from a coder task */}
+        <span className="card-kind">{question.task_id ? `Agent question · task ${question.task_id}` : 'Planning question'}</span>
         <span className="timer mono">{format(new Date(0).setSeconds(timeLeft), 'm:ss')}</span>
       </div>
       <h4>{question.text}</h4>
@@ -66,7 +67,7 @@ export function QuestionCard({ question, currentUser, currentUserRole, onAnswer 
         </div>
       ) : (
         <div className="resolved">
-          Answer sent to the coder as a merge.
+          {question.task_id ? 'Answer sent to the coder as a merge.' : 'Answer saved.'}
         </div>
       )}
     </div>
