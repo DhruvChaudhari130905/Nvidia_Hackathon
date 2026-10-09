@@ -786,3 +786,127 @@ def test_uploading_over_an_existing_file_overwrites_without_a_base_version(clien
     r = put({"content": "v2"})
     assert r.status_code == 200 and r.json()["version"] == 2
     assert client.get(f"/api/files/{rid}/files/src/App.jsx", headers=auth("alice")).json()["content"] == "v2"
+
+
+# --- MCP servers ------------------------------------------------------------
+
+PUBLIC_URL = "https://93.184.216.34/mcp"
+
+
+@pytest.fixture
+def mcp_servers(monkeypatch):
+    """In-process MCP servers by name; anything else refuses to connect. One mcp.json server, "github"."""
+    from cryptography.fernet import Fernet
+    from mcp.server.mcpserver import MCPServer
+
+    import mux.mcp.client as mcp_client
+    import mux.mcp.config as mcp_config
+    from mux.mcp.config import ServerSpec
+
+    def server(*tool_names: str) -> MCPServer:
+        s = MCPServer("t")
+        for tool_name in tool_names:
+            s.add_tool(lambda: "ok", name=tool_name, description=f"{tool_name} tool")
+        return s
+
+    available = {"docs": server("search", "fetch"), "github": server("create_issue")}
+
+    def connect(spec):
+        if spec.name not in available:
+            raise ConnectionError("connection refused")
+        return mcp_client.open_client(spec, target=available[spec.name])
+
+    monkeypatch.setattr(mcp_client, "default_connect", connect)
+    monkeypatch.setattr(mcp_config, "admin_servers", lambda: {"github": ServerSpec("github", command="gh-mcp")})
+    monkeypatch.setattr(settings, "mcp_allow_private_urls", False)
+    monkeypatch.setattr(settings, "mcp_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr("mux.mcp.catalog.ADMIN_TOOLS", {})
+    return available, server
+
+
+def add_mcp(c, rid, name="docs", url=PUBLIC_URL, headers=None, user="alice"):
+    return c.post(f"/rooms/{rid}/mcp/servers", json={"name": name, "url": url, "headers": headers or {}}, headers=auth(user))
+
+
+def test_owner_adds_a_room_mcp_server(client, mcp_servers):
+    rid = create_room(client)
+    r = add_mcp(client, rid, headers={"Authorization": "Bearer top-secret"})
+    assert r.status_code == 200, r.text
+    docs = r.json()["servers"][0]
+    assert docs["name"] == "docs" and docs["header_names"] == ["Authorization"]
+    assert {t["name"] for t in docs["tools"]} == {"search", "fetch"}
+    # Viewers can see it; only the owner can change it
+    client.post(f"/rooms/{rid}/members", json={"user_id": "bob", "role": "viewer"}, headers=auth("alice"))
+    assert client.get(f"/rooms/{rid}/mcp", headers=auth("bob")).status_code == 200
+    assert add_mcp(client, rid, name="other", user="bob").status_code == 403
+    # The token never comes back: not from the API, not over the socket
+    assert "top-secret" not in client.get(f"/rooms/{rid}/mcp", headers=auth("alice")).text
+    with client.websocket_connect(f"/rooms/{rid}/ws?since=0&token={token('alice')}") as ws:
+        assert "top-secret" not in ws.receive_text()
+
+
+def test_bad_room_mcp_servers_are_refused(client, mcp_servers, monkeypatch):
+    rid = create_room(client)
+    assert add_mcp(client, rid, url="http://93.184.216.34/mcp").status_code == 400
+    assert add_mcp(client, rid, url="https://10.0.0.5/mcp").status_code == 400
+    assert add_mcp(client, rid, name="Bad Name").status_code == 422
+    assert add_mcp(client, rid, name="github").status_code == 409  # taken by mcp.json
+    r = add_mcp(client, rid, name="down")
+    assert r.status_code == 502 and "connection refused" in r.json()["detail"]
+    monkeypatch.setattr(settings, "mcp_encryption_key", "")
+    assert add_mcp(client, rid, headers={"Authorization": "x"}).status_code == 400
+    assert client.get(f"/rooms/{rid}/mcp", headers=auth("alice")).json()["servers"] == []
+
+
+def test_room_mcp_server_limit(client, mcp_servers):
+    available, server = mcp_servers
+    rid = create_room(client)
+    for i in range(10):
+        available[f"s{i}"] = server("t")
+        assert add_mcp(client, rid, name=f"s{i}").status_code == 200
+    available["s10"] = server("t")
+    assert add_mcp(client, rid, name="s10").status_code == 400
+
+
+def test_mcp_settings_refresh_and_remove(client, mcp_servers):
+    available, server = mcp_servers
+    rid = create_room(client)
+    add_mcp(client, rid)
+    r = client.patch(f"/rooms/{rid}/mcp/servers/docs", json={"settings": {
+        "search": {"enabled": True, "mode": "ask"}, "fetch": {"enabled": False, "mode": "auto"}, "nope": {"enabled": False}}},
+        headers=auth("alice"))
+    assert r.status_code == 200
+    assert r.json()["servers"][0]["settings"] == {"search": {"enabled": True, "mode": "ask"}, "fetch": {"enabled": False, "mode": "auto"}}
+    # The server drops "fetch" and adds "summarize": refresh keeps the setting of the tool that's still there
+    available["docs"] = server("search", "summarize")
+    r = client.post(f"/rooms/{rid}/mcp/servers/docs/refresh", headers=auth("alice"))
+    assert {t["name"] for t in r.json()["servers"][0]["tools"]} == {"search", "summarize"}
+    assert r.json()["servers"][0]["settings"] == {"search": {"enabled": True, "mode": "ask"}}
+    assert client.delete(f"/rooms/{rid}/mcp/servers/docs", headers=auth("alice")).json()["servers"] == []
+    assert client.delete(f"/rooms/{rid}/mcp/servers/docs", headers=auth("alice")).status_code == 404
+
+
+def test_admin_mcp_servers_are_off_until_the_owner_turns_them_on(client, mcp_servers):
+    rid = create_room(client)
+    github = client.get(f"/rooms/{rid}/mcp", headers=auth("alice")).json()["admin"][0]
+    assert github["name"] == "github" and github["kind"] == "stdio" and github["enabled"] is False
+    assert client.patch(f"/rooms/{rid}/mcp/admin/nope", json={"enabled": True}, headers=auth("alice")).status_code == 404
+    r = client.post(f"/rooms/{rid}/mcp/admin/github/refresh", headers=auth("alice"))
+    assert r.json()["admin"][0]["tools_loaded"] and r.json()["admin"][0]["tools"][0]["name"] == "create_issue"
+    r = client.patch(f"/rooms/{rid}/mcp/admin/github", json={"enabled": True, "settings": {"create_issue": {"mode": "ask"}}},
+                     headers=auth("alice"))
+    assert r.json()["admin"][0]["enabled"] is True
+    assert r.json()["admin"][0]["settings"] == {"create_issue": {"enabled": True, "mode": "ask"}}
+
+
+def test_mcp_settings_survive_a_restart_and_a_lost_key(client, mcp_servers, monkeypatch):
+    from mux.mcp.catalog import enabled_servers
+    rid = create_room(client)
+    add_mcp(client, rid, headers={"Authorization": "Bearer x"})
+    registry_call(client, room_registry.get_registry().stop_room, rid)
+    assert client.get(f"/rooms/{rid}/mcp", headers=auth("alice")).json()["servers"][0]["name"] == "docs"
+    room = registry_call(client, room_registry.get_registry().get_room, rid)
+    assert [s.spec.headers for s in enabled_servers(room)] == [{"Authorization": "Bearer x"}]
+    # A changed key skips the server instead of breaking the coder
+    monkeypatch.setattr(settings, "mcp_encryption_key", "")
+    assert enabled_servers(room) == []
