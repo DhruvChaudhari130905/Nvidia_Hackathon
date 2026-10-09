@@ -20,10 +20,11 @@ from .finish import finish_task
 from .images import add_image, picture_problems
 from .plan import PlanTool, update_plan
 from .search import web_search
+from .review import MAX_REVIEW_CHARS, REVIEW_MAX_FILES, SEARCH_TOOL_SCHEMAS, review_problem, search_code
 
 QuestionCallback = Callable[[dict[str, Any]], Awaitable[Any] | Any]
 _CHANGES_FILES = {"write_file", "edit_file", "delete_file", "add_image"}
-READ_ONLY_TOOLS = {"read_file", "list_files", "web_search", "finish_task"}
+READ_ONLY_TOOLS = {"read_file", "list_files", "web_search", "finish_task", "search_code"}
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -240,6 +241,7 @@ class CoderToolExecutor:
         on_question: QuestionCallback | None = None,
         http: httpx.AsyncClient | None = None,
         read_only: bool = False,
+        review_scope: list[str] | None = None,
     ) -> None:
         if runner is not None and not isinstance(files, RoomFileTools):
             raise TypeError("a sandbox runner builds the room's files, so it needs RoomFileTools")
@@ -250,6 +252,9 @@ class CoderToolExecutor:
         self.plan = plan
         self.on_question = on_question
         self.http = http
+        # A whole-codebase review: the source files it must read before it may finish (None: not a review)
+        self.review_scope = review_scope
+        self._reviewed: set[str] = set()
         self.read_only = read_only  # a review: reading tools only, and finish_task keeps the review as written
         self._images_used: set[str] = set()  # photos already added during this task
         self._images_added: list[str] = []  # where they were saved
@@ -277,8 +282,9 @@ class CoderToolExecutor:
         if self.read_only and name not in READ_ONLY_TOOLS:
             return {"ok": False, "error": f"{name} isn't available in a review: only read, then finish_task with the review"}
         if self.read_only and name == "finish_task":
-            review = str(arguments.get("summary") or "").strip()
-            return {"ok": True, "summary": review[:6000]} if review else {"ok": False, "error": "summary is required"}
+            return self._finish_read_only(str(arguments.get("summary") or "").strip())
+        if name == "search_code" and self.review_scope is not None:
+            return await search_code(self.files, self.review_scope, str(arguments.get("query") or ""))
         handler = handlers.get(name)
         if handler is None:
             return {"ok": False, "error": f"unknown tool: {name}"}
@@ -287,6 +293,8 @@ class CoderToolExecutor:
             result = await result if inspect.isawaitable(result) else result
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+        if name == "read_file" and self.review_scope is not None and isinstance(result, dict) and "content" in result:
+            self._reviewed.add(str(arguments.get("path", "")))
         if name in _CHANGES_FILES and isinstance(result, dict) and result.get("ok"):
             self.snapshot_uuid = None
             if name == "write_file":
@@ -299,6 +307,22 @@ class CoderToolExecutor:
                     result = {**result, "problems": problems, "note": "Saved, but fix these problems before finishing."}
         return result
 
+    def _finish_read_only(self, summary: str) -> dict[str, Any]:
+        """A review or project read finishing: a review must have read its scope and be a full review."""
+        if not summary:
+            return {"ok": False, "error": "summary is required"}
+        if self.review_scope is not None and self._finish_refusals < self.MAX_FINISH_REFUSALS:
+            unread = [p for p in self.review_scope[:REVIEW_MAX_FILES] if p not in self._reviewed]
+            problem = review_problem(summary)
+            if unread:
+                shown = ", ".join(unread[:30]) + (" …" if len(unread) > 30 else "")
+                problem = (f"Not finished: read every source file first ({len(unread)} unread: {shown}). Read several "
+                           "per turn, note findings as you go, then finish.")
+            if problem:
+                self._finish_refusals += 1
+                return {"ok": False, "error": problem}
+        return {"ok": True, "summary": summary[:MAX_REVIEW_CHARS]}
+
     @property
     def can_build(self) -> bool:
         """Whether run_build / run_tests can do anything (a sandbox runner or a local build root)."""
@@ -307,7 +331,8 @@ class CoderToolExecutor:
     def schemas(self) -> list[dict[str, Any]]:
         """The tool schemas to offer the model: the build tools only when builds can run."""
         if self.read_only:
-            return [s for s in TOOL_SCHEMAS if s["function"]["name"] in READ_ONLY_TOOLS]
+            extra = SEARCH_TOOL_SCHEMAS if self.review_scope is not None else []
+            return [s for s in TOOL_SCHEMAS + extra if s["function"]["name"] in READ_ONLY_TOOLS]
         if self.can_build:
             return TOOL_SCHEMAS
         return [s for s in TOOL_SCHEMAS if s["function"]["name"] not in ("run_build", "run_tests")]

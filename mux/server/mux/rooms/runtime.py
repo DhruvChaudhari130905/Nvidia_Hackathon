@@ -32,6 +32,7 @@ from mux.agents.coder.loop import CoderLoop, CoderTask, ToolExecutor, TurnBounda
 from mux.agents.coder.prompts import REVIEW_SYSTEM_PROMPT, UNDERSTAND_SYSTEM_PROMPT, coder_system_prompt
 from mux.agents.coder.tools import CoderToolExecutor
 from mux.agents.coder.tools.files import ActorFileTools
+from mux.agents.coder.tools.review import REVIEW_MAX_FILES, REVIEW_MAX_TURNS, review_scope
 from mux.agents.coordinator.agent import Coordinator
 from mux.agents.coordinator.conflicts import Vote, research_conflict, tally, vote_weight
 from mux.agents.coordinator.kickoff import ask_kickoff_questions
@@ -487,8 +488,9 @@ class RoomRuntime:
         kind = item.get("kind")
         review = kind in ("review", "understand")  # read-only tasks: no write tools, no MCP, no checkpoint
         outcome: tuple[str, str] = ("stopped", "")
+        scope = review_scope(await self.actor.list_files()) if kind == "review" else None
         executor = CoderToolExecutor(ActorFileTools(self.actor), search=self.search, on_question=on_question,
-                                     read_only=review)
+                                     read_only=review, review_scope=scope)
 
         async def ask_first(question: str) -> str:
             return await self.ask_and_wait(question, [ALLOW, DENY], DENY, task_id)
@@ -502,7 +504,8 @@ class RoomRuntime:
             servers = [] if review else enabled_servers(self.actor)
             async with McpToolset(executor, servers, ask=ask_first, on_unavailable=unavailable) as toolset:
                 loop = CoderLoop(self.llm, _Narrated(self.actor, toolset), _Boundary(self.actor), toolset.schemas(),
-                                 max_turns=self.max_turns, on_text_delta=self._delta(task_id))
+                                 max_turns=max(self.max_turns, REVIEW_MAX_TURNS) if kind == "review" else self.max_turns,
+                                 on_text_delta=self._delta(task_id))
                 result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build, kind=kind))
             await self._spend(result.usage, CODER)
             outcome = (result.status, result.summary)
@@ -544,11 +547,17 @@ class RoomRuntime:
         plan = await self.actor.get_plan()
         files = await self.actor.list_files()
         task = item["title"] + (f"\n{item['notes']}" if item.get("notes") else "")
+        if kind == "review":
+            # A review judges the code, not progress against the plan: the plan is left out
+            scope = review_scope(files)
+            task += f"\n\nFiles to review ({len(scope)}):\n" + "\n".join(scope[:REVIEW_MAX_FILES])
+            if len(scope) > REVIEW_MAX_FILES:
+                task += f"\n(and {len(scope) - REVIEW_MAX_FILES} more; review the first {REVIEW_MAX_FILES} and say so)"
         return build_context(CoderContext(
             system_prompt={"review": REVIEW_SYSTEM_PROMPT, "understand": UNDERSTAND_SYSTEM_PROMPT}.get(kind or "")
             or coder_system_prompt(can_build),
             conventions=self.conventions,
-            plan="\n".join(f"- [{p['id']}] {p['title']} ({p['status']})" for p in plan),
+            plan="" if kind == "review" else "\n".join(f"- [{p['id']}] {p['title']} ({p['status']})" for p in plan),
             current_task=f"[{item['id']}] {task}",
             repo_map="\n".join(files) or "(no files yet)",
         ))

@@ -412,3 +412,68 @@ async def test_review_tasks_only_get_reading_tools(tmp_path):
     (tmp_path / "broken.ts").write_text("export const = ;\n")
     done = await tools.execute("finish_task", {"summary": "Problems:\n- broken.ts:1 syntax error\n\nFine:\n- a.ts"})
     assert done["ok"] is True and done["summary"] == "Problems:\n- broken.ts:1 syntax error\n\nFine:\n- a.ts"
+
+
+# whole-codebase reviews
+
+GOOD_REVIEW = """Critical
+- none
+
+Important
+1. src/api.js:3 fetch errors are ignored: a failed save shows "Saved". Fix: check res.ok.
+
+Minor
+- src/App.jsx:1 unused import.
+
+Strengths
+- Small components.
+
+Verdict: fix the Important finding first.
+Files reviewed: 2 of 2"""
+
+
+def test_review_scope_is_source_files_only():
+    from mux.agents.coder.tools.review import review_scope
+    paths = ["src/App.jsx", "src/api.ts", "styles/site.css", "index.html", "package.json", "package-lock.json",
+             "README.md", "public/logo.png", "dist/app.js", "node_modules/x/index.js", "vendor/jquery.min.js",
+             "server/main.py", "assets/font.woff2"]
+    assert review_scope(paths) == ["index.html", "server/main.py", "src/App.jsx", "src/api.ts", "styles/site.css"]
+
+
+async def test_search_code_finds_lines_across_files(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "App.jsx").write_text("import { save } from './api';\nsave(cart);\n")
+    (tmp_path / "src" / "api.js").write_text("export function save(x) {\n  return fetch('/api', x);\n}\n")
+    tools = CoderToolExecutor(FileTools(tmp_path), read_only=True, review_scope=["src/App.jsx", "src/api.js"])
+    assert "search_code" in {s["function"]["name"] for s in tools.schemas()}
+    found = await tools.execute("search_code", {"query": "save("})
+    assert found["ok"] and found["matches"] == ["src/App.jsx:2: save(cart);", "src/api.js:1: export function save(x) {"]
+    assert (await tools.execute("search_code", {"query": ""}))["ok"] is False
+
+
+async def test_a_review_cannot_finish_before_reading_every_source_file(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "App.jsx").write_text("export default 1;\n")
+    (tmp_path / "src" / "api.js").write_text("export const x = 1;\n")
+    tools = CoderToolExecutor(FileTools(tmp_path), read_only=True, review_scope=["src/App.jsx", "src/api.js"])
+    await tools.execute("read_file", {"path": "src/App.jsx"})
+    early = await tools.execute("finish_task", {"summary": GOOD_REVIEW})
+    assert early["ok"] is False and "src/api.js" in early["error"]
+    await tools.execute("read_file", {"path": "src/api.js"})
+    recap = await tools.execute("finish_task", {"summary": "Review complete: looks fine."})
+    assert recap["ok"] is False and "Critical" in recap["error"]
+    done = await tools.execute("finish_task", {"summary": GOOD_REVIEW})
+    assert done == {"ok": True, "summary": GOOD_REVIEW}
+
+
+async def test_review_refusals_are_capped(tmp_path):
+    (tmp_path / "a.js").write_text("x\n")
+    tools = CoderToolExecutor(FileTools(tmp_path), read_only=True, review_scope=["a.js"])
+    results = [await tools.execute("finish_task", {"summary": "short"}) for _ in range(3)]
+    assert [r["ok"] for r in results] == [False, False, True]  # after 2 refusals the coder isn't stuck: the review is accepted as written
+
+
+async def test_long_reviews_are_kept(tmp_path):
+    tools = CoderToolExecutor(FileTools(tmp_path), read_only=True, review_scope=[])
+    long = GOOD_REVIEW + "\n" + "- more detail\n" * 900
+    assert len((await tools.execute("finish_task", {"summary": long}))["summary"]) > 12_000

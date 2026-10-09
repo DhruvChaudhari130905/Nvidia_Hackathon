@@ -373,7 +373,8 @@ async def test_review_requests_become_read_only_tasks_that_report_in_the_feed(se
     log = logs[actor.room_id]
     await actor.create_file("src/App.jsx", "export default function App() { return null; }\n", "alice")
 
-    review = "Problems:\n- src/App.jsx:1 renders nothing\n\nSuggestions:\n1. Add a heading"
+    review = ("Critical\n- none\n\nImportant\n1. src/App.jsx:1 renders nothing: the page is blank. Fix: add a heading.\n\n"
+              "Minor\n- none\n\nVerdict: fix the blank page.\nFiles reviewed: 1 of 1")
     llm.push(
         CoordinatorAction(label="review", rationale="asks for a review", review=Review(focus="the whole project")),
         tool_reply(("read_file", {"path": "src/App.jsx"})),
@@ -389,7 +390,7 @@ async def test_review_requests_become_read_only_tasks_that_report_in_the_feed(se
     assert notices(log, "agent.text")[-1]["text"] == review
     assert await actor.get_file("src/New.jsx") is None  # the write was refused
     offered = {t["function"]["name"] for t in [c for c in llm.calls if c.tools][-1].tools or []}
-    assert offered == {"read_file", "list_files", "web_search", "finish_task"}
+    assert offered == {"read_file", "list_files", "web_search", "finish_task", "search_code"}
     assert not of_type(log, EventType.CHECKPOINT_CREATED)  # nothing changed, nothing to checkpoint
     await registry.shutdown_all()
 
@@ -468,12 +469,12 @@ async def test_reviews_get_no_mcp_tools(setup, docs_mcp):
     await actor.save_mcp_server("docs", "https://93.184.216.34/mcp", {}, ADD_TOOL, {}, "alice")
     llm.push(
         CoordinatorAction(label="review", rationale="asks for a review", review=Review(focus="the whole project")),
-        tool_reply(("finish_task", {"summary": "Looks fine"})),
+        tool_reply(("finish_task", {"summary": "Critical\n- none\nImportant\n- none\nMinor\n- none\nFiles reviewed: 0 of 0"})),
     )
     await actor.add_message("chat", "review my project", message_id="m1", user_id="alice", enqueue=False)
     await until(lambda: notices(log, "agent.text"))
     offered = {t["function"]["name"] for t in [c for c in llm.calls if c.tools][-1].tools or []}
-    assert "docs__add" not in offered and offered == {"read_file", "list_files", "web_search", "finish_task"}
+    assert "docs__add" not in offered and offered == {"read_file", "list_files", "web_search", "finish_task", "search_code"}
     await registry.shutdown_all()
 
 
@@ -696,4 +697,25 @@ async def test_changes_asked_during_a_read_only_task_become_tasks(setup):
     action = CoordinatorAction(label="merge", rationale="small change")
     await runtime._apply(action, CoordMessage("m1", "alice", "design", "make the header blue"), [])
     assert [p["title"] for p in await actor.get_plan()] == ["make the header blue"]
+    await registry.shutdown_all()
+
+
+@pytest.mark.asyncio
+async def test_reviews_get_the_review_prompt_without_the_plan_and_more_turns(setup):
+    from mux.agents.coder.tools.review import REVIEW_MAX_TURNS
+    registry, llm, logs, runtimes = setup
+    actor = await new_room(registry, llm, logs)  # PLAN has "Booking page"
+    log = logs[actor.room_id]
+    await actor.create_file("src/App.jsx", "export default 1;\n", "alice")
+    llm.push(
+        CoordinatorAction(label="review", rationale="asks for a review", review=Review(focus="the whole project")),
+        tool_reply(("finish_task", {"summary": "Critical\n- none\nImportant\n- none\nMinor\n- none\nFiles reviewed: 0 of 1"})),
+    )
+    await actor.add_message("chat", "review my project", message_id="m1", user_id="alice", enqueue=False)
+    await until(lambda: [c for c in llm.calls if c.tools])
+    system = next(c for c in llm.calls if c.tools).messages[0]["content"]
+    context = "\n".join(str(m["content"]) for m in next(c for c in llm.calls if c.tools).messages)
+    assert "Critical / Important / Minor" in system and "Booking page" not in context
+    assert "src/App.jsx" in context  # the files in scope are listed
+    assert REVIEW_MAX_TURNS == 60
     await registry.shutdown_all()
