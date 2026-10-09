@@ -14,7 +14,7 @@ import pytest
 
 import mux.rooms.registry as room_registry
 from mux.agents.coder.tools.files import ActorFileTools, FileToolError
-from mux.agents.coordinator.schema import AddPlanItem, CoordinatorAction, OpenConflict
+from mux.agents.coordinator.schema import AddPlanItem, CoordinatorAction, OpenConflict, Review
 from mux.agents.llm import LLMReply, ToolCall, Usage
 from mux.events.log import InMemoryEventLog
 from mux.events.models import AgentNoticeEvent, BaseEvent, EventType
@@ -361,4 +361,34 @@ async def test_unreachable_mcp_server_is_reported_and_removed_servers_are_gone_n
     await actor.approve_plan_items(["t2"], "alice")
     await until(lambda: len(of_type(log, EventType.CHECKPOINT_CREATED)) == 2)
     assert "docs__add" not in {t["function"]["name"] for t in [c for c in llm.calls if c.tools][-1].tools or []}
+    await registry.shutdown_all()
+
+
+# --- review requests ---------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_review_requests_become_read_only_tasks_that_report_in_the_feed(setup):
+    registry, llm, logs, _ = setup
+    actor = await new_room(registry, llm, logs)  # the plan is still a draft: reviews don't wait for approval
+    log = logs[actor.room_id]
+    await actor.create_file("src/App.jsx", "export default function App() { return null; }\n", "alice")
+
+    review = "Problems:\n- src/App.jsx:1 renders nothing\n\nSuggestions:\n1. Add a heading"
+    llm.push(
+        CoordinatorAction(label="review", rationale="asks for a review", review=Review(focus="the whole project")),
+        tool_reply(("read_file", {"path": "src/App.jsx"})),
+        tool_reply(("write_file", {"path": "src/New.jsx", "content": "x"})),
+        tool_reply(("finish_task", {"summary": review})),
+    )
+    await actor.add_message("chat", "review my project", message_id="m1", user_id="alice", enqueue=False)
+    await until(lambda: notices(log, "agent.text"))
+
+    item = next(p for p in await actor.get_plan() if p.get("kind") == "review")
+    assert item["title"] == "Review: the whole project" and item["status"] == "done"
+    assert (await actor.get_plan())[0]["status"] == "draft"  # the draft plan is untouched
+    assert notices(log, "agent.text")[-1]["text"] == review
+    assert await actor.get_file("src/New.jsx") is None  # the write was refused
+    offered = {t["function"]["name"] for t in [c for c in llm.calls if c.tools][-1].tools or []}
+    assert offered == {"read_file", "list_files", "web_search", "finish_task"}
+    assert not of_type(log, EventType.CHECKPOINT_CREATED)  # nothing changed, nothing to checkpoint
     await registry.shutdown_all()

@@ -397,3 +397,18 @@ def test_compaction_keeps_reads_within_a_budget(monkeypatch):
     out = compact(messages)
     assert out[1]["content"].startswith("[earlier read of a.ts")  # the oldest goes first
     assert json.loads(out[3]["content"])["content"] == "B" * 1000
+
+
+# review tasks (read-only)
+
+async def test_review_tasks_only_get_reading_tools(tmp_path):
+    (tmp_path / "a.ts").write_text("export const a = 1;\n")
+    tools = CoderToolExecutor(FileTools(tmp_path), read_only=True)
+    assert {s["function"]["name"] for s in tools.schemas()} == {"read_file", "list_files", "web_search", "finish_task"}
+    refused = await tools.execute("write_file", {"path": "b.ts", "content": "x"})
+    assert refused["ok"] is False and "review" in refused["error"] and not (tmp_path / "b.ts").exists()
+    assert (await tools.execute("edit_file", {"path": "a.ts", "base_version": 1, "edits": []}))["ok"] is False
+    # A review reports broken code instead of being told to fix it, and keeps its line breaks
+    (tmp_path / "broken.ts").write_text("export const = ;\n")
+    done = await tools.execute("finish_task", {"summary": "Problems:\n- broken.ts:1 syntax error\n\nFine:\n- a.ts"})
+    assert done["ok"] is True and done["summary"] == "Problems:\n- broken.ts:1 syntax error\n\nFine:\n- a.ts"

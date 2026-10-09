@@ -28,7 +28,7 @@ from uuid import uuid4
 
 from mux.agents.coder.context import CoderContext, build_context
 from mux.agents.coder.loop import CoderLoop, CoderTask, ToolExecutor, TurnBoundary
-from mux.agents.coder.prompts import coder_system_prompt
+from mux.agents.coder.prompts import REVIEW_SYSTEM_PROMPT, coder_system_prompt
 from mux.agents.coder.tools import CoderToolExecutor
 from mux.agents.coder.tools.files import ActorFileTools
 from mux.agents.coordinator.agent import Coordinator
@@ -212,6 +212,8 @@ class RoomRuntime:
             await self._add_task(action.add_plan_item.title, plan)
         elif action.label == "conflict" and action.open_conflict and action.domain:
             await self._open_conflict(action.open_conflict, action.domain)
+        elif action.label == "review" and action.review:
+            await self._add_review(action.review.focus, plan)
         elif action.label == "chat" and action.reply:
             now = datetime.now(timezone.utc).isoformat()
             await self.actor.post_notice("coordinator.reply", {
@@ -227,6 +229,14 @@ class RoomRuntime:
             {"id": next_task_id(plan), "title": title if len(title) <= 120 else title[:119] + "…", "status": status},
             COORDINATOR,
         )
+
+    async def _add_review(self, focus: str, plan: list[PlanItem]) -> None:
+        # Read-only, so it doesn't wait for the owner to approve the plan
+        focus = " ".join(focus.split())[:110]
+        await self.actor.add_plan_item(
+            {"id": next_task_id(plan), "title": f"Review: {focus}", "status": "todo", "kind": "review"}, COORDINATOR,
+        )
+        self._wake.set()
 
     # ---- conflicts and votes ----
 
@@ -358,7 +368,9 @@ class RoomRuntime:
         async def on_question(card: dict[str, Any]) -> None:
             asked.append(await self._ask(card["question"], card["options"], card["default"], task_id, parked=False))
 
-        executor = CoderToolExecutor(ActorFileTools(self.actor), search=self.search, on_question=on_question)
+        review = item.get("kind") == "review"
+        executor = CoderToolExecutor(ActorFileTools(self.actor), search=self.search, on_question=on_question,
+                                     read_only=review)
 
         async def ask_first(question: str) -> str:
             return await self.ask_and_wait(question, [ALLOW, DENY], DENY, task_id)
@@ -371,14 +383,15 @@ class RoomRuntime:
             async with McpToolset(executor, enabled_servers(self.actor), ask=ask_first, on_unavailable=unavailable) as toolset:
                 loop = CoderLoop(self.llm, _Narrated(self.actor, toolset), _Boundary(self.actor), toolset.schemas(),
                                  max_turns=self.max_turns, on_text_delta=self._delta(task_id))
-                result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build))
+                result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build, review=review))
             await self._spend(result.usage, CODER)
             await self.actor.post_notice("agent.text", {"task_id": task_id, "text": result.summary}, CODER)
             if asked:
                 await self.actor.update_plan_item(task_id, {"status": "skipped_question"}, CODER)
             elif result.status == "done":
                 await self.actor.update_plan_item(task_id, {"status": "done"}, CODER)
-                await self.actor.create_checkpoint(CODER, f"After: {item['title']}")
+                if not review:  # a review changes nothing, so there's nothing to checkpoint
+                    await self.actor.create_checkpoint(CODER, f"After: {item['title']}")
             elif "interrupted" in result.summary:
                 await self.actor.update_plan_item(task_id, {"status": "todo", "notes": "re-planning after an interrupt"}, CODER)
             else:
@@ -396,12 +409,12 @@ class RoomRuntime:
         await self._ask(f"The coder stopped on \"{item['title']}\" ({why}). Retry it?", [RETRY, SKIP], SKIP,
                         item["id"], parked=True)
 
-    async def _context(self, item: dict[str, Any], can_build: bool) -> list[dict[str, Any]]:
+    async def _context(self, item: dict[str, Any], can_build: bool, *, review: bool = False) -> list[dict[str, Any]]:
         plan = await self.actor.get_plan()
         files = await self.actor.list_files()
         task = item["title"] + (f"\n{item['notes']}" if item.get("notes") else "")
         return build_context(CoderContext(
-            system_prompt=coder_system_prompt(can_build),
+            system_prompt=REVIEW_SYSTEM_PROMPT if review else coder_system_prompt(can_build),
             conventions=self.conventions,
             plan="\n".join(f"- [{p['id']}] {p['title']} ({p['status']})" for p in plan),
             current_task=f"[{item['id']}] {task}",

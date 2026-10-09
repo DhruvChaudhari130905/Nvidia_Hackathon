@@ -8,7 +8,7 @@ import pytest
 from mux.agents.coordinator.agent import Coordinator
 from mux.agents.coordinator.planner import create_plan, insert_item, next_task_id
 from mux.agents.coordinator.prompts import Message, PlanItem, RoomView
-from mux.agents.coordinator.schema import AddPlanItem, CoordinatorAction, PlanDraft
+from mux.agents.coordinator.schema import AddPlanItem, CoordinatorAction, PlanDraft, Review
 from mux.agents.llm import ModelRole
 from mux.replay.fake_llm import FakeLLM
 
@@ -162,3 +162,15 @@ def test_coordinator_never_promises_work_it_cannot_do():
     from mux.agents.coordinator.prompts import SYSTEM
     assert "You can't read files or run anything" in SYSTEM
     assert "Approve plan" in SYSTEM
+
+
+def test_review_label_needs_a_focus_and_other_labels_drop_it():
+    import pytest as _pytest
+    action = CoordinatorAction(label="review", rationale="asks for a review", review=Review(focus="the contact form"))
+    assert action.review is not None and action.review.focus == "the contact form"
+    with _pytest.raises(ValueError):
+        CoordinatorAction(label="review", rationale="x")
+    chat = CoordinatorAction(label="chat", rationale="x", reply="hi", review=Review(focus="y"))
+    assert chat.review is None
+    from mux.agents.coordinator.prompts import SYSTEM
+    assert "- review:" in SYSTEM and '"review": null' in SYSTEM

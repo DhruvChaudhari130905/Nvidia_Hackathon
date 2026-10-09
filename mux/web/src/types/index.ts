@@ -2,7 +2,7 @@
 
 export type UserRole = 'owner' | 'editor' | 'viewer';
 export type DomainRole = 'pm' | 'design' | 'eng';
-export type MessageLabel = 'merge' | 'queue' | 'interrupt' | 'conflict' | 'chat';
+export type MessageLabel = 'merge' | 'queue' | 'interrupt' | 'conflict' | 'chat' | 'review';
 // agent: instructions for the coordinator (the default). team: notes between people, never sent to the coordinator
 export type MessageTo = 'agent' | 'team';
 export type PlanItemStatus = 'draft' | 'todo' | 'doing' | 'done' | 'skipped_conflict' | 'skipped_question';
@@ -97,6 +97,8 @@ export interface PlanItem {
   owner_role?: DomainRole;
   notes?: string;
   merged_notes?: string[];
+  // 'review': a read-only task that posts a written review instead of changing files
+  kind?: 'review';
 }
 
 export interface Message {

@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-Label = Literal["merge", "queue", "interrupt", "conflict", "chat"]
+Label = Literal["merge", "queue", "interrupt", "conflict", "chat", "review"]
 Domain = Literal["ui", "architecture", "scope"]
 DomainRole = Literal["pm", "design", "eng"]
 
@@ -23,6 +23,10 @@ class OpenConflict(BaseModel):
     research_queries: list[str] = Field(default_factory=list, max_length=3)
 
 
+class Review(BaseModel):
+    focus: str = Field(min_length=1, max_length=120)  # what to look at, e.g. "the whole project"
+
+
 class CoordinatorAction(BaseModel):
     label: Label
     rationale: str
@@ -30,6 +34,7 @@ class CoordinatorAction(BaseModel):
     add_plan_item: AddPlanItem | None = None
     open_conflict: OpenConflict | None = None
     reply: str | None = None
+    review: Review | None = None
 
     @model_validator(mode="after")
     def _fields_match_label(self) -> CoordinatorAction:
@@ -39,6 +44,8 @@ class CoordinatorAction(BaseModel):
             raise ValueError("label 'conflict' needs open_conflict and domain")
         if self.label == "chat" and not self.reply:
             raise ValueError("label 'chat' needs reply")
+        if self.label == "review" and self.review is None:
+            raise ValueError("label 'review' needs review")
         # drop fields that belong to other labels, so the actor never acts on them
         if self.label != "queue":
             self.add_plan_item = None
@@ -46,6 +53,8 @@ class CoordinatorAction(BaseModel):
             self.open_conflict = None
         if self.label != "chat":
             self.reply = None
+        if self.label != "review":
+            self.review = None
         return self
 
 

@@ -86,7 +86,7 @@ def plan_item_view(item: dict[str, Any]) -> dict[str, Any]:
         "title": item.get("title", ""),
         "status": item.get("status", "draft"),
     }
-    for key in ("owner_role", "notes", "merged_notes"):
+    for key in ("owner_role", "notes", "merged_notes", "kind"):
         if item.get(key) is not None:
             out[key] = item[key]
     return out

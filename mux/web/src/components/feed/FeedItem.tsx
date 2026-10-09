@@ -12,6 +12,8 @@ interface FeedItemProps {
 
 export function FeedItem({ message, currentUser }: FeedItemProps) {
   const isAgent = message.user_id === 'agent' || message.user_id === 'mux';
+  // The room's own agents post replies, reviews and task summaries; nothing labels those
+  const isBot = isAgent || message.user_id === 'coordinator' || message.user_id === 'coder';
   const isNote = message.to === 'team';
 
   return (
@@ -31,10 +33,10 @@ export function FeedItem({ message, currentUser }: FeedItemProps) {
           ) : message.label ? (
             <LabelChip label={message.label} />
           ) : (
-            !isAgent && <span className="chip pending">waiting for coordinator</span>
+            !isBot && <span className="chip pending">waiting for coordinator</span>
           )}
         </div>
-        <p>{message.text}</p>
+        <p className="whitespace-pre-wrap">{message.text}</p>
       </div>
     </div>
   );

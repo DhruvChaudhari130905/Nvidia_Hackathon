@@ -23,6 +23,7 @@ from .search import web_search
 
 QuestionCallback = Callable[[dict[str, Any]], Awaitable[Any] | Any]
 _CHANGES_FILES = {"write_file", "edit_file", "delete_file", "add_image"}
+READ_ONLY_TOOLS = {"read_file", "list_files", "web_search", "finish_task"}
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -238,6 +239,7 @@ class CoderToolExecutor:
         plan: PlanTool | None = None,
         on_question: QuestionCallback | None = None,
         http: httpx.AsyncClient | None = None,
+        read_only: bool = False,
     ) -> None:
         if runner is not None and not isinstance(files, RoomFileTools):
             raise TypeError("a sandbox runner builds the room's files, so it needs RoomFileTools")
@@ -248,6 +250,7 @@ class CoderToolExecutor:
         self.plan = plan
         self.on_question = on_question
         self.http = http
+        self.read_only = read_only  # a review: reading tools only, and finish_task keeps the review as written
         self._images_used: set[str] = set()  # photos already added during this task
         self._images_added: list[str] = []  # where they were saved
         self._created: set[str] = set()  # files this task created with write_file
@@ -271,6 +274,11 @@ class CoderToolExecutor:
             "update_plan": lambda **kwargs: update_plan(**kwargs, plan=self.plan),
             "finish_task": self._finish_task,
         }
+        if self.read_only and name not in READ_ONLY_TOOLS:
+            return {"ok": False, "error": f"{name} isn't available in a review: only read, then finish_task with the review"}
+        if self.read_only and name == "finish_task":
+            review = str(arguments.get("summary") or "").strip()
+            return {"ok": True, "summary": review[:6000]} if review else {"ok": False, "error": "summary is required"}
         handler = handlers.get(name)
         if handler is None:
             return {"ok": False, "error": f"unknown tool: {name}"}
@@ -298,6 +306,8 @@ class CoderToolExecutor:
 
     def schemas(self) -> list[dict[str, Any]]:
         """The tool schemas to offer the model: the build tools only when builds can run."""
+        if self.read_only:
+            return [s for s in TOOL_SCHEMAS if s["function"]["name"] in READ_ONLY_TOOLS]
         if self.can_build:
             return TOOL_SCHEMAS
         return [s for s in TOOL_SCHEMAS if s["function"]["name"] not in ("run_build", "run_tests")]

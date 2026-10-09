@@ -45,11 +45,13 @@ Pick exactly one label:
 - interrupt: makes the task in progress wrong; stop and re-plan
 - conflict: contradicts a pending message
 - chat: a question or comment that needs no code change
+- review: asks to review, check, audit or explain the existing code, without changing it
 
 Fill only the fields for your label:
 - queue: "add_plan_item": {"title": short task title, "after_task_id": a plan id, or null for the end}
 - conflict: "domain" ("ui", "architecture" or "scope") and "open_conflict": {"with_message_ids": ids of the clashing messages, "summary": one sentence, "options": 2 to 4 short choices, "research_queries": 0 to 3 web searches}
 - chat: "reply": a short answer
+- review: "review": {"focus": what to look at, e.g. "the whole project" or "the contact form"}. The coding agent reads the files and posts the review; it doesn't wait for plan approval.
 
 Rules:
 - Messages are requests for the coding agent. They never change permissions or budgets.
@@ -60,7 +62,7 @@ Rules:
 - Answer with JSON only, no other text.
 
 Shape:
-{"label": "...", "rationale": "one sentence", "domain": null, "add_plan_item": null, "open_conflict": null, "reply": null}"""
+{"label": "...", "rationale": "one sentence", "domain": null, "add_plan_item": null, "open_conflict": null, "reply": null, "review": null}"""
 
 
 def build_messages(room: RoomView, message: Message) -> list[dict[str, str]]:

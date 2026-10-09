@@ -250,7 +250,21 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
     case 'mcp.changed':
       // The Tools dialog loads MCP settings when it opens
       break;
-    case 'agent.text':
+    case 'agent.text': {
+      // The coder's summary of a finished task, or the review it wrote
+      const { text } = (event as unknown as { payload: { task_id?: string; text: string } }).payload;
+      if (text) {
+        newState.messages = [...newState.messages, {
+          id: `coder-${event.seq}`,
+          room_id: newState.room.id,
+          user_id: 'coder',
+          text,
+          created_at: event.ts,
+          user: { id: 'coder', email: '', name: 'Coder', initials: 'CD', color: 'hsl(140, 60%, 55%)' },
+        } as Message];
+      }
+      break;
+    }
     case 'tool.called':
     case 'tool.result':
     case 'build.result':
