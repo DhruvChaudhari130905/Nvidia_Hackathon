@@ -1,9 +1,15 @@
-"""mcp.json loading and tool names."""
+"""mcp.json loading, tool names, room-server URL checks and token encryption."""
 
 import json
 
+import pytest
+from cryptography.fernet import Fernet
+
+from mux.config import settings
 from mux.mcp.config import ServerSpec, load_admin_servers, parse_servers
 from mux.mcp.names import tool_alias, valid_server_name
+from mux.mcp.secrets import SecretsUnavailable, decrypt_headers, encrypt_headers
+from mux.mcp.urls import UrlNotAllowed, check_url
 
 
 def test_parses_stdio_and_http_servers():
@@ -50,3 +56,51 @@ def test_tool_alias_is_safe_short_and_unique():
     long = tool_alias("docs", "x" * 100, taken)
     assert len(long) == 64 and long.startswith("docs__")
     assert len(taken) == 3
+
+
+@pytest.mark.parametrize("url", [
+    "http://93.184.216.34/mcp",          # not https
+    "https://127.0.0.1/mcp",             # loopback
+    "https://10.0.0.5/mcp",              # private
+    "https://192.168.1.2/mcp",
+    "https://169.254.169.254/latest",    # cloud metadata (link-local)
+    "https://[::1]/mcp",
+    "https://0.0.0.0/mcp",
+    "https:///mcp",                      # no host
+])
+def test_room_server_urls_refused(url, monkeypatch):
+    monkeypatch.setattr(settings, "mcp_allow_private_urls", False)
+    with pytest.raises(UrlNotAllowed):
+        check_url(url)
+
+
+def test_public_https_url_allowed_and_dev_override(monkeypatch):
+    monkeypatch.setattr(settings, "mcp_allow_private_urls", False)
+    check_url("https://93.184.216.34/mcp")
+    monkeypatch.setattr(settings, "mcp_allow_private_urls", True)
+    check_url("http://localhost:8123/mcp")
+
+
+def test_headers_round_trip_encrypted(monkeypatch):
+    monkeypatch.setattr(settings, "mcp_encryption_key", Fernet.generate_key().decode())
+    stored = encrypt_headers({"Authorization": "Bearer secret"})
+    assert "secret" not in stored["Authorization"]
+    assert decrypt_headers(stored) == {"Authorization": "Bearer secret"}
+
+
+def test_headers_need_a_key(monkeypatch):
+    monkeypatch.setattr(settings, "mcp_encryption_key", "")
+    assert encrypt_headers({}) == {} and decrypt_headers({}) == {}
+    with pytest.raises(SecretsUnavailable):
+        encrypt_headers({"Authorization": "x"})
+    monkeypatch.setattr(settings, "mcp_encryption_key", "not-a-fernet-key")
+    with pytest.raises(SecretsUnavailable):
+        encrypt_headers({"Authorization": "x"})
+
+
+def test_headers_from_another_key_cannot_be_read(monkeypatch):
+    monkeypatch.setattr(settings, "mcp_encryption_key", Fernet.generate_key().decode())
+    stored = encrypt_headers({"Authorization": "x"})
+    monkeypatch.setattr(settings, "mcp_encryption_key", Fernet.generate_key().decode())
+    with pytest.raises(SecretsUnavailable):
+        decrypt_headers(stored)
