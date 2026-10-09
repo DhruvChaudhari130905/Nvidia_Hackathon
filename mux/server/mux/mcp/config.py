@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from mux.config import settings
-from mux.mcp.names import valid_server_name
+from mux.mcp.names import header_problem, valid_server_name
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,9 @@ def _parse(name: Any, entry: Any) -> tuple[Optional[ServerSpec], str]:
         return None, '"url" must start with http:// or https://'
     if headers is None:
         return None, '"headers" must map strings to strings'
+    for header, value in headers.items():
+        if problem := header_problem(header, value):
+            return None, problem
     return ServerSpec(name, url=url, headers=headers), ""
 
 

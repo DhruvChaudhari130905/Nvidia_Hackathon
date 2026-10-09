@@ -6,7 +6,7 @@ import logging
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import mux.mcp.catalog as mcp_catalog
 import mux.mcp.client as mcp_client
@@ -15,6 +15,7 @@ from mux.api.deps import User, get_room_actor_dep, require_owner, require_viewer
 from mux.mcp.catalog import room_mcp_view
 from mux.mcp.client import ToolInfo, describe_error
 from mux.mcp.config import ServerSpec
+from mux.mcp.names import header_problem
 from mux.mcp.secrets import SecretsUnavailable, decrypt_headers, encrypt_headers
 from mux.mcp.urls import UrlNotAllowed, check_url_async
 from mux.rooms.actor import RoomActor
@@ -31,15 +32,26 @@ class ToolSettingModel(BaseModel):
     mode: Literal["auto", "ask"] = "auto"
 
 
+def _checked_headers(headers: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+    for name, value in (headers or {}).items():
+        if problem := header_problem(name, value):
+            raise ValueError(problem)
+    return headers
+
+
 class ServerAddRequest(BaseModel):
     name: str = Field(..., pattern=SERVER_NAME)
     url: str = Field(..., min_length=8, max_length=2000)
     headers: dict[str, str] = Field(default_factory=dict, description="e.g. {\"Authorization\": \"Bearer ...\"}")
 
+    _headers_ok = field_validator("headers")(_checked_headers)
+
 
 class ServerUpdateRequest(BaseModel):
     headers: Optional[dict[str, str]] = Field(None, description="Replaces all saved headers")
     settings: Optional[dict[str, ToolSettingModel]] = None
+
+    _headers_ok = field_validator("headers")(_checked_headers)
 
 
 class AdminUpdateRequest(BaseModel):
@@ -70,9 +82,9 @@ async def _tools(spec: ServerSpec, *, room_server: bool) -> list[dict[str, Any]]
     try:
         return [t.to_dict() for t in await mcp_client.fetch_tools(spec)]
     except Exception as e:
-        logger.warning(f"MCP server {spec.name}: could not list tools: {describe_error(e)}")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail=f"Could not connect to {spec.name}: {describe_error(e)}")
+        reason = describe_error(e, secrets=[*spec.headers.values(), *spec.env.values()], room_server=room_server)
+        logger.warning(f"MCP server {spec.name}: could not list tools: {reason}")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not connect to {spec.name}: {reason}")
 
 
 def _room_server(actor: RoomActor, name: str) -> dict[str, Any]:

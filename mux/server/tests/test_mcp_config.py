@@ -67,6 +67,8 @@ def test_tool_alias_is_safe_short_and_unique():
     "https://[::1]/mcp",
     "https://0.0.0.0/mcp",
     "https:///mcp",                      # no host
+    "https://100.100.100.200/mcp",       # carrier-grade NAT (Tailscale and cloud internal ranges)
+    "https://198.18.0.1/mcp",            # benchmarking range, not public
 ])
 def test_room_server_urls_refused(url, monkeypatch):
     monkeypatch.setattr(settings, "mcp_allow_private_urls", False)
@@ -104,3 +106,20 @@ def test_headers_from_another_key_cannot_be_read(monkeypatch):
     monkeypatch.setattr(settings, "mcp_encryption_key", Fernet.generate_key().decode())
     with pytest.raises(SecretsUnavailable):
         decrypt_headers(stored)
+
+
+@pytest.mark.parametrize("headers", [
+    {"Authorization": "Bearer x\n"},
+    {"Authorization": "Bearer\x00x"},
+    {"Bad Name": "x"},
+    {"Authorization": " leading-space"},
+])
+def test_unsafe_headers_are_refused_in_mcp_json(headers):
+    assert parse_servers({"mcpServers": {"docs": {"url": "https://example.com/mcp", "headers": headers}}}) == {}
+
+
+def test_header_problem():
+    from mux.mcp.names import header_problem
+    assert header_problem("Authorization", "Bearer abc.def-123") is None
+    assert header_problem("X-Api-Key", "") is None
+    assert header_problem("Authorization", "Bearer x\r\n") and header_problem("Bad Name", "x")

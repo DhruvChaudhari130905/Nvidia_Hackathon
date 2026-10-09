@@ -352,7 +352,7 @@ async def test_unreachable_mcp_server_is_reported_and_removed_servers_are_gone_n
     llm.push(tool_reply(("finish_task", {"summary": "one"})))
     await actor.approve_plan_items(["t1"], "alice")
     await until(lambda: notices(log, "mcp.unavailable"))
-    assert notices(log, "mcp.unavailable")[0] == {"server": "down", "error": "refused", "task_id": "t1"}
+    assert notices(log, "mcp.unavailable")[0] == {"server": "down", "error": "could not reach the server", "task_id": "t1"}
     await until(lambda: of_type(log, EventType.CHECKPOINT_CREATED))
     assert "docs__add" in {t["function"]["name"] for t in [c for c in llm.calls if c.tools][-1].tools or []}
 

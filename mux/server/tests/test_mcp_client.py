@@ -78,3 +78,10 @@ async def test_connect_gives_up_after_the_timeout(monkeypatch):
     monkeypatch.setattr(mcp_client, "default_connect", never_ready)
     with pytest.raises(TimeoutError):
         await mcp_client.fetch_tools(ServerSpec("slow"))
+
+
+def test_describe_error_hides_header_values():
+    secret = "Bearer SEC\nRET"
+    error = ValueError(f"Illegal header value {secret.encode()!r} and {secret!r} and {secret}")
+    text = describe_error(error, secrets=[secret])
+    assert "SEC" not in text and "[hidden]" in text

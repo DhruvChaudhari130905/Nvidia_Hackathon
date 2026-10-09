@@ -852,7 +852,10 @@ def test_bad_room_mcp_servers_are_refused(client, mcp_servers, monkeypatch):
     assert add_mcp(client, rid, name="Bad Name").status_code == 422
     assert add_mcp(client, rid, name="github").status_code == 409  # taken by mcp.json
     r = add_mcp(client, rid, name="down")
-    assert r.status_code == 502 and "connection refused" in r.json()["detail"]
+    # Room servers get one message for every network failure, so the errors can't map a private network
+    assert r.status_code == 502 and r.json()["detail"] == "Could not connect to down: could not reach the server"
+    assert add_mcp(client, rid, headers={"Authorization": "Bearer x\n"}).status_code == 422
+    assert add_mcp(client, rid, headers={"Bad Name": "x"}).status_code == 422
     monkeypatch.setattr(settings, "mcp_encryption_key", "")
     assert add_mcp(client, rid, headers={"Authorization": "x"}).status_code == 400
     assert client.get(f"/rooms/{rid}/mcp", headers=auth("alice")).json()["servers"] == []

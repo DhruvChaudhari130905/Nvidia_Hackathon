@@ -140,3 +140,52 @@ async def test_room_server_urls_are_checked_again_when_connecting(servers, monke
     async with McpToolset(FakeInner(), [private], on_unavailable=on_unavailable) as toolset:
         assert names(toolset) == {"read_file"}
     assert reported and "Private" in reported[0]
+
+
+async def test_cancelling_while_connecting_closes_servers_already_connected(servers, monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    opened: list[str] = []
+    closed: list[str] = []
+    real = mcp_client.default_connect
+
+    @asynccontextmanager
+    async def tracked(spec: ServerSpec):
+        if spec.name == "hang":
+            await asyncio.sleep(100)
+        async with real(spec) as client:
+            opened.append(spec.name)
+            try:
+                yield client
+            finally:
+                closed.append(spec.name)
+
+    monkeypatch.setattr(mcp_client, "default_connect", tracked)
+    hang = EnabledServer(ServerSpec("hang", url="https://93.184.216.34/mcp"), {})
+
+    async def enter() -> None:
+        async with McpToolset(FakeInner(), [docs(), hang]):
+            pass
+
+    task = asyncio.create_task(enter())
+    for _ in range(200):
+        if opened:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert opened == ["docs"] and closed == ["docs"]
+
+
+async def test_room_server_connection_errors_are_generic(servers):
+    reported: list[str] = []
+
+    async def on_unavailable(name: str, reason: str) -> None:
+        reported.append(reason)
+
+    down = EnabledServer(ServerSpec("down", url="https://93.184.216.34/mcp"), {}, room_server=True)
+    async with McpToolset(FakeInner(), [down], on_unavailable=on_unavailable):
+        pass
+    assert reported == ["could not reach the server"]

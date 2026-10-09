@@ -33,8 +33,9 @@ def check_url(url: str) -> None:
         raise UrlNotAllowed(f"Can't find {host}") from e
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_reserved
-                or ip.is_multicast):
+        # is_global also rules out shared ranges that aren't "private", like 100.64.0.0/10 (Tailscale)
+        if (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified
+                or ip.is_reserved or ip.is_multicast):
             raise UrlNotAllowed("Private and local network addresses aren't allowed")
 
 
