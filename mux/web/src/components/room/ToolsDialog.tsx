@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { X, Plug, RefreshCw, Trash2 } from 'lucide-react';
-import type { McpTool, McpToolSetting, RoomMcp } from '@/types';
+import type { McpTool, McpToolSetting, RoomMcp, RoomSkill } from '@/types';
 import { api } from '@/lib/api';
 
 interface ToolsDialogProps {
@@ -52,6 +52,7 @@ function ToolRows({ tools, settings, canEdit, onChange }: {
 
 export function ToolsDialog({ isOpen, onClose, roomId, isOwner }: ToolsDialogProps) {
   const [mcp, setMcp] = useState<RoomMcp | null>(null);
+  const [skills, setSkills] = useState<RoomSkill[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState('');
@@ -63,6 +64,7 @@ export function ToolsDialog({ isOpen, onClose, roomId, isOwner }: ToolsDialogPro
     if (!isOpen) return;
     setError(null);
     api.getMcp(roomId).then(setMcp).catch(e => setError(e instanceof Error ? e.message : 'Could not load MCP servers'));
+    api.getSkills(roomId).then(setSkills).catch(e => setError(e instanceof Error ? e.message : 'Could not load skills'));
   }, [isOpen, roomId]);
 
   if (!isOpen) return null;
@@ -81,6 +83,23 @@ export function ToolsDialog({ isOpen, onClose, roomId, isOwner }: ToolsDialogPro
     }
   };
 
+  const runSkills = async (action: () => Promise<RoomSkill[]>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setSkills(await action());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleSkill = (name: string, on: boolean) => {
+    const enabled = (skills ?? []).filter(s => s.enabled && s.name !== name).map(s => s.name);
+    return runSkills(() => api.setSkills(roomId, on ? [...enabled, name] : enabled));
+  };
+
   const addServer = async (e: React.FormEvent) => {
     e.preventDefault();
     const headers = headerValue ? { [headerName.trim() || 'Authorization']: headerValue } : {};
@@ -96,7 +115,7 @@ export function ToolsDialog({ isOpen, onClose, roomId, isOwner }: ToolsDialogPro
       <div className="bg-[var(--panel)] rounded-xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto"
         onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="tools-title">
         <div className="flex items-center justify-between mb-2">
-          <h2 id="tools-title" className="text-lg font-semibold flex items-center gap-2"><Plug className="w-5 h-5" /> MCP tools</h2>
+          <h2 id="tools-title" className="text-lg font-semibold flex items-center gap-2"><Plug className="w-5 h-5" /> Tools and skills</h2>
           <button className="btn p-2" onClick={onClose} type="button" aria-label="Close"><X className="w-5 h-5" /></button>
         </div>
         <p className="mb-4 text-sm text-[var(--muted)]">
@@ -104,6 +123,32 @@ export function ToolsDialog({ isOpen, onClose, roomId, isOwner }: ToolsDialogPro
           {!isOwner && ' Only the owner can change them.'}
         </p>
         {error && <p className="mb-3 text-sm text-[var(--conflict)]" role="alert">{error}</p>}
+        {skills && (
+          <div className={section}>
+            <div className="flex items-center justify-between gap-2">
+              <p className="font-medium">Skills</p>
+              {isOwner && (
+                <button type="button" className="btn p-1" disabled={busy} title="Re-read the server's skills folder" aria-label="Reload skills"
+                  onClick={() => runSkills(() => api.reloadSkills(roomId))}><RefreshCw className="w-3.5 h-3.5" /></button>
+              )}
+            </div>
+            {skills.length === 0 && <p className="text-sm text-[var(--muted)]">No skills on the server yet. Put skill folders (each with a SKILL.md) in the server&apos;s skills folder.</p>}
+            {skills.map(skill => (
+              <label key={skill.name} className="flex items-start gap-2 text-sm" title={skill.description}>
+                <input type="checkbox" className="mt-1" checked={skill.enabled} disabled={!isOwner || busy}
+                  onChange={e => toggleSkill(skill.name, e.target.checked)} />
+                <span className="min-w-0">
+                  <span className="font-mono">{skill.name}</span>
+                  {skill.missing && <span className="ml-2 text-xs text-[var(--conflict)]">missing on the server</span>}
+                  {!skill.compatible && (
+                    <span className="ml-2 text-xs text-[var(--conflict)]" title={skill.issues.join('; ')}>needs Claude Code</span>
+                  )}
+                  {skill.description && <span className="block truncate text-xs text-[var(--muted)]">{skill.description}</span>}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
         {!mcp ? (
           !error && <p className="text-sm text-[var(--muted)]">Loading…</p>
         ) : (

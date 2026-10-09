@@ -273,6 +273,21 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
     }
     case 'kickoff.requested':
       break;
+    case 'skill.used': {
+      const { name } = (event as unknown as { payload: { name: string } }).payload;
+      newState.messages = [...newState.messages, {
+        id: `skill-${event.seq}`,
+        room_id: newState.room.id,
+        user_id: 'coder',
+        text: `Using skill: ${name}`,
+        created_at: event.ts,
+        user: { id: 'coder', email: '', name: 'Coder', initials: 'CD', color: 'hsl(140, 60%, 55%)' },
+      } as Message];
+      break;
+    }
+    case 'skills.changed':
+      // The Tools dialog loads skills when it opens
+      break;
     case 'ai.changed':
       // The AI model dialog loads the settings when it opens
       break;

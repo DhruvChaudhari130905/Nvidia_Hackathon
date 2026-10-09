@@ -1,5 +1,5 @@
 // API client for REST commands
-import type { AiRole, Invite, InviteResult, McpToolSetting, RoomAi, RoomMcp, Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
+import type { AiRole, Invite, InviteResult, McpToolSetting, RoomAi, RoomMcp, RoomSkill, Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
 
 import { createDemoRoom, deleteDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
 import { getSocket } from './socket';
@@ -30,6 +30,7 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
   if (roomMatch && roomMatch[2] === '/messages') {
     getSocket(roomMatch[1]).injectEvent(demoMessageEvent(roomMatch[1], body.text, body.to));
   }
+  if (roomMatch && roomMatch[2]?.startsWith('/skills')) return [] as T;
   if (roomMatch && roomMatch[2] === '/ai') return { source: 'server', provider: null, base_url: null, models: null, has_key: false } as T;
   if (roomMatch && roomMatch[2]?.startsWith('/mcp')) return { admin: [], servers: [] } as T;
   if (roomMatch && roomMatch[2] === '/kickoff') return { accepted: true } as T;
@@ -116,6 +117,12 @@ export const api = {
   setAi: (id: string, data: { provider: string; base_url: string; api_key: string; models: Record<AiRole, string> }) =>
     fetchWithAuth<RoomAi>(`/rooms/${id}/ai`, { method: 'PUT', body: JSON.stringify(data) }),
   clearAi: (id: string) => fetchWithAuth<RoomAi>(`/rooms/${id}/ai`, { method: 'DELETE' }),
+
+  // Skills the room's coder may use: anyone reads, the owner switches them on
+  getSkills: (id: string) => fetchWithAuth<RoomSkill[]>(`/rooms/${id}/skills`),
+  setSkills: (id: string, enabled: string[]) =>
+    fetchWithAuth<RoomSkill[]>(`/rooms/${id}/skills`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  reloadSkills: (id: string) => fetchWithAuth<RoomSkill[]>(`/rooms/${id}/skills/reload`, { method: 'POST' }),
 
   // Messages
   sendMessage: (roomId: string, text: string, to: MessageTo = 'agent') =>

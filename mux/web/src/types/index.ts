@@ -93,6 +93,18 @@ export interface RoomMcp {
 // The AI provider a room's agents use: the owner's own key, the MUX server's model, or none
 export type AiRole = 'lightning' | 'super' | 'ultra';
 
+// A skill (SKILL.md guidance pack) the room's coder may use; the owner switches them on
+export interface RoomSkill {
+  name: string;
+  description: string;
+  source: string;
+  compatible: boolean;
+  issues: string[];
+  enabled: boolean;
+  files: number;
+  missing: boolean;
+}
+
 export interface RoomAi {
   source: 'room' | 'server' | 'none';
   provider: string | null;
