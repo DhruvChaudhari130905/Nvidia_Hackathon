@@ -174,3 +174,46 @@ def test_review_label_needs_a_focus_and_other_labels_drop_it():
     assert chat.review is None
     from mux.agents.coordinator.prompts import SYSTEM
     assert "- review:" in SYSTEM and '"review": null' in SYSTEM
+
+
+# --- kickoff ----------------------------------------------------------------------
+
+def test_kickoff_question_default_must_be_an_option():
+    from mux.agents.coordinator.schema import KickoffQuestion, KickoffQuestions
+    q = KickoffQuestion(question="Who is it for?", options=["Students", "Teachers"], default="Parents")
+    assert q.default == "Students"
+    assert KickoffQuestions(questions=[q]).questions[0].options == ["Students", "Teachers"]
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        KickoffQuestion(question="x", options=["only one"], default="only one")
+
+
+@pytest.mark.asyncio
+async def test_kickoff_questions_see_the_idea_and_summary():
+    from mux.agents.coordinator.kickoff import ask_kickoff_questions
+    from mux.agents.coordinator.schema import KickoffQuestion, KickoffQuestions
+    llm = FakeLLM()
+    llm.push(KickoffQuestions(questions=[KickoffQuestion(question="Scope?", options=["Small", "Big"], default="Small")]))
+    questions, usage = await ask_kickoff_questions(llm, "A yoga booking app", "React app with a schedule page")
+    assert questions is not None and questions.questions[0].question == "Scope?"
+    prompt = "\n".join(m["content"] for m in llm.calls[0].messages)
+    assert "A yoga booking app" in prompt and "React app with a schedule page" in prompt
+
+
+@pytest.mark.asyncio
+async def test_kickoff_questions_give_up_on_bad_answers():
+    from mux.agents.coordinator.kickoff import ask_kickoff_questions
+    llm = FakeLLM()
+    llm.push("not json", "still not json")
+    questions, _ = await ask_kickoff_questions(llm, "idea", "summary")
+    assert questions is None
+
+
+@pytest.mark.asyncio
+async def test_planner_uses_the_kickoff_context():
+    llm = FakeLLM()
+    llm.push(PlanDraft(tasks=[{"title": "Add a cart page"}]))  # type: ignore[list-item]
+    result = await create_plan(llm, "Imported project: shop", context="The team's answers:\n- Scope? Small")
+    assert [i.title for i in result.items] == ["Add a cart page"]
+    prompt = "\n".join(m["content"] for m in llm.calls[0].messages)
+    assert "The team's answers" in prompt and "plan changes to that project" in prompt

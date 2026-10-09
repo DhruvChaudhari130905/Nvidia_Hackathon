@@ -15,6 +15,7 @@ Write 3 to 8 tasks, in build order:
 - Each task is one feature the team can see in the preview when it is done.
 - The first task builds the smallest working version of the main screen.
 - No setup tasks: the stack, tools, and hosting are already chosen.
+- When an existing project is described, plan changes to that project, not a new app.
 - "title": short and imperative, under 60 characters.
 - "notes": one sentence of detail, or null.
 - "owner_role": who cares most about the task, "pm", "design" or "eng", or null.
@@ -31,11 +32,12 @@ class PlanResult:
     fallback: bool = False  # True when the model failed twice and a one-task plan was used
 
 
-async def create_plan(llm: LLM, description: str, *, reasoning: bool | None = None) -> PlanResult:
+async def create_plan(llm: LLM, description: str, *, context: str = "", reasoning: bool | None = None) -> PlanResult:
     # always Super: plan quality matters and it runs once per room
+    user = f"App description:\n{description}" + (f"\n\n{context}" if context else "")
     messages = [
         {"role": "system", "content": PLAN_SYSTEM},
-        {"role": "user", "content": f"App description:\n{description}"},
+        {"role": "user", "content": user},
     ]
     result = await ask_json(llm, ModelRole.SUPER, messages, PlanDraft, reasoning=reasoning, max_tokens=1200)
     if result.value is None:

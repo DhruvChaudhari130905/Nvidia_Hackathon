@@ -27,6 +27,26 @@ class Review(BaseModel):
     focus: str = Field(min_length=1, max_length=120)  # what to look at, e.g. "the whole project"
 
 
+class KickoffQuestion(BaseModel):
+    """One multiple-choice question the kickoff asks the team (a question card)."""
+    question: str = Field(min_length=1, max_length=200)
+    options: list[str] = Field(min_length=2, max_length=4)
+    default: str = ""
+
+    @model_validator(mode="after")
+    def _default_is_an_option(self) -> KickoffQuestion:
+        self.options = [o.strip()[:80] for o in self.options if o.strip()]
+        if len(self.options) < 2:
+            raise ValueError("a question needs at least 2 options")
+        if self.default not in self.options:
+            self.default = self.options[0]
+        return self
+
+
+class KickoffQuestions(BaseModel):
+    questions: list[KickoffQuestion] = Field(min_length=1, max_length=3)
+
+
 class CoordinatorAction(BaseModel):
     label: Label
     rationale: str
