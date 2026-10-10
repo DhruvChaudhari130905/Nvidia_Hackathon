@@ -1,5 +1,59 @@
 # Run Session: Changes Log
 
+Everything done on MUX from the start, oldest first. The 2026-10-07 session is logged in full at the end.
+
+## Project history before 2026-10-07
+- **2026-09-30:** Initial commit. Added the MUX scaffold, demos and design docs.
+- **2026-10-01:** Built out the web app: rooms, sandbox, pricing, docs and the room workspace.
+- **2026-10-02:** Added the P-Agent-A coordinator, Tavily research and memory. Added the Agent/Team toggle in the composer and team notes, which the coordinator sees as context only. Added the coder agent with its tools, a repo map and a token eval. Added the README, the docs folder and session logs, and recorded open decisions Q40–Q55.
+- **2026-10-04:** Added the database layer and routed the coder's saves and builds through it. Implemented the room backend (actor, registry, API, WebSocket) with review fixes (PR #2). Made the project runnable, connected the web app to the room backend and ran the coordinator and coder in every room.
+
+## 2026-10-09 → 2026-10-10 (branch `dhruv/room-agents`, now on `main`)
+
+**Joining rooms** (`bb37c35`)
+- Teams can join by viewer link, Supabase email invite or room password, with a lockout after failed attempts. `make tunnel` lets teammates on other machines join.
+- Fixed uploads being refused for files that already exist, and duplicate presence entries.
+
+**MCP tools in rooms** (design spec, plan, then `a71861d` … `67fa874`)
+- Server-wide MCP servers load from `mcp.json` (example included). Room owners add, refresh and configure their own servers through the room MCP API and the new **Tools** dialog.
+- Room MCP server URLs are checked (private and non-global addresses are refused) and their tokens are encrypted. Settings are kept as room events.
+- The coder gets the room's MCP tools for one task, asking the room first where an owner set that.
+- Each server's connection runs in its own task, so a server that hangs or crashes fails only its own calls. Tokens and header values are kept out of error text.
+
+**Coder and coordinator fixes**
+- `f22b609`, `64c0682`: the coder no longer re-reads files until it runs out of turns. Compaction keeps the latest read of each file in full, within a 60k-character budget, and repeating a call when no file changed counts as a loop.
+- `6b2bdbd`: the coordinator is told whether building is in progress, waiting or blocked on **Approve plan**, and may not promise work it can't do.
+- `4112212`: "Review my project" creates a read-only review task, and its written review appears in the feed. The coder's task summaries now show in the feed.
+
+**Per-room AI providers** (design spec, plan, then `b15c47f` … `73ff43a`)
+- Each room can run its agents on its own OpenAI-compatible provider (Nebius Token Factory, OpenAI, Anthropic, OpenRouter, Groq, Together or a custom URL), choosing a model for each role: Coordinator, Coder and Coder when stuck.
+- Saving sends one tiny request to each model to check the key and the model ids. Keys are encrypted with `ROOM_SECRETS_KEY`, which MCP tokens now share (the old `MCP_ENCRYPTION_KEY` still works). Model errors are reported in the room.
+- Security review fixes: provider redirects aren't followed, the base URL is checked again before each use, keys are kept out of logged tracebacks, review tasks get no MCP tools, and the save check doesn't retry and gives up after 20 s.
+
+**Dashboard imports reach the server** (`80a4bd5`)
+- Projects imported from the dashboard were only kept in the browser, so the agents never saw them. Each file is now saved to the room like an in-room upload.
+
+**Room kickoff: "Plan it with me"** (design spec, plan, then `ba464dc` … `e2cc7bc`)
+- The create and import dialogs and the empty plan offer **Plan it with me**: the planner reads the project, asks the team questions, then drafts a plan.
+- Review fixes: the kickoff no longer waits forever for a project read that won't run (it times out and plans from the description), chat requests sent during the kickoff aren't dropped, and change requests sent during a read-only task become tasks.
+
+**Real code reviews** (`8e16b88`)
+- A room review now covers every source file (not lockfiles, assets or build output), has a `search_code` tool and 60 turns, and doesn't see the plan.
+- It can't finish until it has read the files, and must report Critical/Important/Minor findings with file:line, scenario and fix, plus a verdict and "Files reviewed: N of M". After two refusals its summary is accepted as written, so it can't get stuck.
+
+**Skills engine** (design spec, plan, then `1fba38f` … `3214c32`)
+- MUX reads skill folders (`SKILL.md`, the Claude Code format) from `SKILLS_PATH` and flags skills that need Claude Code itself.
+- Rooms switch skills on in the **Tools** dialog; the choice is kept as a room event and shown in the feed. The coder loads a skill with `use_skill`. An example skill and docs were added.
+- Review fixes: a source file that can't be read no longer blocks a review, loading a skill again never counts as a loop, supporting files over 1 MB aren't read into memory, and `SKILL.md` files with a BOM or a colon in an unquoted description now load.
+
+## This session (2026-10-10)
+- **How to use a Claude API key in MUX:** get the key at console.anthropic.com (**Settings → API Keys**, after adding credits under **Billing**). Then set `ROOM_SECRETS_KEY` in `mux/server/.env`, open the room's **AI model** dialog, choose **Anthropic**, paste the `sk-ant-…` key and click **Save**. The default models are Haiku 4.5, Sonnet 5.5 and Opus 5.5. To make Claude the server-wide default instead, set the `TOKEN_FACTORY_*` and `MODEL_*` variables to the Anthropic URL, key and model ids (not tested).
+- **Pushed to `main`:** `dhruv/room-agents` was fast-forwarded onto `origin/main` (`3707b6e..3214c32`, 46 commits). Before pushing I checked that no `.env` files or API keys were in the commits. `Concept.txt`, `package-lock.json` and `mux/package-lock.json` are still uncommitted.
+
+---
+
+# 2026-10-07 session
+
 **Date:** 2026-10-07 · **Branch:** `dhruv/room-agents`
 
 ## Code changes
