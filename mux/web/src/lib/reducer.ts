@@ -1,6 +1,6 @@
 // Pure reducer function: events -> room state
 // This makes replay and rewind free on the client
-import type { AppEvent, RoomState, Room, PlanItem, Message, Conflict, Question, FileChange, Checkpoint, Budget, Presence, User, Membership } from '@/types';
+import type { AgentActivity, AppEvent, RoomState, Room, PlanItem, Message, Conflict, Question, FileChange, Checkpoint, Budget, Presence, User, Membership } from '@/types';
 
 export function reduce(events: AppEvent[], initialState?: RoomState): RoomState {
   let state = initialState || createEmptyState();
@@ -17,6 +17,7 @@ export function createEmptyState(): RoomState {
     room: { id: '', title: '', description: '', owner_id: '', link_access: 'restricted', link_permission: 'editor', budget_tokens_cap: 2000000, budget_runs_cap: 100, head_checkpoint_id: null, created_at: '', members: [] },
     plan: [],
     messages: [],
+    activity: [],
     conflicts: [],
     questions: [],
     files: new Map(),
@@ -162,12 +163,16 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
       newState.plan = newState.plan.map(p =>
         p.id === event.payload.task_id ? { ...p, status: 'doing' as const } : p
       );
+      const title = newState.plan.find(p => p.id === event.payload.task_id)?.title;
+      newState.activity = pushActivity(newState.activity, { id: `a-${event.seq}`, kind: 'task', label: title ? `Started “${title}”` : 'Started a task', ts: event.ts });
       break;
     }
     case 'task.finished': {
       newState.plan = newState.plan.map(p =>
         p.id === event.payload.task_id ? { ...p, status: 'done' as const } : p
       );
+      const title = newState.plan.find(p => p.id === event.payload.task_id)?.title;
+      newState.activity = pushActivity(settleAll(newState.activity), { id: `a-${event.seq}`, kind: 'done', ok: true, label: title ? `Finished “${title}”` : 'Finished the task', ts: event.ts });
       break;
     }
     case 'task.escalated': {
@@ -297,6 +302,7 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
     case 'agent.text': {
       // The coder's summary of a finished task, or the review it wrote
       const { text } = (event as unknown as { payload: { task_id?: string; text: string } }).payload;
+      newState.activity = settleAll(newState.activity); // the task ended, one way or another
       if (text) {
         newState.messages = [...newState.messages, {
           id: `coder-${event.seq}`,
@@ -309,9 +315,33 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
       }
       break;
     }
-    case 'tool.called':
-    case 'tool.result':
-    case 'build.result':
+    case 'tool.called': {
+      const { tool, args } = (event as unknown as { payload: { tool: string; args?: Record<string, unknown> } }).payload;
+      newState.activity = pushActivity(newState.activity, { id: `a-${event.seq}`, kind: 'tool', tool, label: describeTool(tool, args ?? {}), pending: true, ts: event.ts });
+      break;
+    }
+    case 'tool.result': {
+      // Settle the newest still-running call of this tool
+      const { tool, summary, ok } = (event as unknown as { payload: { tool: string; summary?: string; ok?: boolean } }).payload;
+      const list = [...newState.activity];
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i].pending && list[i].tool === tool) {
+          list[i] = { ...list[i], pending: false, ok: ok !== false, detail: ok === false ? summary : undefined };
+          break;
+        }
+      }
+      newState.activity = list;
+      break;
+    }
+    case 'build.result': {
+      const { passed, duration, errors } = (event as unknown as { payload: { passed: boolean; duration?: number; errors?: string[] } }).payload;
+      newState.activity = pushActivity(newState.activity, {
+        id: `a-${event.seq}`, kind: 'build', ok: passed, ts: event.ts,
+        label: passed ? `Build passed${duration ? ` in ${Math.round(duration)}s` : ''}` : 'Build failed',
+        detail: passed ? undefined : errors?.[0],
+      });
+      break;
+    }
     case 'test.result':
     case 'log.task_written':
     case 'log.day_written':
@@ -322,6 +352,37 @@ export function applyEvent(state: RoomState, event: AppEvent): RoomState {
   }
 
   return newState;
+}
+
+// The Agent window keeps the latest steps; older ones fall off so a long session stays light
+const MAX_ACTIVITY = 400;
+
+function pushActivity(list: AgentActivity[], item: AgentActivity): AgentActivity[] {
+  const next = [...list, item];
+  return next.length > MAX_ACTIVITY ? next.slice(next.length - MAX_ACTIVITY) : next;
+}
+
+// A finished or stopped task leaves nothing running
+function settleAll(list: AgentActivity[]): AgentActivity[] {
+  return list.some(a => a.pending) ? list.map(a => (a.pending ? { ...a, pending: false } : a)) : list;
+}
+
+// Plain-language line for one tool call
+function describeTool(tool: string, args: Record<string, unknown>): string {
+  const path = typeof args.path === 'string' ? args.path : '';
+  switch (tool) {
+    case 'read_file': return `Reading ${path || 'a file'}`;
+    case 'write_file': return `Writing ${path || 'a file'}`;
+    case 'edit_file': return `Editing ${path || 'a file'}`;
+    case 'delete_file': return `Deleting ${path || 'a file'}`;
+    case 'list_files': return path && path !== '.' ? `Looking through ${path}` : 'Looking through the project';
+    case 'run_build': return 'Running the build';
+    case 'web_search': return typeof args.query === 'string' ? `Searching the web for “${args.query}”` : 'Searching the web';
+    case 'add_image': return `Adding an image${path ? ` at ${path}` : ''}`;
+    case 'use_skill': return typeof args.name === 'string' ? `Using the ${args.name} skill` : 'Using a skill';
+    case 'finish_task': return 'Wrapping up the task';
+    default: return tool.replace(/_/g, ' ');
+  }
 }
 
 // Helper to get initial state from server

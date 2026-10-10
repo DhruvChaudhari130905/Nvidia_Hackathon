@@ -13,6 +13,7 @@ import { AiModelDialog } from './AiModelDialog';
 import { ExportDialog } from './ExportDialog';
 import { DeleteRoomDialog } from './DeleteRoomDialog';
 import { NotificationBell } from './Notifications';
+import { DemoBanner } from '@/components/shell';
 import { api } from '@/lib/api';
 import { isDemoMode } from '@/lib/demo';
 
@@ -75,6 +76,11 @@ export function TopBar({
     <header className="top">
       <Link href="/dashboard" className="brand group flex items-center gap-1.5" title="Back to rooms">
         <ArrowLeft className="h-4 w-4 text-[var(--muted)] transition-transform group-hover:-translate-x-0.5" />
+        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+          <path d="M4 6h5l6 6M4 12h11M4 18h5l6-6" stroke="#3b82f6" />
+          <path d="M15 12h5" stroke="#06b6d4" />
+          <circle cx="20" cy="12" r="1.5" fill="#06b6d4" stroke="none" />
+        </svg>
         MUX
       </Link>
       <div className="room">
@@ -93,7 +99,8 @@ export function TopBar({
         runsUsed={budget.runs_used}
         runsCap={budget.runs_cap}
       />
-      <div className="flex items-center gap-2">
+      <div className="toolbar flex items-center gap-1">
+        <DemoBanner inline />
         <NotificationBell />
         <button className="btn flex items-center gap-1.5" onClick={() => setShowAi(true)} type="button" title="The AI model this room's agents use">
           <Bot className="w-4 h-4" />
@@ -108,9 +115,9 @@ export function TopBar({
           <span className="hidden sm:inline">Share</span>
         </button>
         {isOwner && (
-          <button className="btn primary flex items-center gap-1.5" onClick={handleExport} disabled={checkingGitHub} type="button">
+          <button className="btn primary flex items-center gap-1.5 whitespace-nowrap" onClick={handleExport} disabled={checkingGitHub} type="button" aria-label="Export to GitHub">
             <Github className="w-4 h-4" />
-            {checkingGitHub ? 'Checking GitHub…' : 'Export to GitHub'}
+            <span className="hidden sm:inline">{checkingGitHub ? 'Checking GitHub…' : 'Export to GitHub'}</span>
           </button>
         )}
         {isOwner && (

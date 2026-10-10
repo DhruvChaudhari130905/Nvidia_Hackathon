@@ -79,8 +79,9 @@ export function PlanList({ plan, canEdit, canApprove, onUpdate, onApprove, onKic
                 <input
                   // Remount when the title changes elsewhere so the field shows the latest text
                   key={item.title}
-                  className="t w-full rounded bg-transparent px-1 -mx-1 outline-none hover:bg-[var(--raised)] focus:bg-[var(--raised)] focus:ring-1 focus:ring-[var(--line)]"
+                  className="t w-full text-ellipsis rounded bg-transparent px-1 -mx-1 outline-none hover:bg-[var(--raised)] focus:bg-[var(--raised)] focus:ring-1 focus:ring-[var(--line)]"
                   defaultValue={item.title}
+                  title={item.title}
                   aria-label={`Task: ${item.title}`}
                   maxLength={200}
                   onBlur={e => rename(item.id, e.target.value)}

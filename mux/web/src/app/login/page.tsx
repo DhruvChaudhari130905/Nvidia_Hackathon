@@ -5,7 +5,7 @@ import { Github, Chrome, Mail, Terminal } from 'lucide-react';
 import { getSession, signInWithProvider, signInWithEmail, signUpWithEmail, isSupabaseConfigured, safeNext } from '@/lib/supabase';
 import { onAuthStateChange } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
-import { ShaderBackground, SiteFooter, SiteHeader } from '@/components/shell';
+import { ShaderBackground, SiteFooter, SiteHeader, RoomCursors, HeroBackdrop } from '@/components/shell';
 
 // Sign-in screen, built in the stitch Developer Workspace style (no stitch screen exists for it)
 
@@ -100,16 +100,17 @@ export default function LoginPage() {
     <div className="relative flex min-h-screen flex-col bg-surface font-ui text-body-md text-on-surface">
       <ShaderBackground interactive className="fixed inset-0 z-0 opacity-60" />
       <div className="pointer-events-none fixed inset-0 z-0 bg-gradient-to-b from-primary/10 via-transparent to-transparent" />
-      <div className="float-slow pointer-events-none fixed left-[10%] top-1/4 z-0 h-72 w-72 rounded-full bg-primary/10 blur-3xl" />
-      <div className="float-slower pointer-events-none fixed bottom-1/4 right-[10%] z-0 h-80 w-80 rounded-full bg-secondary/10 blur-3xl" />
 
       <SiteHeader />
 
-      <main className="relative z-10 flex flex-1 items-center justify-center px-gutter pb-space-xl pt-24">
+      <main className="relative isolate z-10 flex flex-[1_0_auto] items-center justify-center overflow-hidden px-gutter pb-space-xl pt-24">
+        <HeroBackdrop />
+        <RoomCursors spread className="z-0" chatter={['saving you a seat', 'join us!', 'we need a designer', 'vote closes in 30s', 'build passed', 'hi there']} />
         {loading ? (
           <div className="h-8 w-8 animate-spin rounded-full border-b-2 border-primary" />
         ) : (
-          <div className="relative w-full max-w-md overflow-hidden rounded-2xl border border-outline-variant/40 bg-surface-container/90 p-space-xl shadow-2xl backdrop-blur-xl animate-fade-up">
+          <div className="hero-in relative z-10 w-full max-w-md overflow-hidden rounded-2xl glass-modal p-space-xl">
+            <span className="live-border" aria-hidden="true" />
             <div className="float-slow pointer-events-none absolute -bottom-24 -right-24 h-64 w-64 rounded-full bg-primary/10 blur-3xl" />
 
             <div className="relative mb-space-xl text-center">
@@ -117,9 +118,7 @@ export default function LoginPage() {
                 <span className="flex h-2 w-2 rounded-full bg-primary animate-pulse" />
                 <span className="font-code text-code-sm text-primary">Multiplayer rooms</span>
               </div>
-              <h1 className="mb-space-sm font-headline text-headline-lg font-bold">
-                Welcome to <span className="text-shimmer">MUX</span>
-              </h1>
+              <h1 className="mb-space-sm font-headline text-4xl font-bold tracking-[-0.035em]">Welcome to MUX</h1>
               <p className="text-body-md text-on-surface-variant">Eight people steering, one agent building</p>
             </div>
 

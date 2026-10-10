@@ -8,23 +8,25 @@ interface ComposerProps {
   disabled?: boolean;
   // Viewers can't post team notes (the server enforces this too)
   canPostTeam?: boolean;
+  // Set by the Agent / Team windows: always send there, with no Agent/Team switch
+  target?: MessageTo;
 }
 
 // "@sam can you check this" reads as a note to a person, not an instruction for the agent
 const MENTION_START = /^@\w/;
 
-export function Composer({ onSend, disabled, canPostTeam = true }: ComposerProps) {
+export function Composer({ onSend, disabled, canPostTeam = true, target: fixedTarget }: ComposerProps) {
   const [text, setText] = useState('');
   const [to, setTo] = useState<MessageTo>('agent');
   // Set once the person picks a side themselves, so the @mention switch doesn't fight them
   const [picked, setPicked] = useState(false);
 
-  const target: MessageTo = canPostTeam ? to : 'agent';
+  const target: MessageTo = fixedTarget ?? (canPostTeam ? to : 'agent');
 
   const handleChange = (value: string) => {
     setText(value);
     if (!value) setPicked(false);
-    if (canPostTeam && !picked && MENTION_START.test(value)) setTo('team');
+    if (!fixedTarget && canPostTeam && !picked && MENTION_START.test(value)) setTo('team');
   };
 
   const pick = (next: MessageTo) => {
@@ -44,7 +46,7 @@ export function Composer({ onSend, disabled, canPostTeam = true }: ComposerProps
 
   return (
     <div className="composer">
-      {canPostTeam && (
+      {canPostTeam && !fixedTarget && (
         <div className="tabs to-toggle" role="tablist" aria-label="Send to">
           <button type="button" role="tab" className="tab" aria-selected={target === 'agent'} onClick={() => pick('agent')}>
             Agent

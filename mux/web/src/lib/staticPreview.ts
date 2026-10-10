@@ -91,13 +91,14 @@ export function findEntryPage(files: Files): string | null {
 }
 
 // Resolves a reference made from `fromPage` to a room file. Root-relative paths (`/styles.css`) are
-// tried against the page's own folder too, since static sites often serve `public/` as the root.
+// tried against the page's own folder too, since static sites often serve `public/` as the root, and
+// against `public/` itself (the web root in Vite projects, where the agent's add_image saves photos).
 export function resolveRef(files: Files, fromPage: string, ref: string): string | null {
   const clean = ref.split(/[?#]/)[0];
   if (!clean || /^([a-z]+:|\/\/)/i.test(clean)) return null;
   const dir = fromPage.includes('/') ? fromPage.slice(0, fromPage.lastIndexOf('/')) : '';
   const candidates = clean.startsWith('/')
-    ? [clean.slice(1), dir ? `${dir}${clean}` : clean.slice(1)]
+    ? [clean.slice(1), dir ? `${dir}${clean}` : clean.slice(1), `public${clean}`]
     : [dir ? `${dir}/${clean}` : clean];
   for (const candidate of candidates) {
     const parts: string[] = [];

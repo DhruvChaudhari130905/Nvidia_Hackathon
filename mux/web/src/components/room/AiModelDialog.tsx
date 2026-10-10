@@ -32,7 +32,7 @@ const field = 'w-full bg-[var(--bg)] border border-[var(--line)] rounded px-3 py
 
 function describe(ai: RoomAi): string {
   if (ai.source === 'room') return `This room's own key · ${PRESETS[ai.provider ?? '']?.label ?? ai.provider}`;
-  if (ai.source === 'server') return "The MUX server's model";
+  if (ai.source === 'server') return "The MUX server's default: Nemotron Ultra, with Lightning for quick questions";
   return 'No AI model, so the agents are off';
 }
 
@@ -107,8 +107,8 @@ export function AiModelDialog({ isOpen, onClose, roomId, isOwner }: AiModelDialo
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
-      <div className="bg-[var(--panel)] rounded-xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto"
+    <div className="fixed inset-0 z-50 flex items-center justify-center glass-overlay p-4" onClick={onClose}>
+      <div className="glass-modal rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto"
         onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="ai-title">
         <div className="flex items-center justify-between mb-2">
           <h2 id="ai-title" className="text-lg font-semibold flex items-center gap-2"><Bot className="w-5 h-5" /> AI model</h2>

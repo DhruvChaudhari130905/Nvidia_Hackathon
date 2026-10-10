@@ -19,6 +19,7 @@ from .build import run_build, run_tests
 from .files import ActorFileTools, FileTools, RoomFileTools
 from .finish import finish_task
 from .images import add_image, picture_problems
+from .aliases import resolve as resolve_alias
 from .plan import PlanTool, update_plan
 from .search import web_search
 from .skills import SKILL_TOOL_SCHEMAS, read_skill_file, use_skill
@@ -269,6 +270,7 @@ class CoderToolExecutor:
         self.snapshot_uuid: str | None = None
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> Any:
+        name, arguments = resolve_alias(name, arguments)
         handlers: dict[str, Callable[..., Any]] = {
             "read_file": self.files.read_file,
             "list_files": self.files.list_files,
@@ -293,7 +295,8 @@ class CoderToolExecutor:
             return await search_code(self.files, self.review_scope, str(arguments.get("query") or ""))
         handler = handlers.get(name)
         if handler is None:
-            return {"ok": False, "error": f"unknown tool: {name}"}
+            available = ", ".join(s["function"]["name"] for s in self.schemas())
+            return {"ok": False, "error": f"unknown tool: {name}. Use only these tools: {available}"}
         if name == "read_file" and self.review_scope is not None:
             # An attempt counts: a file that can't be read (deleted, stored as binary) must not block the review
             self._reviewed.add(str(arguments.get("path", "")))

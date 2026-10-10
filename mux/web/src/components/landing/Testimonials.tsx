@@ -63,7 +63,7 @@ export function Testimonials() {
                 style={{ opacity: i === index ? 1 : 0.2, transform: i === index ? 'none' : 'scale(0.94)' }}
                 aria-hidden={i !== index}
               >
-                <blockquote className="mx-auto mb-space-xl max-w-3xl font-headline text-xl font-medium leading-relaxed text-on-surface md:text-2xl lg:text-3xl">
+                <blockquote className="mx-auto mb-space-xl max-w-3xl font-display text-xl font-medium leading-snug tracking-[-0.01em] text-on-surface md:text-2xl lg:text-3xl">
                   “{q.text}”
                 </blockquote>
                 <figcaption className="flex items-center justify-center gap-space-md">

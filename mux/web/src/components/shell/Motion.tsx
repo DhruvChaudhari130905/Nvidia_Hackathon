@@ -127,3 +127,43 @@ export function formatClock(totalSeconds: number): string {
   const s = totalSeconds % 60;
   return [h, m, s].map(n => String(n).padStart(2, '0')).join(':');
 }
+
+// Wrapper that drifts slightly toward the cursor while hovered and springs back on leave
+export function Magnetic({ children, strength = 0.22 }: { children: React.ReactElement; strength?: number }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const onMove = (e: React.MouseEvent) => {
+    const el = ref.current;
+    if (!el || prefersReducedMotion()) return;
+    const r = el.getBoundingClientRect();
+    el.style.transform = `translate(${(e.clientX - r.left - r.width / 2) * strength}px, ${(e.clientY - r.top - r.height / 2) * strength * 1.3}px)`;
+  };
+  const onLeave = () => { if (ref.current) ref.current.style.transform = ''; };
+  return (
+    <div ref={ref} onMouseMove={onMove} onMouseLeave={onLeave} className="magnetic">
+      {children}
+    </div>
+  );
+}
+
+interface SplitHeadingProps {
+  text: string;
+  as?: 'h2' | 'h3';
+  className?: string;
+}
+
+// Heading whose words rise out of a mask one after another the first time it scrolls into view
+export function SplitHeading({ text, as: Tag = 'h2', className = '' }: SplitHeadingProps) {
+  const [ref, inView] = useInView<HTMLHeadingElement>();
+  return (
+    <Tag ref={ref} aria-label={text} className={`split ${inView ? 'in' : ''} ${className}`}>
+      {text.split(' ').map((word, i) => (
+        <React.Fragment key={i}>
+          {i > 0 && ' '}
+          <span aria-hidden="true" className="split-mask">
+            <span className="split-word" style={{ transitionDelay: `${i * 55}ms` }}>{word}</span>
+          </span>
+        </React.Fragment>
+      ))}
+    </Tag>
+  );
+}

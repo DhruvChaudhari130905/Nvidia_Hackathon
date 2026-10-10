@@ -1,10 +1,12 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Share2, Code2, User, Menu, X, Check } from 'lucide-react';
 import { Logo } from './Logo';
 import { formatClock, useTicker } from './Motion';
+import { ScrollProgress, SpotlightTracker, YouCursor } from './LiveChrome';
+import { DemoBanner } from './DemoBanner';
 import { getUser } from '@/lib/supabase';
 import { colorForId, getLastRoom, LAST_ROOM_CHANGED, type LastRoom } from '@/lib/preferences';
 
@@ -32,7 +34,7 @@ export function SessionPill() {
     return () => window.removeEventListener(LAST_ROOM_CHANGED, read);
   }, []);
 
-  const pill = 'flex items-center gap-space-sm rounded-lg bg-surface-container px-space-md py-space-xs text-body-sm transition-colors hover:bg-surface-container-high';
+  const pill = 'flex items-center gap-space-sm rounded-full border border-white/[0.07] bg-white/[0.04] px-space-md py-1.5 text-body-sm transition-colors hover:bg-white/[0.08]';
   if (!ready) return <span className={`${pill} h-7 w-56 animate-pulse`} aria-hidden="true" />;
 
   if (!last) {
@@ -105,14 +107,14 @@ export function HeaderActions({ profileActive = false }: { profileActive?: boole
         <button
           type="button"
           onClick={handleShare}
-          className="flex items-center gap-space-xs rounded-lg bg-surface-container-high px-space-md py-space-sm font-ui text-label-md text-on-surface transition-colors hover:bg-surface-bright hover:shadow-[0_0_15px_rgba(59,130,246,0.3)]"
+          className="flex items-center gap-space-xs rounded-full border border-white/[0.08] bg-white/[0.05] px-space-md py-2 font-ui text-label-md text-on-surface transition-colors hover:bg-white/[0.1]"
         >
           {copied ? <Check className="h-4 w-4" /> : <Share2 className="h-4 w-4" />}
           <span className="hidden sm:inline">{copied ? 'Copied' : 'Share'}</span>
         </button>
         <Link
           href="/dashboard?export=1"
-          className="flex items-center gap-space-xs rounded-lg bg-primary px-space-md py-space-sm font-ui text-label-md font-bold text-on-primary transition-colors hover:bg-primary/90 hover:shadow-[0_0_20px_rgba(59,130,246,0.5)]"
+          className="flex items-center gap-space-xs rounded-full bg-gradient-to-b from-[#4f8ff7] to-[#2563eb] px-space-md py-2 font-ui text-label-md font-bold text-on-primary shadow-[0_6px_20px_-6px_rgba(59,130,246,0.9),inset_0_1px_0_rgba(255,255,255,0.25)] transition-shadow hover:shadow-[0_0_24px_rgba(59,130,246,0.6),inset_0_1px_0_rgba(255,255,255,0.25)]"
         >
           <Code2 className="h-4 w-4" />
           <span className="hidden sm:inline">Export to GitHub</span>
@@ -134,6 +136,50 @@ export function HeaderActions({ profileActive = false }: { profileActive?: boole
   );
 }
 
+function GlassNav({ active }: { active?: NavKey }) {
+  const navRef = useRef<HTMLElement>(null);
+  const [hovered, setHovered] = useState<NavKey | null>(null);
+  const [pill, setPill] = useState<{ left: number; width: number } | null>(null);
+  const target = hovered ?? active ?? null;
+
+  useEffect(() => {
+    const measure = () => {
+      const el = target ? navRef.current?.querySelector<HTMLElement>(`[data-key="${target}"]`) : null;
+      setPill(el ? { left: el.offsetLeft, width: el.offsetWidth } : null);
+    };
+    measure();
+    document.fonts?.ready.then(measure);
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [target]);
+
+  return (
+    <nav ref={navRef} className="relative hidden items-center md:flex" onMouseLeave={() => setHovered(null)}>
+      <span
+        aria-hidden="true"
+        className="glass-pill absolute inset-y-0 my-auto h-8 rounded-full transition-all duration-300 ease-[cubic-bezier(.2,.8,.2,1)]"
+        style={pill ? { left: pill.left, width: pill.width, opacity: 1 } : { left: 0, width: 0, opacity: 0 }}
+      />
+      {NAV_ITEMS.map(item => (
+        <Link
+          key={item.key}
+          data-key={item.key}
+          href={item.href}
+          aria-current={item.key === active ? 'page' : undefined}
+          onMouseEnter={() => setHovered(item.key)}
+          onFocus={() => setHovered(item.key)}
+          onBlur={() => setHovered(null)}
+          className={`relative z-10 rounded-full px-3.5 py-1.5 text-body-md transition-colors duration-200 ${
+            item.key === target ? 'text-on-surface' : 'text-on-surface-variant hover:text-on-surface'
+          } ${item.key === active ? 'font-semibold' : ''}`}
+        >
+          {item.label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
 interface SiteHeaderProps {
   active?: NavKey;
   profileActive?: boolean;
@@ -151,70 +197,59 @@ export function SiteHeader({ active, profileActive = false }: SiteHeaderProps) {
   }, []);
 
   return (
-    <header
-      className={`fixed top-0 z-50 w-full border-b font-ui backdrop-blur-xl transition-all duration-300 ${
-        scrolled
-          ? 'border-outline-variant/40 bg-surface/90 shadow-[0_8px_30px_rgba(0,0,0,0.35)]'
-          : 'border-transparent bg-surface/60 shadow-none'
-      }`}
-    >
-      <div className="flex h-16 w-full items-center justify-between px-gutter">
-        <div className="flex items-center gap-space-lg">
-          <button
-            type="button"
-            className="-ml-1 rounded-md p-1 text-on-surface-variant hover:text-on-surface md:hidden"
-            onClick={() => setMenuOpen(o => !o)}
-            aria-label={menuOpen ? 'Close menu' : 'Open menu'}
-            aria-expanded={menuOpen}
-          >
-            {menuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-          </button>
-          <Logo />
-          <nav className="hidden items-center gap-space-md md:flex">
+    <>
+    <ScrollProgress />
+    <YouCursor />
+    <SpotlightTracker />
+    <DemoBanner />
+    <header className="pointer-events-none fixed inset-x-0 top-0 z-50 px-2.5 pt-2.5 font-ui">
+      <div
+        onPointerMove={e => {
+          const r = e.currentTarget.getBoundingClientRect();
+          e.currentTarget.style.setProperty('--gx', `${e.clientX - r.left}px`);
+        }}
+        className={`glass-bar pointer-events-auto mx-auto transition-[max-width,background-color,box-shadow] duration-500 ${scrolled ? 'is-scrolled max-w-6xl' : 'max-w-[1400px]'}`}
+      >
+        <div className="relative flex h-[52px] w-full items-center justify-between gap-space-md pl-3 pr-2">
+          <div className="flex items-center gap-space-lg">
+            <button
+              type="button"
+              className="-ml-1 rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-white/[0.06] hover:text-on-surface md:hidden"
+              onClick={() => setMenuOpen(o => !o)}
+              aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+              aria-expanded={menuOpen}
+            >
+              {menuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+            </button>
+            <Logo />
+            <GlassNav active={active} />
+          </div>
+          <div className="flex items-center gap-space-sm">
+            <div className="hidden lg:block">
+              <SessionPill />
+            </div>
+            <HeaderActions profileActive={profileActive} />
+          </div>
+        </div>
+        {menuOpen && (
+          <nav className="item-in relative grid gap-1 border-t border-white/[0.06] px-2 py-2 md:hidden">
             {NAV_ITEMS.map(item => (
               <Link
                 key={item.key}
                 href={item.href}
+                onClick={() => setMenuOpen(false)}
                 aria-current={item.key === active ? 'page' : undefined}
-                className={`group relative rounded-md px-space-sm py-space-xs text-body-md transition-colors ${
-                  item.key === active
-                    ? 'bg-surface-container-high font-bold text-on-surface'
-                    : 'text-on-surface-variant hover:bg-surface-container/60 hover:text-on-surface'
+                className={`rounded-xl px-space-md py-2.5 text-body-md transition-colors ${
+                  item.key === active ? 'bg-white/[0.08] font-semibold text-on-surface' : 'text-on-surface-variant hover:bg-white/[0.04] hover:text-on-surface'
                 }`}
               >
                 {item.label}
-                <span
-                  className={`absolute inset-x-2 -bottom-[3px] h-[2px] origin-left rounded-full bg-gradient-to-r from-primary to-secondary transition-transform duration-300 ${
-                    item.key === active ? 'scale-x-100' : 'scale-x-0 group-hover:scale-x-100'
-                  }`}
-                />
               </Link>
             ))}
           </nav>
-        </div>
-        <div className="flex items-center gap-space-md">
-          <div className="hidden lg:block">
-            <SessionPill />
-          </div>
-          <HeaderActions profileActive={profileActive} />
-        </div>
+        )}
       </div>
-      {menuOpen && (
-        <nav className="grid gap-1 border-t border-outline-variant/30 bg-surface px-gutter py-space-sm md:hidden">
-          {NAV_ITEMS.map(item => (
-            <Link
-              key={item.key}
-              href={item.href}
-              onClick={() => setMenuOpen(false)}
-              className={`rounded-md px-space-sm py-space-sm text-body-md ${
-                item.key === active ? 'bg-surface-container-high font-bold text-on-surface' : 'text-on-surface-variant'
-              }`}
-            >
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-      )}
     </header>
+    </>
   );
 }

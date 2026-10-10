@@ -47,7 +47,11 @@ class Recorder:
 
 
 class Default:
+    def __init__(self) -> None:
+        self.roles: list[ModelRole] = []
+
     async def chat(self, role: ModelRole, messages: list, **kw: Any) -> LLMReply:
+        self.roles.append(role)
         return LLMReply(text="server", model="m", usage=Usage(1, 1))
 
 
@@ -79,6 +83,28 @@ async def test_server_default_and_no_model(secrets_key):
     assert not none.available()
     with pytest.raises(NoModel):
         await none.chat(ModelRole.SUPER, [])
+
+
+async def test_server_default_runs_on_ultra_except_lightning(secrets_key, monkeypatch):
+    monkeypatch.setattr(settings, "model_ultra", "nvidia/nemotron-ultra")
+    default = Default()
+    llm = RoomLLM(room(None), default)  # type: ignore[arg-type]
+    for role in (ModelRole.LIGHTNING, ModelRole.SUPER, ModelRole.ULTRA):
+        await llm.chat(role, [])
+    assert default.roles == [ModelRole.LIGHTNING, ModelRole.ULTRA, ModelRole.ULTRA]
+
+
+async def test_server_default_keeps_roles_without_an_ultra_model(secrets_key, monkeypatch):
+    monkeypatch.setattr(settings, "model_ultra", "")
+    default = Default()
+    await RoomLLM(room(None), default).chat(ModelRole.SUPER, [])  # type: ignore[arg-type]
+    assert default.roles == [ModelRole.SUPER]
+
+
+async def test_room_settings_keep_their_own_roles(secrets_key, monkeypatch):
+    monkeypatch.setattr(settings, "model_ultra", "nvidia/nemotron-ultra")
+    llm = RoomLLM(room(saved()), Default(), make=Recorder)  # type: ignore[arg-type]
+    assert (await llm.chat(ModelRole.LIGHTNING, [])).text == "room:lightning"
 
 
 async def test_client_is_rebuilt_only_when_settings_change(secrets_key):

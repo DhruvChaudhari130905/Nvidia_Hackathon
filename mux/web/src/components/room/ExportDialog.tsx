@@ -48,9 +48,9 @@ export function ExportDialog({ isOpen, onClose, room }: ExportDialogProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={handleClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center glass-overlay p-4" onClick={handleClose}>
       <div
-        className="w-full max-w-md rounded-xl border border-[var(--line)] bg-[var(--panel)] p-6"
+        className="w-full max-w-md rounded-2xl glass-modal p-6"
         onClick={e => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

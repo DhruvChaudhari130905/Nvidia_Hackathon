@@ -60,7 +60,7 @@ module.exports = {
         body: ['var(--nf-mona)', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
         mono: ['var(--nf-plex)', 'ui-monospace', 'Menlo', 'Consolas', 'monospace'],
         ui: ['var(--nf-inter)', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
-        headline: ['var(--nf-jetbrains)', 'ui-monospace', 'Menlo', 'monospace'],
+        headline: ['var(--nf-mona)', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
         code: ['var(--nf-jetbrains)', 'ui-monospace', 'Menlo', 'monospace'],
       },
       fontSize: {

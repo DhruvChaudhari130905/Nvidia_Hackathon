@@ -112,9 +112,9 @@ export function ShareDialog({ isOpen, onClose, room: initialRoom, isOwner }: Sha
   const field = 'bg-[var(--bg)] border border-[var(--line)] rounded px-3 py-2 text-sm';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center glass-overlay p-4" onClick={onClose}>
       <div
-        className="bg-[var(--panel)] rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto"
+        className="glass-modal rounded-2xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto"
         onClick={e => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

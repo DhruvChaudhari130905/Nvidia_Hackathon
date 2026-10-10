@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from mux.agents.coder.compaction import compact
-from mux.agents.coder.escalation import EscalationState
+from mux.agents.coder.escalation import MAX_REPEATS, READ_ONLY_TOOLS, EscalationState
+from mux.agents.coder.tools.aliases import resolve as resolve_alias
 from mux.agents.llm import LLM, DeltaCallback, LLMReply, ModelRole, ToolCall, Usage
 
 NUDGE = "Continue with tool calls, or call finish_task when the task is done."
@@ -53,9 +54,10 @@ class CoderLoop:
         actor: BoundaryProvider,
         tool_schemas: list[dict[str, Any]],
         *,
-        max_turns: int = 25,
+        max_turns: int = 40,
         reasoning: bool | None = None,  # None until the spike confirms Token Factory's switch
         on_text_delta: DeltaCallback | None = None,
+        on_usage: Callable[[Usage], Awaitable[None]] | None = None,  # each turn's tokens, so the room budget moves live
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -64,6 +66,7 @@ class CoderLoop:
         self.max_turns = max_turns
         self.reasoning = reasoning
         self.on_text_delta = on_text_delta
+        self.on_usage = on_usage
 
     async def run_task(self, task: CoderTask, messages: list[dict[str, Any]]) -> CoderResult:
         state = EscalationState(max_turns=self.max_turns)
@@ -77,6 +80,8 @@ class CoderLoop:
             )
             usage = Usage(usage.prompt_tokens + reply.usage.prompt_tokens,
                           usage.completion_tokens + reply.usage.completion_tokens)
+            if self.on_usage:
+                await self.on_usage(reply.usage)
             context.append({"role": "assistant", "content": reply.text or "", **_tool_calls_message(reply)})
 
             finished: str | None = None
@@ -85,22 +90,31 @@ class CoderLoop:
                 if call.arguments is None:
                     context.append(_tool_message(call.id, "Invalid JSON arguments. Retry this tool call with valid JSON."))
                     continue
-                if state.record_tool_call(call.name, call.arguments):
+                # Count `view` and `read_file` as the same action, so the repeat guard and nudge see through aliases
+                tool_name, tool_args = resolve_alias(call.name, call.arguments)
+                if state.record_tool_call(tool_name, tool_args):
                     context.append(_tool_message(call.id, {"ok": False, "error": "loop_detected"}))
                     stopped = "blocked: repeated tool call"
                     break
 
                 result = await self.tools.execute(call.name, call.arguments)
+                repeats = state.repeats(tool_name, tool_args)
+                if tool_name in READ_ONLY_TOOLS and repeats >= MAX_REPEATS:
+                    # Still answer (compaction may have dropped the earlier copy), but push towards acting
+                    result = {"result": result, "note": (
+                        f"You have made this exact {tool_name} call {repeats} times without changing any file. "
+                        "Stop exploring: make your change now with edit_file or write_file, or call finish_task."
+                    )}
                 context.append(_tool_message(call.id, result))
 
-                if call.name == "run_build":
+                if tool_name == "run_build":
                     passed = bool(_result_value(result, "passed", False))
                     was_ultra = state.model == ModelRole.ULTRA  # Super's errors must not count against Ultra
                     state.record_build(passed)
                     if not passed and was_ultra and state.record_ultra_error(str(_result_value(result, "errors", ""))):
                         stopped = "blocked: repeated Ultra build error"
                         break
-                elif call.name == "finish_task" and _result_value(result, "ok", False):
+                elif tool_name == "finish_task" and _result_value(result, "ok", False):
                     finished = str(_result_value(result, "summary", "")) or "task finished"
 
             if stopped:

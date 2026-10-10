@@ -121,8 +121,10 @@ export class SocketClient {
   private applyEvent(event: AppEvent) {
     // Each event has a unique seq; one already applied (overlapping dump, resend) is skipped
     if (!EPHEMERAL_TYPES.has(event.type)) {
-      if (event.seq <= this.since && this.currentState) return;
-      this.since = event.seq;
+      // Live budget.updated messages aren't stored and carry the current seq; each is a full snapshot, so applying it again is safe
+      const liveBudget = event.type === 'budget.updated' && event.seq === this.since;
+      if (event.seq <= this.since && this.currentState && !liveBudget) return;
+      this.since = Math.max(this.since, event.seq);
     }
     // One reducer for every event type (src/lib/reducer.ts), so the live room and replay agree
     const state = this.currentState ?? createEmptyState();

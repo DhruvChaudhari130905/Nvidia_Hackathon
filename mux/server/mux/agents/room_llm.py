@@ -1,4 +1,4 @@
-"""The model a room's agents use: the room's own provider when its owner set one, else the server's."""
+"""The model a room's agents use: the room's own provider when its owner set one, else the server's Nemotron Ultra (Lightning for quick jobs)."""
 
 from __future__ import annotations
 
@@ -60,6 +60,10 @@ class RoomLLM:
             client, secret = await self._room_client(ai), self._key
         elif self.default is not None:
             client, secret = self.default, settings.token_factory_api_key
+            # No model chosen for the room: the server's Nemotron Ultra does the work when one is configured,
+            # and quick Lightning jobs (like the kickoff questions) stay on Lightning
+            if settings.model_ultra and role != ModelRole.LIGHTNING:
+                role = ModelRole.ULTRA
         else:
             raise NoModel("no AI model is set up for this room")
         try:

@@ -22,7 +22,7 @@ export function FeedItem({ message, currentUser }: FeedItemProps) {
         className={`av ${isAgent ? 'agent-av' : ''}`}
         style={{ background: isAgent ? undefined : message.user.color }}
       >
-        {isAgent ? 'H' : message.user.initials}
+        {isAgent ? 'M' : message.user.initials}
       </span>
       <div>
         <div className="who">

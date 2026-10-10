@@ -2,8 +2,9 @@
 
 import React from 'react';
 
-// Hero band shared by the Docs, Rooms, Sandbox and Pricing screens: faded grid, floating glows,
-// a pill badge, a headline and an optional right-hand column.
+// Hero band shared by the Docs, Rooms, Sandbox and Pricing screens: drifting aurora, a faded grid,
+// a light that follows the pointer, a live pill badge, a big display headline and an optional
+// right-hand column. Everything rises in once as a single load sequence.
 
 interface PageHeroProps {
   badge: React.ReactNode;
@@ -22,27 +23,45 @@ export const GRID_BACKDROP: React.CSSProperties = {
   WebkitMaskImage: 'radial-gradient(ellipse at 30% 40%, black 20%, transparent 70%)',
 };
 
+// Feeds the pointer position to a hero section's .hero-spot light
+export function trackHeroSpot(e: React.PointerEvent<HTMLElement>) {
+  const r = e.currentTarget.getBoundingClientRect();
+  e.currentTarget.style.setProperty('--sx', `${e.clientX - r.left}px`);
+  e.currentTarget.style.setProperty('--sy', `${e.clientY - r.top}px`);
+}
+
+// Backdrop layers shared by every page hero
+export function HeroBackdrop() {
+  return (
+    <>
+      <div className="aurora pointer-events-none absolute inset-0 -z-10 opacity-70" aria-hidden="true" />
+      <div className="hero-grid pointer-events-none absolute inset-0 -z-10" aria-hidden="true" />
+      <div className="hero-spot pointer-events-none absolute inset-0 -z-10" aria-hidden="true" />
+    </>
+  );
+}
+
+export const HERO_TITLE = 'font-headline text-5xl font-bold leading-[0.95] tracking-[-0.04em] text-on-surface md:text-6xl lg:text-7xl';
+
 export function PageHero({ badge, title, lead, children, aside, centered = false }: PageHeroProps) {
   return (
-    <section className="relative overflow-hidden px-gutter pb-14 pt-14 md:px-space-xl">
-      <div className="pointer-events-none absolute inset-0 opacity-40" style={GRID_BACKDROP} />
-      <div className="float-slow pointer-events-none absolute -left-20 top-10 h-72 w-72 rounded-full bg-primary/15 blur-3xl" />
-      <div className="float-slower pointer-events-none absolute right-0 top-24 h-80 w-80 rounded-full bg-secondary/10 blur-3xl" />
+    <section onPointerMove={trackHeroSpot} className="relative isolate overflow-hidden px-gutter pb-16 pt-16 md:px-space-xl md:pt-20">
+      <HeroBackdrop />
 
       <div
         className={`relative mx-auto grid max-w-6xl items-center gap-space-xl ${
           aside ? 'lg:grid-cols-[1.25fr_1fr]' : ''
         } ${centered ? 'justify-items-center text-center' : ''}`}
       >
-        <div className={`animate-fade-up ${centered ? 'flex flex-col items-center' : ''}`}>
-          <div className="mb-space-md inline-flex items-center gap-space-sm rounded-full border border-primary/20 bg-primary/10 px-space-md py-space-xs text-label-md text-primary">
+        <div className={centered ? 'flex flex-col items-center' : ''}>
+          <div className="hero-in mb-space-lg inline-flex items-center gap-space-sm rounded-full border border-white/10 bg-surface-container/70 px-space-md py-space-xs text-label-md text-on-surface-variant backdrop-blur-md [&_svg]:text-secondary">
             {badge}
           </div>
-          <h1 className="mb-space-md font-headline text-4xl font-bold leading-tight tracking-tight md:text-5xl">{title}</h1>
-          <p className={`mb-space-lg max-w-xl text-body-lg text-on-surface-variant ${centered ? 'mx-auto' : ''}`}>{lead}</p>
-          {children}
+          <h1 className={`hero-in mb-space-lg text-balance ${HERO_TITLE}`} style={{ animationDelay: '90ms' }}>{title}</h1>
+          <p className={`hero-in mb-space-xl max-w-xl text-pretty font-headline text-lg leading-relaxed text-on-surface-variant ${centered ? 'mx-auto' : ''}`} style={{ animationDelay: '180ms' }}>{lead}</p>
+          <div className="hero-in" style={{ animationDelay: '260ms' }}>{children}</div>
         </div>
-        {aside && <div className="animate-fade-up" style={{ animationDelay: '120ms' }}>{aside}</div>}
+        {aside && <div className="hero-in" style={{ animationDelay: '340ms' }}>{aside}</div>}
       </div>
     </section>
   );
@@ -81,7 +100,7 @@ export function CtaCard({ title, text, children }: { title: React.ReactNode; tex
   return (
     <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-primary/15 via-surface-container to-secondary/10 p-space-xl text-center">
       <div className="float-slow pointer-events-none absolute -right-10 -top-10 h-48 w-48 rounded-full bg-secondary/20 blur-3xl" />
-      <h3 className="relative mb-space-sm font-headline text-2xl font-bold">{title}</h3>
+      <h3 className="relative mb-space-sm font-headline text-3xl font-bold tracking-[-0.03em]">{title}</h3>
       <p className="relative mb-space-lg text-body-md text-on-surface-variant">{text}</p>
       <div className="relative flex flex-wrap justify-center gap-space-sm">{children}</div>
     </div>
@@ -92,4 +111,4 @@ export const BTN_PRIMARY =
   'btn-shine flex items-center gap-space-sm rounded-full bg-primary px-space-lg py-space-sm text-label-md font-bold text-white transition-all hover:shadow-[0_0_25px_rgba(59,130,246,0.6)] disabled:opacity-60';
 export const BTN_GHOST =
   'flex items-center gap-space-sm rounded-full border border-white/15 px-space-lg py-space-sm text-label-md text-on-surface transition-colors hover:border-primary/50 disabled:opacity-60';
-export const CARD = 'rounded-xl border border-white/10 bg-surface-container/70 backdrop-blur';
+export const CARD = 'spotlight glass-card rounded-xl border border-white/10';

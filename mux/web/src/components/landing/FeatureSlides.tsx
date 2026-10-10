@@ -157,7 +157,7 @@ export function FeatureSlides() {
               <span className="font-headline text-6xl font-bold text-transparent [-webkit-text-stroke:1px_rgba(139,148,158,0.45)] md:text-7xl">0{i + 1}</span>
               <span className="font-code text-label-md uppercase tracking-[0.2em] text-secondary">{s.eyebrow}</span>
             </div>
-            <h3 className="mb-space-md font-headline text-3xl font-bold leading-tight tracking-tight text-on-surface md:text-4xl">{s.title}</h3>
+            <h3 className="mb-space-md font-display text-3xl font-bold leading-[1.05] tracking-[-0.03em] text-on-surface md:text-4xl">{s.title}</h3>
             <p className="mb-space-lg max-w-md text-body-lg text-on-surface-variant">{s.body}</p>
             <ul className="mb-space-xl space-y-space-sm">
               {s.points.map((p, k) => (

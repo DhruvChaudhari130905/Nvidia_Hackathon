@@ -39,7 +39,8 @@ export function Presence({ users, typingUser }: PresenceProps) {
       </div>
       {typingUser && (
         <span className="typing">
-          {activeUsers.find(u => u.user.id === typingUser)?.user.name || 'Someone'} is typing…
+          {activeUsers.find(u => u.user.id === typingUser)?.user.name || 'Someone'} is typing
+          <span className="typing-dots" aria-hidden="true"><i /><i /><i /></span>
         </span>
       )}
     </>

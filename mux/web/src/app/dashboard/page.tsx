@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { DoorOpen, Trash2, Plus, FolderInput, FolderOpen, FileArchive, Timer, Terminal, ArrowRight, Activity, Zap, PlusCircle, X, RefreshCw, Search, Crown, Users, Sparkles, LogIn } from 'lucide-react';
+import { DoorOpen, Trash2, Plus, FolderInput, FolderOpen, FileArchive, Timer, Terminal, ArrowRight, Activity, Zap, PlusCircle, X, RefreshCw, Search, Crown, Users, Sparkles, LogIn, ArrowUpDown } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { getUser, loginHref } from '@/lib/supabase';
 import { api, ApiError } from '@/lib/api';
@@ -91,7 +91,9 @@ export default function DashboardPage() {
         // Links from the landing page and Sandbox open the create dialog, optionally pre-filled
         const params = new URLSearchParams(window.location.search);
         const template = STARTER_TEMPLATES.find(t => t.id === params.get('template'));
+        // Sandbox's "describe it" box passes its text along as ?desc=
         if (template) setNewRoomDesc(template.prompt);
+        else if (params.get('desc')) setNewRoomDesc(params.get('desc')!.slice(0, 500));
         if (template || params.get('new')) setShowCreate(true);
         else if (params.get('export')) setShowExportPicker(true);
         else if (params.has('join')) setJoinRoomId(params.get('join') ?? '');
@@ -156,7 +158,7 @@ export default function DashboardPage() {
       router.push(`/room/${room.id}`);
     } catch (error) {
       console.error('Import failed:', error);
-      alert(`Import failed: ${(error as Error).message}`);
+      if (!offerUpgrade(error)) alert(`Import failed: ${(error as Error).message}`);
     } finally {
       setImporting(false);
     }
@@ -165,6 +167,7 @@ export default function DashboardPage() {
   // Search + activity filter over the rooms list; "/" focuses search
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | ActivityLevel>('all');
+  const [sort, setSort] = useState<'recent' | 'name' | 'members'>('recent');
   const searchRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -175,6 +178,13 @@ export default function DashboardPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  // The server refuses a new room past the plan's room limit (403); offer the Pricing page instead of a bare error
+  const offerUpgrade = (error: unknown): boolean => {
+    if (!(error instanceof ApiError) || error.status !== 403) return false;
+    if (window.confirm(`${error.message}\n\nOpen the Pricing page to upgrade?`)) router.push('/pricing');
+    return true;
+  };
 
   const handleCreateRoom = async () => {
     if (!newRoomDesc.trim()) return;
@@ -190,7 +200,7 @@ export default function DashboardPage() {
       router.push(`/room/${room.id}`);
     } catch (error) {
       console.error('Failed to create room:', error);
-      alert('Failed to create room');
+      if (!offerUpgrade(error)) alert(error instanceof Error ? `Couldn't create the room: ${error.message}` : "Couldn't create the room");
     } finally {
       setCreating(false);
     }
@@ -213,7 +223,11 @@ export default function DashboardPage() {
   const visible = rooms.filter(
     r => (filter === 'all' || activityOf(r) === filter) && (!q || `${r.title} ${r.description ?? ''}`.toLowerCase().includes(q)),
   );
-  const filtering = filter !== 'all' || q !== '';
+  // rooms is already newest-activity first; the other orders re-sort a copy
+  if (sort === 'name') visible.sort((a, b) => a.title.localeCompare(b.title));
+  if (sort === 'members') visible.sort((a, b) => b.members.length - a.members.length || lastActivity(b) - lastActivity(a));
+  // Any narrowing or re-ordering drops the featured card so the list reads in the chosen order
+  const filtering = filter !== 'all' || q !== '' || sort !== 'recent';
   const [featured, ...others] = filtering ? [undefined, ...visible] : visible;
   const counts: Record<'all' | ActivityLevel, number> = {
     all: rooms.length,
@@ -240,7 +254,7 @@ export default function DashboardPage() {
           {liveCount} live room{liveCount === 1 ? '' : 's'} · refreshes every 15s
         </>
       }
-      title={<>Your <span className="text-shimmer">build rooms</span></>}
+      title="Your build rooms"
       lead="Jump back into a live session, start something new, or bring an existing project in. Every room keeps its plan, log and checkpoints."
       aside={
         <div className="grid grid-cols-2 gap-space-sm">
@@ -331,12 +345,25 @@ export default function DashboardPage() {
                 )}
               </div>
             </div>
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               {(['all', 'active', 'recent', 'idle'] as const).map(f => (
                 <FilterChip key={f} on={filter === f} onClick={() => setFilter(f)}>
                   {f === 'all' ? 'All' : ACTIVITY_STYLE[f].label} <span className="tabular-nums text-outline">{counts[f]}</span>
                 </FilterChip>
               ))}
+              <label className="ml-1 flex items-center gap-1.5 rounded-full border border-white/10 py-0.5 pl-3 pr-1 font-code text-code-sm text-outline transition-colors focus-within:border-primary/50 hover:border-primary/40">
+                <ArrowUpDown className="h-3.5 w-3.5" aria-hidden="true" />
+                <span className="sr-only">Sort rooms</span>
+                <select
+                  value={sort}
+                  onChange={e => setSort(e.target.value as typeof sort)}
+                  className="cursor-pointer rounded-full bg-transparent py-0.5 pr-1 text-on-surface outline-none [&>option]:bg-surface-container"
+                >
+                  <option value="recent">Recently active</option>
+                  <option value="name">Name A–Z</option>
+                  <option value="members">Most members</option>
+                </select>
+              </label>
             </div>
           </div>
 
@@ -360,7 +387,7 @@ export default function DashboardPage() {
             <div className={`item-in mb-space-xl ${CARD} p-space-xl text-center`}>
               <Search className="mx-auto mb-space-sm h-8 w-8 text-outline" />
               <p className="mb-space-sm text-body-lg text-on-surface">No rooms match{q ? ` “${query}”` : ''}</p>
-              <button type="button" onClick={() => { setQuery(''); setFilter('all'); }} className="text-body-md text-primary hover:underline">Show all rooms</button>
+              <button type="button" onClick={() => { setQuery(''); setFilter('all'); setSort('recent'); }} className="text-body-md text-primary hover:underline">Show all rooms</button>
             </div>
           )}
         </>
@@ -540,6 +567,7 @@ function FeaturedRoom({ room, currentUser, onDelete }: { room: Room; currentUser
 
   return (
     <Spotlight className="group relative mb-space-xl overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-primary/15 via-surface-container/80 to-secondary/10 p-space-xl backdrop-blur transition-colors duration-300 hover:border-primary/40">
+      <span className="live-border" aria-hidden="true" />
       <div className="float-slow pointer-events-none absolute -right-16 -top-16 h-64 w-64 rounded-full bg-secondary/20 blur-3xl" />
       <div className="relative z-10 flex flex-col items-start justify-between gap-space-xl lg:flex-row lg:items-center">
         <div className="flex-1">
@@ -552,7 +580,7 @@ function FeaturedRoom({ room, currentUser, onDelete }: { room: Room; currentUser
               updated {formatDistanceToNow(lastActivity(room), { addSuffix: true })}
             </span>
           </div>
-          <h2 className="mb-space-xs font-headline text-2xl font-bold tracking-tight text-on-surface md:text-3xl">{room.title}</h2>
+          <h2 className="mb-space-xs font-headline text-3xl font-bold tracking-[-0.03em] text-on-surface md:text-4xl">{room.title}</h2>
           <p className="mb-space-lg max-w-2xl text-body-md text-on-surface-variant">{room.description || 'No description'}</p>
           <div className="flex flex-wrap items-center gap-space-lg">
             <div className="flex -space-x-2">
@@ -651,9 +679,9 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 // Opened from the header's "Export to GitHub": pick one of your rooms, then its export dialog opens
 function ExportPicker({ rooms, onCancel, onCreate }: { rooms: Room[]; onCancel: () => void; onCreate: () => void }) {
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onCancel}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center glass-overlay p-4" onClick={onCancel}>
       <div
-        className="item-in w-full max-w-md rounded-2xl border border-white/10 bg-surface-container p-space-lg shadow-2xl"
+        className="item-in w-full max-w-md rounded-2xl glass-modal p-space-lg"
         onClick={e => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -720,9 +748,9 @@ function CreateRoomDialog({ description, role, password, creating, onDescription
   const passwordTooShort = password.length > 0 && password.length < 4;
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onCancel}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center glass-overlay p-4" onClick={onCancel}>
       <div
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-surface-container p-space-lg shadow-2xl"
+        className="w-full max-w-md rounded-2xl glass-modal p-space-lg"
         onClick={e => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -834,10 +862,10 @@ function JoinRoomDialog({ initialRoomId, onCancel, onJoined }: JoinRoomDialogPro
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onClick={onCancel}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center glass-overlay p-4" onClick={onCancel}>
       <form
         onSubmit={join}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-surface-container p-space-lg shadow-2xl"
+        className="w-full max-w-md rounded-2xl glass-modal p-space-lg"
         onClick={e => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

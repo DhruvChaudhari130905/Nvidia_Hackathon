@@ -12,7 +12,7 @@ export function Logo({ href = '/' }: { href?: string }) {
           <circle cx="20" cy="12" r="1.5" fill="#06b6d4" stroke="none" />
         </svg>
       </span>
-      <span className="font-headline text-headline-md font-bold tracking-tight text-on-surface">MUX</span>
+      <span className="font-code text-headline-md font-bold tracking-tight text-on-surface">MUX</span>
     </Link>
   );
 }

@@ -9,6 +9,11 @@ from typing import Any
 from mux.agents.llm import ModelRole
 
 MAX_REPEATS = 3
+# Reading is different: compaction drops older file contents and tells the model to read them again, so a
+# repeated read is often legitimate. From MAX_REPEATS on, a repeated read gets a nudge (see CoderLoop);
+# only this many identical reads with nothing changed in between stop the task.
+READ_REPEATS_BEFORE_STOP = 6
+READ_ONLY_TOOLS = ("read_file", "list_files")
 FAILED_BUILDS_BEFORE_ULTRA = 2
 
 
@@ -16,7 +21,7 @@ FAILED_BUILDS_BEFORE_ULTRA = 2
 class EscalationState:
     """Tracks limits and escalation state for one coder task."""
 
-    max_turns: int = 25
+    max_turns: int = 40
     model: ModelRole = ModelRole.SUPER
     turns: int = 0
     consecutive_failed_builds: int = 0
@@ -31,10 +36,11 @@ class EscalationState:
         return True
 
     def record_tool_call(self, name: str, arguments: dict[str, Any]) -> bool:
-        """Return True when the same call with the same arguments comes 3 times with no file change between.
+        """Return True when the same call with the same arguments has come too often with no file change between:
+        3 times for most tools, READ_REPEATS_BEFORE_STOP times for reads (which get nudged before that).
 
         A change resets the count: build, edit, build is progress, not a loop. Reading two files in turn
-        (a, b, a, b, a) with nothing changing is a loop.
+        (a, b, a, b, ...) with nothing changing is a loop.
         """
         if name in ("write_file", "edit_file", "delete_file", "add_image"):
             self._since_change.clear()
@@ -43,7 +49,12 @@ class EscalationState:
             return False  # loading guidance again is cheap and harmless, e.g. after compaction dropped it
         key = f"{name}:{json.dumps(arguments, sort_keys=True, default=str)}"
         self._since_change[key] = self._since_change.get(key, 0) + 1
-        return self._since_change[key] >= MAX_REPEATS
+        limit = READ_REPEATS_BEFORE_STOP if name in READ_ONLY_TOOLS else MAX_REPEATS
+        return self._since_change[key] >= limit
+
+    def repeats(self, name: str, arguments: dict[str, Any]) -> int:
+        """How many times this exact call has been made since the last file change."""
+        return self._since_change.get(f"{name}:{json.dumps(arguments, sort_keys=True, default=str)}", 0)
 
     def record_build(self, passed: bool) -> bool:
         """Record a build result. Return True when this result moves the task to Ultra."""

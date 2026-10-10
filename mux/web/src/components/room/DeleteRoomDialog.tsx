@@ -58,9 +58,9 @@ export function DeleteRoomDialog({ room, onClose, onDeleted }: DeleteRoomDialogP
   };
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4" onClick={() => !deleting && onClose()}>
+    <div className="fixed inset-0 z-[70] flex items-center justify-center glass-overlay p-4" onClick={() => !deleting && onClose()}>
       <div
-        className="item-in w-full max-w-md rounded-xl border border-[var(--line)] bg-[var(--panel)] p-6 font-sans text-[var(--ink)] shadow-2xl"
+        className="item-in w-full max-w-md rounded-2xl glass-modal p-6 font-sans text-[var(--ink)]"
         onClick={e => e.stopPropagation()}
         role="alertdialog"
         aria-modal="true"

@@ -47,8 +47,10 @@ async def add_image(files: Any, client: httpx.AsyncClient, used: set[str], query
         used.add(hit["id"])
         if added is not None:
             added.append(saved)
-        return {"ok": True, "path": saved, "width": hit.get("width"), "height": hit.get("height"),
-                "credit": _credit(hit)}
+        # public/ is the web root (Vite, and the room's static preview), so the page refers to it without it
+        src = "/" + saved[len("public/"):] if saved.startswith("public/") else saved
+        return {"ok": True, "path": saved, "src": src, "width": hit.get("width"), "height": hit.get("height"),
+                "credit": _credit(hit), "note": f"Use src=\"{src}\" in <img> tags and CSS."}
     return {"ok": False, "error": f"no usable photo found for: {query}"}
 
 

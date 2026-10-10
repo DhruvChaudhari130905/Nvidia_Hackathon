@@ -89,7 +89,9 @@ async def test_write_file_refuses_to_overwrite(repo: Path):
 @pytest.mark.asyncio
 async def test_unknown_tool_and_bad_arguments_return_errors(repo: Path):
     tools = executor(repo)
-    assert (await tools.execute("rm_rf", {}))["error"] == "unknown tool: rm_rf"
+    error = (await tools.execute("rm_rf", {}))["error"]
+    # The error names the real tools, so a model that guessed a name can correct itself
+    assert error.startswith("unknown tool: rm_rf. Use only these tools:") and "read_file" in error and "edit_file" in error
     assert (await tools.execute("read_file", {"nope": 1}))["ok"] is False
 
 
@@ -215,6 +217,18 @@ async def test_add_image_saves_a_real_photo_into_the_project(repo: Path):
     assert result["credit"] == "Necklace a by Ann (CC BY), https://flickr.com/a"
     assert (repo / "images" / "necklace.jpg").read_text() == "data:image/jpeg;base64," + base64.b64encode(b"JPEG").decode()
     assert "q=gold+necklace" in seen[0]
+    assert result["src"] == "images/necklace.jpg"
+
+
+@pytest.mark.asyncio
+async def test_add_image_under_public_gives_the_web_root_src(repo: Path):
+    import httpx
+
+    transport, _ = openverse([hit("a", "https://img.example/a.jpg")], {"https://img.example/a.jpg": (200, "image/jpeg", b"JPEG")})
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await executor(repo, http=client).execute("add_image", {"query": "ring", "path": "public/images/ring.jpg"})
+    # public/ is served at the root, so pages must refer to /images/ring.jpg (a missing image otherwise)
+    assert result["path"] == "public/images/ring.jpg" and result["src"] == "/images/ring.jpg"
 
 
 @pytest.mark.asyncio
@@ -573,3 +587,27 @@ def test_compaction_says_when_a_skill_text_was_dropped(monkeypatch):
                 {"role": "assistant", "content": "", "tool_calls": []}]
     out = compact(messages)
     assert "use_skill" in out[1]["content"] and "frontend-design" in out[1]["content"]
+
+
+# Tool names models invent (room_db8a580bd5b9: Nemotron called view / read / write / glob)
+
+@pytest.mark.asyncio
+async def test_invented_tool_names_reach_the_real_tools(repo: Path):
+    tools = executor(repo)
+    read = await tools.execute("view", {"path": "src/App.tsx"})
+    assert read["content"].startswith("const a = 1;")
+    assert (await tools.execute("cat", {"file_path": "src/App.tsx"}))["content"] == read["content"]
+    listed = await tools.execute("glob", {"pattern": "**/*"})
+    assert "src/App.tsx" in json.dumps(listed)
+    written = await tools.execute("write", {"path": "src/New.tsx", "file_text": "export {};\n"})
+    assert written["ok"] is True
+    edited = await tools.execute("str_replace", {"path": "src/App.tsx", "old_str": "const b = 1;", "new_str": "const b = 2;",
+                                                 "base_version": read["version"]})
+    assert edited["ok"] is True
+    assert "const b = 2;" in (repo / "src" / "App.tsx").read_text(encoding="utf-8")
+
+
+def test_aliases_leave_real_tool_names_alone():
+    from mux.agents.coder.tools.aliases import resolve
+    assert resolve("read_file", {"path": "a"}) == ("read_file", {"path": "a"})
+    assert resolve("add_image", {"query": "q", "path": "a.jpg"}) == ("add_image", {"query": "q", "path": "a.jpg"})

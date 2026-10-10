@@ -710,3 +710,428 @@ input:focus-visible {
 
 /* The preview frame in fullscreen: square edges, filling the screen */
 .preview-frame:fullscreen { border: 0; border-radius: 0; width: 100vw; height: 100vh; }
+
+/* ───────────── Landing: live room ───────────── */
+.landing ::selection { background: rgba(163,113,247,.45); color: #fff; }
+
+/* Hero entrance: one orchestrated load sequence */
+@keyframes hero-rise { from { opacity: 0; transform: translateY(28px); filter: blur(8px); } to { opacity: 1; transform: none; filter: blur(0); } }
+.hero-in { animation: hero-rise .9s cubic-bezier(.16,1,.3,1) both; }
+.hero-title { font-size: clamp(2.75rem, 6.2vw, 5.5rem); line-height: .95; letter-spacing: -0.045em; }
+.hero-line { animation: hero-rise 1s cubic-bezier(.16,1,.3,1) both; }
+
+/* Teammate cursors */
+.room-cursor { align-items: flex-start; transform-origin: 0 0; }
+@keyframes bubble-in { from { opacity: 0; transform: translateY(-4px) scale(.9); } to { opacity: 1; transform: none; } }
+.bubble-in { animation: bubble-in .35s cubic-bezier(.34,1.56,.64,1) both; transform-origin: 0 0; }
+.you-cursor { transition: opacity .2s ease; }
+.you-cursor[data-hidden="true"] { opacity: 0; }
+
+/* Hero backdrop: drifting aurora, a faint perspective grid and film grain */
+@keyframes aurora-drift {
+  0% { transform: translate3d(-6%, -4%, 0) rotate(0deg) scale(1); }
+  50% { transform: translate3d(6%, 4%, 0) rotate(8deg) scale(1.08); }
+  100% { transform: translate3d(-6%, -4%, 0) rotate(0deg) scale(1); }
+}
+.aurora::before {
+  content: ""; position: absolute; inset: -20%;
+  background:
+    radial-gradient(35% 30% at 70% 30%, rgba(59,130,246,.28), transparent 70%),
+    radial-gradient(30% 28% at 85% 60%, rgba(6,182,212,.22), transparent 70%),
+    radial-gradient(28% 26% at 55% 75%, rgba(163,113,247,.22), transparent 70%);
+  filter: blur(40px); animation: aurora-drift 22s ease-in-out infinite;
+}
+.hero-grid {
+  background-image: linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+  background-size: 64px 64px;
+  -webkit-mask-image: radial-gradient(70% 60% at 60% 35%, #000 20%, transparent 75%);
+  mask-image: radial-gradient(70% 60% at 60% 35%, #000 20%, transparent 75%);
+}
+.landing::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 65; opacity: .06; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Room preview standing up in 3D as it scrolls in, with a pointer-following glare */
+.tilt-stage { perspective: 1600px; }
+.tilt-card { transform-origin: 50% 0%; transform-style: preserve-3d; }
+.tilt-glare {
+  opacity: 0; transition: opacity .4s ease;
+  background: radial-gradient(600px circle at var(--gx, 50%) var(--gy, 0%), rgba(147,197,253,.12), transparent 45%);
+}
+.tilt-card:hover .tilt-glare { opacity: 1; }
+
+/* Magnetic buttons spring back when released */
+.magnetic { transition: transform .35s cubic-bezier(.34,1.56,.64,1); will-change: transform; }
+
+/* Split-word headings rise out of a mask */
+.split-mask { display: inline-block; overflow: hidden; vertical-align: top; padding-bottom: .08em; margin-bottom: -.08em; }
+.split-word { display: inline-block; transform: translateY(105%) rotate(4deg); transform-origin: 0 100%; transition: transform .9s cubic-bezier(.16,1,.3,1); }
+.split.in .split-word { transform: none; }
+
+/* Live stat tiles: the number rolls in and the tile flashes in its colour on every change */
+@keyframes stat-roll { from { transform: translateY(40%); opacity: 0; } to { transform: none; opacity: 1; } }
+.stat-roll { animation: stat-roll .45s cubic-bezier(.16,1,.3,1) both; }
+@keyframes stat-flash { from { opacity: .5; } to { opacity: 0; } }
+.stat-flash { background: radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--c) 30%, transparent), transparent 60%); animation: stat-flash 1.2s ease-out both; }
+
+.marquee.reverse { animation-direction: reverse; animation-duration: 52s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-in, .hero-line, .aurora::before, .bubble-in, .stat-roll, .stat-flash { animation: none !important; }
+  .split-word { transform: none; transition: none; }
+  .magnetic { transition: none; }
+}
+
+/* ───────────── Site screens: shared live touches ───────────── */
+/* Page-hero light that follows the pointer (trackHeroSpot sets --sx / --sy) */
+.hero-spot {
+  background: radial-gradient(520px circle at var(--sx, 30%) var(--sy, 30%), rgba(59,130,246,.10), transparent 60%);
+  transition: background .2s linear;
+}
+
+/* A highlight that travels around a featured card's border */
+@property --spin { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@keyframes spin-border { to { --spin: 360deg; } }
+.live-border {
+  position: absolute; inset: 0; z-index: 1; border-radius: inherit; padding: 1px; pointer-events: none;
+  background: conic-gradient(from var(--spin), transparent 0 60%, #3b82f6 74%, #06b6d4 84%, #a371f7 92%, transparent 98%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  animation: spin-border 6s linear infinite;
+}
+
+/* Balanced line breaks on every heading */
+h1, h2, h3 { text-wrap: balance; }
+
+@media (prefers-reduced-motion: reduce) {
+  .live-border { animation: none; }
+}
+
+/* ───────────── Room workspace: refinement layer ─────────────
+   Same structure and behaviour as before; this layer only adjusts surfaces, states and motion. */
+
+/* Top bar: glass surface with a slow light travelling along its bottom edge */
+/* The blur lives on a pseudo-element: backdrop-filter on the header itself would make it the containing
+   block for the fixed-position dialogs it renders (AI model, Tools, Share...) and trap them behind the panels */
+.app .top { position: relative; z-index: 30; background: transparent; }
+.app .top::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background: color-mix(in srgb, var(--panel) 82%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+}
+.app .top::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--coord), var(--coder), #a371f7, transparent) no-repeat;
+  background-size: 40% 100%; animation: edge-run 9s linear infinite; opacity: .8;
+}
+@keyframes edge-run { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+.app .brand { font: 700 20px/1 var(--font-display); letter-spacing: -.03em; }
+.app .room .name { font: 600 16px/1.2 var(--font-display); letter-spacing: -.01em; }
+
+/* Buttons: softer corners, tactile press, glow on the primary action */
+.app .btn { border-radius: 8px; transition: border-color .15s, background-color .15s, box-shadow .2s, transform .12s; }
+.app .btn:hover:not(:disabled) { background: color-mix(in srgb, var(--raised) 70%, #30363d); }
+.app .btn:active:not(:disabled) { transform: scale(.97); }
+.app .btn.primary { background: linear-gradient(135deg, #3b82f6, #2563eb); box-shadow: 0 6px 20px -8px rgba(59,130,246,.8), inset 0 1px 0 rgba(255,255,255,.15); }
+.app .btn.primary:hover:not(:disabled) { background: linear-gradient(135deg, #4f8ff7, #2563eb); box-shadow: 0 8px 28px -6px rgba(59,130,246,.85), inset 0 1px 0 rgba(255,255,255,.2); }
+
+/* Presence: online dots breathe; avatars lift on hover; typing dots bounce */
+/* The wrapper's -space-x-2 already overlaps the avatars, so drop the base rule's extra negative margin */
+.app .presence .av { margin-left: 0; transition: transform .2s cubic-bezier(.34,1.56,.64,1); }
+.app .presence .av:hover { transform: translateY(-3px) scale(1.08); z-index: 10 !important; }
+.app .av .dot { animation: ring 2.4s ease-out infinite; }
+.typing { display: inline-flex; align-items: baseline; gap: 1px; }
+.typing-dots { display: inline-flex; gap: 2px; margin-left: 3px; }
+.typing-dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: typing-bounce 1.2s ease-in-out infinite; }
+.typing-dots i:nth-child(2) { animation-delay: .15s; }
+.typing-dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes typing-bounce { 0%, 60%, 100% { transform: none; opacity: .4; } 30% { transform: translateY(-3px); opacity: 1; } }
+
+/* Budget bar: a gentle sheen over the fill */
+.app .budget .bar { height: 5px; background: color-mix(in srgb, var(--raised) 80%, transparent); }
+.app .budget .bar i { position: relative; overflow: hidden; } /* keeps its blue / amber / red budget colour */
+.app .budget .bar i::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent); transform: translateX(-100%); animation: bar-sheen 3.2s ease-in-out infinite; }
+@keyframes bar-sheen { 60%, 100% { transform: translateX(100%); } }
+
+/* Column headers and tabs: the selected tab slides a gradient underline in */
+.app .col-head { background: color-mix(in srgb, var(--panel) 88%, transparent); }
+.app .tab { position: relative; transition: color .15s, background-color .15s; }
+.app .tab:hover { color: var(--ink); }
+.app .tab[aria-selected="true"] { background: color-mix(in srgb, var(--raised) 90%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 70%, transparent); }
+.app .tab[aria-selected="true"]::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px; background: linear-gradient(90deg, var(--coord), var(--coder)); animation: item-in .25s ease-out both; }
+
+/* Feed: rows highlight on hover; the agent avatar gets the brand gradient */
+.app .feed .msg { margin: 0 -8px; padding: 6px 8px; border-radius: 10px; transition: background-color .15s; }
+.app .feed .msg:hover { background: rgba(255,255,255,.025); }
+.app .feed .msg .who { font-family: var(--font-display); }
+.app .agent-av { background: linear-gradient(135deg, var(--coord), var(--coder)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--coder) 25%, transparent); }
+.app .banner { border-radius: 10px; animation: item-in .35s ease-out both; }
+
+/* Composer: the field lights up with the brand gradient while focused */
+.app .composer { background: color-mix(in srgb, var(--panel) 92%, transparent); }
+.app .composer input, .app .composer textarea { border-radius: 10px; padding: 10px 12px; transition: border-color .15s, box-shadow .2s, background-color .15s; }
+.app .composer input:hover, .app .composer textarea:hover { border-color: var(--faint); }
+.app .composer input:focus, .app .composer textarea:focus {
+  outline: none; border-color: color-mix(in srgb, var(--coord) 70%, var(--line)); background: var(--bg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--coord) 22%, transparent), 0 8px 30px -12px rgba(6,182,212,.6);
+}
+.app .composer .btn.primary { border-radius: 10px; padding-inline: 16px; }
+
+/* Decision cards: conflicts and questions get a travelling border so open decisions draw the eye */
+.app .side .card { position: relative; border-radius: 12px; padding: 14px; transition: border-color .2s, transform .2s, box-shadow .25s; }
+.app .side .card:hover { transform: translateY(-1px); box-shadow: 0 14px 34px -18px rgba(0,0,0,.8); }
+.app .side .card.conflict, .app .side .card.ask { background: linear-gradient(180deg, color-mix(in srgb, var(--conflict) 7%, var(--raised)), var(--raised) 45%); }
+.app .side .card.ask { background: linear-gradient(180deg, color-mix(in srgb, var(--ask) 8%, var(--raised)), var(--raised) 45%); }
+.app .side .card.conflict::before, .app .side .card.ask::before {
+  content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;
+  background: conic-gradient(from var(--spin), transparent 0 70%, var(--conflict) 85%, transparent 97%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
+  animation: spin-border 5s linear infinite;
+}
+.app .side .card.ask::before { background: conic-gradient(from var(--spin), transparent 0 70%, var(--ask) 85%, transparent 97%); }
+.app .card h4 { font: 600 15px/1.35 var(--font-display); letter-spacing: -.01em; }
+.app .opt { border-radius: 8px; transition: border-color .15s, background-color .15s, transform .15s; }
+.app .opt:hover:not(:disabled) { background: color-mix(in srgb, var(--panel) 70%, var(--raised)); }
+.app .opt .meter i { background: linear-gradient(90deg, var(--conflict), #ff9b94); }
+.app .ask .opt .meter i { background: linear-gradient(90deg, var(--ask), #c9a8ff); }
+
+/* Plan: hover rows, a checkmark in finished tasks, and a sheen across the task being built */
+.app .plan-item { transition: background-color .15s; }
+.app .plan-item:hover { background: rgba(255,255,255,.03); }
+.app .plan-item .t { font-size: 13.5px; }
+.app .plan-item.done .ic {
+  background: linear-gradient(135deg, var(--coord), var(--coder)); border-color: transparent; position: relative;
+}
+.app .plan-item.done .ic::after {
+  content: ""; position: absolute; left: 4px; top: 1.5px; width: 3.5px; height: 6.5px;
+  border: solid #fff; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg);
+}
+.app .plan-item.doing { position: relative; overflow: hidden; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--coder) 30%, transparent); }
+.app .plan-item.doing::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(100deg, transparent 30%, rgba(6,182,212,.12) 50%, transparent 70%);
+  transform: translateX(-100%); animation: bar-sheen 2.6s ease-in-out infinite;
+}
+
+/* Preview frame: lifts off the stage with a soft brand glow */
+.app .preview-frame { border-radius: 12px; box-shadow: 0 30px 80px -40px rgba(59,130,246,.55), 0 0 0 1px rgba(255,255,255,.02); }
+
+/* Timeline: nodes pop on hover */
+.app .timeline { background: color-mix(in srgb, var(--panel) 92%, transparent); }
+.app .timeline-node .pt { transition: transform .2s cubic-bezier(.34,1.56,.64,1), box-shadow .2s; }
+.app .timeline-node:hover .pt { transform: scale(1.18); box-shadow: 0 0 0 4px color-mix(in srgb, var(--coord) 20%, transparent); }
+
+/* Slim scrollbars inside the workspace */
+.app .scroll, .app .stage, .app .tree { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--line) 80%, transparent) transparent; }
+.app .scroll::-webkit-scrollbar, .app .stage::-webkit-scrollbar { width: 8px; }
+.app .scroll::-webkit-scrollbar-thumb, .app .stage::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--line) 80%, transparent); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  .app .top::after, .app .av .dot, .typing-dots i, .app .budget .bar i::after, .app .tab[aria-selected="true"]::after,
+  .app .side .card.conflict::before, .app .side .card.ask::before, .app .plan-item.doing::after, .app .banner { animation: none !important; }
+  .app .presence .av:hover, .app .side .card:hover, .app .timeline-node:hover .pt { transform: none; }
+}
+
+/* ───────────── Room workspace: floating-panel layout ─────────────
+   The three columns and the timeline float as rounded glass panels over the live wallpaper,
+   instead of sitting flush against each other with hairline borders. */
+.app { background: radial-gradient(900px 500px at 15% -10%, rgba(59,130,246,.12), transparent 60%), radial-gradient(800px 500px at 100% 110%, rgba(163,113,247,.10), transparent 60%), color-mix(in srgb, var(--bg) 78%, transparent); }
+.shader-bg { opacity: .4; }
+
+.app .main { gap: 10px; padding: 10px 10px 0; background: transparent; }
+.app .col {
+  border: 1px solid rgba(255,255,255,.07); border-radius: 16px; overflow: hidden;
+  background: color-mix(in srgb, var(--panel) 74%, transparent);
+  backdrop-filter: blur(16px) saturate(1.2); -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: 0 24px 60px -30px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.04);
+}
+.app .col:last-child { border-right: 1px solid rgba(255,255,255,.07); }
+.app .panel-rail.right { border-left: 1px solid rgba(255,255,255,.07); }
+
+/* Panel headers: readable titles with a colour dot per panel instead of tiny caps */
+.app .col-head {
+  padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,.06); background: rgba(255,255,255,.015);
+  font: 600 13.5px/1 var(--font-display); letter-spacing: -.005em; text-transform: none; color: var(--ink);
+}
+.app .col-head .mono { font: 500 11px/1 var(--font-mono); letter-spacing: .04em; color: var(--muted); }
+.app .col-head::before { content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none; margin-right: -2px; background: var(--coord); box-shadow: 0 0 10px var(--coord); }
+.app [aria-label="Preview and code"] > .col-head::before { background: var(--coder); box-shadow: 0 0 10px var(--coder); }
+.app [aria-label="Decisions and plan"] > .col-head::before { background: var(--ask); box-shadow: 0 0 10px var(--ask); }
+.app .col-head > :first-child { margin-right: auto; }
+/* Preview / Code switch as a segmented control */
+.app .col-head .tabs { padding: 3px; gap: 2px; border-radius: 10px; background: rgba(1,4,9,.6); border: 1px solid rgba(255,255,255,.06); }
+.app .col-head .tabs .tab { padding: 6px 12px; border-radius: 7px; }
+.app .col-head .tabs .tab[aria-selected="true"] { background: linear-gradient(135deg, rgba(59,130,246,.25), rgba(6,182,212,.18)); box-shadow: inset 0 0 0 1px rgba(59,130,246,.35); }
+.app .col-head .tabs .tab[aria-selected="true"]::after { display: none; }
+
+/* Top bar: a grouped toolbar and a larger room name */
+.app .top { padding: 12px 18px; gap: 18px; border-bottom-color: rgba(255,255,255,.06); }
+.app .room .name { font-size: 18px; }
+.app .toolbar { padding: 4px; border-radius: 12px; background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.07); }
+.app .toolbar > .btn:not(.primary) { background: transparent; border-color: transparent; }
+.app .toolbar > .btn:not(.primary):hover:not(:disabled) { background: rgba(255,255,255,.07); }
+.app .toolbar > .btn.primary { margin-left: 4px; }
+.app .budget { padding: 6px 10px; border-radius: 10px; background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06); }
+
+/* Feed: each message sits in a bubble; the newest one fades in */
+.app .feed { gap: 10px; padding: 14px 14px 18px; }
+.app .feed .msg { margin: 0; padding: 0; grid-template-columns: 32px 1fr; }
+.app .feed .msg:hover { background: none; }
+.app .feed .msg .av { width: 32px; height: 32px; font-size: 11.5px; box-shadow: 0 0 0 2px rgba(255,255,255,.06); }
+.app .feed .msg > div:last-child {
+  min-width: 0; padding: 8px 12px 10px; border-radius: 4px 14px 14px 14px;
+  background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.06); transition: background-color .15s, border-color .15s;
+}
+.app .feed .msg:hover > div:last-child { background: rgba(255,255,255,.055); border-color: rgba(255,255,255,.1); }
+.app .feed .msg .who { font-size: 13px; }
+.app .feed .msg p { margin-top: 4px; color: color-mix(in srgb, var(--ink) 92%, transparent); }
+.app .feed .msg.note > div:last-child { border-left: 2px solid var(--line); }
+.app .feed .msg:has(.agent-av) > div:last-child { background: linear-gradient(135deg, rgba(59,130,246,.10), rgba(6,182,212,.06)); border-color: rgba(59,130,246,.22); }
+.app .composer { border-top-color: rgba(255,255,255,.06); padding: 12px 14px; }
+
+/* Stage around the preview / editor: transparent so the glass panel shows through */
+.app .stage { background: transparent; padding: 12px; }
+
+/* Side panel: plan rows become small cards */
+.app .side { padding: 14px; gap: 16px; }
+.app .plan { gap: 6px; }
+.app .plan-head { padding: 2px 2px 10px; }
+.app .plan-item { padding: 10px; border-radius: 10px; background: rgba(255,255,255,.025); border: 1px solid rgba(255,255,255,.05); }
+.app .plan-item:hover { background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.09); }
+.app .plan-item.done { background: transparent; border-color: transparent; }
+.app .plan-item.doing { background: color-mix(in srgb, var(--coder) 9%, transparent); border-color: color-mix(in srgb, var(--coder) 35%, transparent); box-shadow: none; }
+.app .side input:not([type="radio"]):not([type="checkbox"]) { border-radius: 10px; }
+
+/* Timeline: a floating bar with a gradient track */
+.app .timeline { margin: 10px; border: 1px solid rgba(255,255,255,.07); border-radius: 16px; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); padding: 12px 18px 14px; }
+.app .timeline.collapsed { padding-top: 9px; padding-bottom: 9px; }
+.app .tl-head { font: 600 13px/1 var(--font-display); letter-spacing: 0; text-transform: none; color: var(--ink); }
+.app .tl-head > span + span { font: 500 11px/1 var(--font-mono); color: var(--muted); }
+.app .track::before { background: linear-gradient(90deg, var(--coord), var(--coder), #a371f7); opacity: .45; }
+.app .track p { background: transparent; }
+
+@media (max-width: 1080px) {
+  .app .main { padding: 10px; }
+  .app .col { border-bottom: 1px solid rgba(255,255,255,.07); }
+  .app .top { padding: 10px 12px; gap: 10px; }
+}
+
+/* Hero diagram: seats ping when they speak, the agent core pulses as messages land, preview blocks build in */
+.agent-diagram .seat-name { font: 500 11px/1 var(--nf-mona), sans-serif; fill: #8b949e; }
+.agent-diagram .seat-initials { font-family: var(--nf-mona), sans-serif; font-weight: 700; }
+.agent-diagram .core-label { font: 500 10px/1 var(--nf-jetbrains), monospace; fill: #93c5fd; letter-spacing: .08em; }
+.agent-diagram .card-url { font: 9.5px/1 var(--nf-jetbrains), monospace; fill: #6e7681; }
+.agent-diagram .seat-ring, .agent-diagram .core-ping { opacity: 0; transform-box: fill-box; transform-origin: center; }
+.agent-diagram .seat-ring.ping { animation: diagram-ping .9s ease-out; }
+.agent-diagram .core-ping.ping { animation: diagram-ping 1s ease-out; }
+@keyframes diagram-ping { from { opacity: .9; transform: scale(1); } to { opacity: 0; transform: scale(1.9); } }
+.agent-diagram .core-spin { animation: spin 14s linear infinite; }
+.agent-diagram .core-halo { animation: halo-breathe 4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes halo-breathe { 50% { opacity: .65; transform: scale(.92); } }
+.agent-diagram .out-wire { animation: wire-flow 1.2s linear infinite; }
+@keyframes wire-flow { to { stroke-dashoffset: -16; } }
+.agent-diagram .preview-block { opacity: .08; transform: translateY(4px); transform-box: fill-box; transition: opacity .5s ease, transform .5s cubic-bezier(.16,1,.3,1); }
+.agent-diagram .preview-block[data-on] { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .agent-diagram .core-spin, .agent-diagram .core-halo, .agent-diagram .out-wire { animation: none; }
+  .agent-diagram .preview-block { transition: none; }
+}
+/* On phones the diagram is too small for readable seat names; the initials carry it */
+@media (max-width: 640px) { .agent-diagram .seat-name { display: none; } }
+
+/* ───────────── Site header: floating glass bar ───────────── */
+.glass-bar {
+  position: relative; isolation: isolate; border-radius: 18px;
+  background: linear-gradient(180deg, rgba(30,36,46,.55), rgba(13,17,23,.42));
+  backdrop-filter: blur(22px) saturate(1.7); -webkit-backdrop-filter: blur(22px) saturate(1.7);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.09), inset 0 -1px 0 rgba(255,255,255,.02), 0 12px 40px -18px rgba(0,0,0,.7);
+}
+/* Hairline border that's brighter along the top, like light catching the edge of glass */
+.glass-bar::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none; z-index: -1;
+  background: linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.04) 45%, rgba(147,197,253,.12));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
+}
+/* A soft light that follows the pointer along the bar */
+.glass-bar::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: -1; opacity: 0; transition: opacity .4s;
+  background: radial-gradient(240px 80px at var(--gx, 50%) 0%, rgba(147,197,253,.16), transparent 70%);
+}
+.glass-bar:hover::after { opacity: 1; }
+.glass-bar.is-scrolled {
+  /* Heavier frost once content scrolls underneath, so headings behind never compete with the nav */
+  /* A solid tint plus a sheen layer: a translucent gradient alone let headings behind show through */
+  background: linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,0) 60%), rgba(16,21,28,.93);
+  backdrop-filter: blur(30px) saturate(1.8); -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.1), 0 18px 50px -16px rgba(0,0,0,.85), 0 0 0 1px rgba(59,130,246,.06);
+}
+/* The pill behind the hovered / current nav item */
+.glass-pill {
+  background: linear-gradient(180deg, rgba(255,255,255,.11), rgba(255,255,255,.04));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14), inset 0 0 0 1px rgba(255,255,255,.06), 0 4px 14px -6px rgba(59,130,246,.55);
+}
+@media (prefers-reduced-motion: reduce) {
+  .glass-bar, .glass-pill { transition: none !important; }
+}
+
+/* ───────────── Glass system ─────────────
+   Frosted surfaces shared across the site and the room. Keep backdrop-filter off any element that
+   renders fixed-position children (dialogs, toasts): it would become their containing block. */
+
+/* Cards on the site screens */
+.glass-card {
+  background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.018));
+  backdrop-filter: blur(18px) saturate(1.5); -webkit-backdrop-filter: blur(18px) saturate(1.5);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 18px 40px -26px rgba(0,0,0,.85);
+}
+/* Every cursor-glow card gets frosted too; :where() keeps it below any Tailwind background or shadow
+   a card sets for itself */
+:where(.spotlight) {
+  backdrop-filter: blur(16px) saturate(1.4); -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+}
+
+/* Dialogs, menus, toasts and the sign-in card: thicker frost so text on them stays crisp */
+.glass-modal {
+  background: linear-gradient(180deg, rgba(30,36,46,.80), rgba(13,17,23,.86));
+  backdrop-filter: blur(28px) saturate(1.6); -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid rgba(255,255,255,.1);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.1), 0 40px 100px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(59,130,246,.05);
+}
+/* The scrim behind a dialog blurs the page instead of just darkening it */
+.glass-overlay {
+  background: rgba(1,4,9,.45);
+  backdrop-filter: blur(8px) saturate(1.2); -webkit-backdrop-filter: blur(8px) saturate(1.2);
+  animation: page-in .2s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) { .glass-overlay { animation: none; } }
+/* Empty timeline: hide the track so the "No checkpoints yet" note isn't struck through */
+.app .track:has(> p)::before { display: none; }
+
+/* Profile avatar: a ring in the user's colour that slowly turns */
+.profile-ring {
+  background: conic-gradient(from var(--spin), var(--ring, #3b82f6), #06b6d4, #a371f7, var(--ring, #3b82f6));
+  animation: spin-border 8s linear infinite; filter: drop-shadow(0 0 14px color-mix(in srgb, var(--ring, #3b82f6) 45%, transparent));
+}
+@media (prefers-reduced-motion: reduce) { .profile-ring { animation: none; } }
+
+/* ───────────── Feed: Agent / Team windows ───────────── */
+.feed-badge { min-width: 16px; padding: 1px 5px; border-radius: 8px; background: var(--conflict); color: #fff; font: 600 9.5px/14px var(--font-mono); text-align: center; letter-spacing: 0; }
+.feed-empty { margin: 24px 8px; text-align: center; font-size: 12.5px; color: var(--faint); }
+
+/* A run of agent steps */
+.work-card { border-radius: 12px; border: 1px solid rgba(255,255,255,.07); background: rgba(255,255,255,.025); padding: 10px 12px; animation: item-in .35s ease-out both; }
+.work-card.live { border-color: color-mix(in srgb, var(--coder) 40%, transparent); background: linear-gradient(180deg, color-mix(in srgb, var(--coder) 8%, transparent), rgba(255,255,255,.02)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--coder) 8%, transparent); }
+.work-head { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin-bottom: 6px; }
+.work-head .av { width: 22px; height: 22px; font-size: 10px; margin: 0; border: 0; }
+.work-more { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 4px 30px; font-size: 11px; color: var(--muted); background: none; border: 0; padding: 0; }
+.work-more:hover { color: var(--ink); }
+.work-steps { list-style: none; margin: 0; padding: 0 0 0 30px; display: grid; gap: 4px; }
+.work-step { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); min-width: 0; }
+.work-step.pending { color: var(--ink); }
+
+/* What the agent is doing right now, pinned above the message box */
+.working-now {
+  display: flex; align-items: center; gap: 8px; padding: 7px 14px; font-size: 12px; color: var(--ink);
+  border-top: 1px solid rgba(255,255,255,.06); background: color-mix(in srgb, var(--coder) 8%, transparent);
+}

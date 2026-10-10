@@ -194,6 +194,32 @@ async def test_coder_builds_approved_tasks(setup):
     await registry.shutdown_all()
 
 
+async def test_token_usage_reaches_the_room_after_every_coder_turn(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    logs: dict[str, InMemoryEventLog] = {}
+    monkeypatch.setattr(room_registry, "get_event_log", lambda rid: logs.setdefault(rid, InMemoryEventLog(rid)))
+    llm = FakeLLM()
+    sent: list[dict[str, Any]] = []
+
+    async def publish(room_id: str, message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    registry = RoomRegistry(runtime_factory=lambda actor: RoomRuntime(actor, llm, publish=publish, max_turns=3))
+    actor = await new_room(registry, llm, logs)
+    llm.push(
+        tool_reply(("write_file", {"path": "a.txt", "content": "a\n"})),
+        tool_reply(("finish_task", {"summary": "done"})),
+    )
+    await actor.approve_plan_items(["t1"], "alice")
+    await until(lambda: of_type(logs[actor.room_id], EventType.CHECKPOINT_CREATED))
+
+    # Each turn costs 15 tokens: the meter moves turn by turn, not in one jump when the task ends
+    used = [m["payload"]["tokens_used"] for m in sent if m["type"] == "budget.updated"]
+    assert len(used) >= 2 and used[-1] - used[-2] == 15
+    assert (await actor.budget.get_status())["tokens_used"] == used[-1]
+    await registry.shutdown_all()
+
+
 @pytest.mark.asyncio
 async def test_a_change_asked_for_after_the_plan_is_done_gets_built(setup):
     registry, llm, logs, _ = setup

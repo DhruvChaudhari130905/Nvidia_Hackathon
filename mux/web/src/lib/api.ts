@@ -1,7 +1,7 @@
 // API client for REST commands
-import type { AiRole, Invite, InviteResult, McpToolSetting, RoomAi, RoomMcp, RoomSkill, Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
+import type { PlanName, UserPlan, AiRole, Invite, InviteResult, McpToolSetting, RoomAi, RoomMcp, RoomSkill, Room, Message, MessageTo, PlanItem, Conflict, Question, Budget, Checkpoint, User, Membership } from '@/types';
 
-import { createDemoRoom, deleteDemoRoom, demoMessageEvent, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq } from './demo';
+import { createDemoRoom, deleteDemoRoom, demoMessageEvent, demoPlan, getDemoRoom, isDemoMode, listDemoRooms, nextDemoSeq, setDemoPlan } from './demo';
 import { getSocket } from './socket';
 import { getAccessToken } from './supabase';
 
@@ -14,6 +14,7 @@ async function demoFetch<T>(path: string, options: RequestInit): Promise<T> {
   // Query strings (`/close?reason=…`) don't change which call this is
   const roomMatch = path.split('?')[0].match(/^\/rooms\/([^/]+)(\/.*)?$/);
 
+  if (path === '/me/plan') return (method === 'PUT' ? setDemoPlan(body.plan) : demoPlan()) as T;
   if (path === '/rooms' && method === 'GET') return listDemoRooms() as T;
   if (path === '/rooms' && method === 'POST') return createDemoRoom(body.description) as T;
   if (roomMatch && !roomMatch[2] && method === 'GET') return getDemoRoom(roomMatch[1]) as T;
@@ -70,6 +71,10 @@ async function fetchWithAuth<T>(path: string, options: RequestInit = {}): Promis
 export const api = {
   // Rooms
   listRooms: () => fetchWithAuth<Room[]>('/rooms'),
+
+  // Plan: no payment step yet, switching applies straight away
+  getPlan: () => fetchWithAuth<UserPlan>('/me/plan'),
+  setPlan: (plan: PlanName) => fetchWithAuth<UserPlan>('/me/plan', { method: 'PUT', body: JSON.stringify({ plan }) }),
   getRoom: (id: string) => fetchWithAuth<Room>(`/rooms/${id}`),
   createRoom: (description: string, domain_role: 'pm' | 'design' | 'eng', password?: string) =>
     fetchWithAuth<Room>('/rooms', {

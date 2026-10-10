@@ -100,7 +100,7 @@ class RoomRuntime:
         publish: Optional[Publish] = None,
         vote_timeout: float = 60.0,
         question_timeout: float = 300.0,
-        max_turns: int = 25,
+        max_turns: int = 40,
         model_error_interval: float = 60.0,
     ) -> None:
         self.actor = actor
@@ -508,9 +508,8 @@ class RoomRuntime:
             async with McpToolset(executor, servers, ask=ask_first, on_unavailable=unavailable) as toolset:
                 loop = CoderLoop(self.llm, _Narrated(self.actor, toolset), _Boundary(self.actor), toolset.schemas(),
                                  max_turns=max(self.max_turns, REVIEW_MAX_TURNS) if kind == "review" else self.max_turns,
-                                 on_text_delta=self._delta(task_id))
+                                 on_text_delta=self._delta(task_id), on_usage=lambda usage: self._spend(usage, CODER))
                 result = await loop.run_task(CoderTask(task_id, item["title"]), await self._context(item, executor.can_build, kind=kind, skills=skills))
-            await self._spend(result.usage, CODER)
             outcome = (result.status, result.summary)
             await self.actor.post_notice("agent.text", {"task_id": task_id, "text": result.summary}, CODER)
             if asked:
@@ -595,8 +594,18 @@ class RoomRuntime:
         return cast(DomainRole, role) if role in ("pm", "design", "eng") else None
 
     async def _spend(self, usage: Usage, user_id: str) -> None:
-        if usage.total:
-            await self.actor.record_tokens(usage.total, user_id)
+        if not usage.total:
+            return
+        await self.actor.record_tokens(usage.total, user_id)
+        # The log only stores budget changes at the cap (pause/resume), so live usage goes out unstored
+        if self.publish is not None:
+            b = await self.actor.budget.get_status()
+            await self.publish(self.actor.room_id, ephemeral(
+                self.actor.room_id, self.actor.sequence, "budget.updated", user_id,
+                {"tokens_used": b["tokens_used"], "runs_used": b["sandbox_runs_used"],
+                 "tokens_cap": b["token_cap"], "runs_cap": b["sandbox_run_cap"]},
+                datetime.now(timezone.utc).isoformat(),
+            ))
 
     async def _reply(self, text: str) -> None:
         await self.actor.post_notice("coordinator.reply", {

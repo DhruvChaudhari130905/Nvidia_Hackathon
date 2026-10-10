@@ -105,6 +105,17 @@ export interface RoomSkill {
   missing: boolean;
 }
 
+// The signed-in user's plan (GET /me/plan). room_limit null: no limit
+export type PlanName = 'free' | 'pro' | 'enterprise';
+export interface UserPlan {
+  plan: PlanName;
+  label: string;
+  room_limit: number | null;
+  token_cap: number;
+  run_cap: number;
+  rooms_owned: number;
+}
+
 export interface RoomAi {
   source: 'room' | 'server' | 'none';
   provider: string | null;
@@ -219,10 +230,24 @@ export interface Presence {
   last_seen: string;
 }
 
+// One step of the agent's work, shown in the Agent window (from tool.called / tool.result / build.result /
+// task.started / task.finished events)
+export interface AgentActivity {
+  id: string;
+  kind: 'task' | 'tool' | 'build' | 'done';
+  label: string;
+  detail?: string;
+  tool?: string;
+  ok?: boolean;
+  pending?: boolean;
+  ts: string;
+}
+
 export interface RoomState {
   room: Room;
   plan: PlanItem[];
   messages: Message[];
+  activity: AgentActivity[];
   conflicts: Conflict[];
   questions: Question[];
   files: Map<string, { hash: string; version: number }>;

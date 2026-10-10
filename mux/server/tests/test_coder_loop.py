@@ -300,22 +300,22 @@ async def test_repeated_tool_call_stops_loop():
         [
             reply(
                 tool_call(
-                    "read_file",
-                    {"path": "App.tsx"},
+                    "web_search",
+                    {"query": "vite config"},
                     call_id="1",
                 )
             ),
             reply(
                 tool_call(
-                    "read_file",
-                    {"path": "App.tsx"},
+                    "web_search",
+                    {"query": "vite config"},
                     call_id="2",
                 )
             ),
             reply(
                 tool_call(
-                    "read_file",
-                    {"path": "App.tsx"},
+                    "web_search",
+                    {"query": "vite config"},
                     call_id="3",
                 )
             ),
@@ -441,6 +441,19 @@ async def test_usage_is_summed_over_turns():
 
 
 @pytest.mark.asyncio
+async def test_usage_is_reported_after_every_turn():
+    seen: list[Usage] = []
+
+    async def on_usage(usage: Usage) -> None:
+        seen.append(usage)
+
+    llm = FakeLLM([usage_reply(text="thinking"), usage_reply(tool_call("finish_task", {"summary": "ok"}))])
+    await CoderLoop(llm, FakeTools(), FakeActor(), [], on_usage=on_usage).run_task(CoderTask("t1", "x"), [])
+
+    assert [(u.prompt_tokens, u.completion_tokens) for u in seen] == [(10, 5), (10, 5)]
+
+
+@pytest.mark.asyncio
 async def test_failed_finish_task_does_not_end_the_task():
     async def handler(name: str, arguments: dict[str, Any]) -> Any:
         if arguments.get("summary"):
@@ -538,8 +551,12 @@ async def test_files_read_earlier_stay_readable_so_the_coder_does_not_ping_pong(
 async def test_alternating_repeats_without_progress_are_a_loop():
     from mux.agents.coder.escalation import EscalationState
     state = EscalationState()
-    calls = [("read_file", {"path": "a"}), ("read_file", {"path": "b"})] * 2 + [("read_file", {"path": "a"})]
+    calls = [("web_search", {"query": "a"}), ("web_search", {"query": "b"})] * 2 + [("web_search", {"query": "a"})]
     assert [state.record_tool_call(n, a) for n, a in calls] == [False, False, False, False, True]
+    # Reads get more room (compaction asks the model to re-read dropped files): six reads of one file stop it
+    state = EscalationState()
+    reads = [("read_file", {"path": "a"}), ("read_file", {"path": "b"})] * 5 + [("read_file", {"path": "a"})]
+    assert [state.record_tool_call(n, a) for n, a in reads] == [False] * 10 + [True]
     # A change in between is progress: build, edit, build, edit, build never trips it
     state = EscalationState()
     progress = [("run_build", {}), ("edit_file", {"path": "a"})] * 3
@@ -551,3 +568,34 @@ def test_loading_a_skill_again_is_never_a_loop():
     state = EscalationState()
     calls = [("use_skill", {"name": "tdd"})] * 4 + [("read_skill_file", {"name": "tdd", "path": "a.md"})] * 4
     assert not any(state.record_tool_call(n, a) for n, a in calls)
+
+
+@pytest.mark.asyncio
+async def test_rereading_a_file_is_nudged_not_stopped():
+    """Compaction tells the coder to re-read dropped files; a third read must not kill the task (room_5670563118f4)."""
+    reads = [reply(tool_call("read_file", {"path": "App.tsx"}, call_id=str(i))) for i in range(3)]
+    llm = FakeLLM([*reads, reply(tool_call("finish_task", {"summary": "done"}, call_id="9"))])
+    tools = FakeTools()
+    result = await CoderLoop(llm, tools, FakeActor(), []).run_task(CoderTask("t1", "Inspect files"), [])
+    assert result.status == "done"
+    third_read = [m for m in llm.calls[-1].messages if m.get("role") == "tool"][2]["content"]
+    assert "Stop exploring" in third_read
+
+
+@pytest.mark.asyncio
+async def test_endless_rereading_still_stops():
+    reads = [reply(tool_call("read_file", {"path": "App.tsx"}, call_id=str(i))) for i in range(6)]
+    result = await CoderLoop(FakeLLM([*reads]), FakeTools(), FakeActor(), []).run_task(CoderTask("t1", "Inspect files"), [])
+    assert result.status == "stopped" and result.summary == "blocked: repeated tool call"
+
+
+@pytest.mark.asyncio
+async def test_aliased_rereads_count_towards_the_same_nudge():
+    """`view` and `read_file` of one file are the same action for the repeat guard."""
+    calls = [("view", {"path": "App.tsx"}), ("read_file", {"path": "App.tsx"}), ("read", {"path": "App.tsx"})]
+    replies = [reply(tool_call(n, a, call_id=str(i))) for i, (n, a) in enumerate(calls)]
+    llm = FakeLLM([*replies, reply(tool_call("finish_task", {"summary": "done"}, call_id="9"))])
+    result = await CoderLoop(llm, FakeTools(), FakeActor(), []).run_task(CoderTask("t1", "Inspect files"), [])
+    assert result.status == "done"
+    third = [m for m in llm.calls[-1].messages if m.get("role") == "tool"][2]["content"]
+    assert "Stop exploring" in third

@@ -7,7 +7,7 @@ import {
   BookOpen, Search, ArrowRight, ArrowLeft, LayoutPanelLeft, Tags, Vote, MessageCircleQuestion, ListChecks, Code2,
   History, Gauge, Users, Github, Check, ThumbsUp, ThumbsDown, PlayCircle, PlusCircle, Keyboard, X,
 } from 'lucide-react';
-import { ShaderBackground, SiteHeader, SiteFooter, useInView } from '@/components/shell';
+import { ShaderBackground, SiteHeader, SiteFooter, useInView, HeroBackdrop, HERO_TITLE, trackHeroSpot } from '@/components/shell';
 import { setDemoMode } from '@/lib/demo';
 import {
   BudgetDial, ExportPipeline, LabelPlayground, PlanLifecycle, QuestionCountdown, RewindSlider, RolesMatrix, RoomDiagram, VoteSimulator,
@@ -334,20 +334,16 @@ export default function DocsPage() {
 
       <main className="relative z-10 w-full flex-1 pt-16">
         {/* Hero */}
-        <section className="relative overflow-hidden px-gutter pb-16 pt-14 md:px-space-xl">
-          <div className="pointer-events-none absolute inset-0 opacity-40" style={{ backgroundImage: 'linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px)', backgroundSize: '44px 44px', maskImage: 'radial-gradient(ellipse at 30% 40%, black 20%, transparent 70%)', WebkitMaskImage: 'radial-gradient(ellipse at 30% 40%, black 20%, transparent 70%)' }} />
-          <div className="float-slow pointer-events-none absolute -left-20 top-10 h-72 w-72 rounded-full bg-primary/15 blur-3xl" />
-          <div className="float-slower pointer-events-none absolute right-0 top-24 h-80 w-80 rounded-full bg-secondary/10 blur-3xl" />
+        <section onPointerMove={trackHeroSpot} className="relative isolate overflow-hidden px-gutter pb-16 pt-16 md:px-space-xl md:pt-20">
+          <HeroBackdrop />
 
           <div className="relative mx-auto grid max-w-6xl items-center gap-space-xl lg:grid-cols-[1.25fr_1fr]">
-            <div className="animate-fade-up">
-              <div className="mb-space-md inline-flex items-center gap-space-sm rounded-full border border-primary/20 bg-primary/10 px-space-md py-space-xs text-label-md text-primary">
-                <BookOpen className="h-4 w-4" /> Documentation · {SECTIONS.length} interactive guides
+            <div className="hero-in">
+              <div className="mb-space-lg inline-flex items-center gap-space-sm rounded-full border border-white/10 bg-surface-container/70 px-space-md py-space-xs text-label-md text-on-surface-variant backdrop-blur-md">
+                <BookOpen className="h-4 w-4 text-secondary" /> {SECTIONS.length} interactive guides
               </div>
-              <h1 className="mb-space-md font-headline text-4xl font-bold leading-tight tracking-tight md:text-5xl">
-                How a <span className="text-shimmer">MUX</span> room works
-              </h1>
-              <p className="mb-space-lg max-w-xl text-body-lg text-on-surface-variant">
+              <h1 className={`mb-space-lg text-balance ${HERO_TITLE}`}>How a MUX room works</h1>
+              <p className="mb-space-xl max-w-xl text-pretty font-headline text-lg leading-relaxed text-on-surface-variant">
                 Eight people steering, one agent building. Every guide below has a live demo — click, type and drag to see it happen.
               </p>
               <div className="group relative max-w-xl">

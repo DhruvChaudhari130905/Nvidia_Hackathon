@@ -513,6 +513,7 @@ export default function RoomPage() {
             collapsed={!panels.feed}
             onCollapse={() => togglePanel('feed', false)}
             messages={state.messages}
+            activity={state.activity}
             currentUser={currentUser}
             onSendMessage={handleSendMessage}
             canPostTeam={currentUserMembership.permission !== 'viewer'}

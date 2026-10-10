@@ -4,7 +4,7 @@
 //
 // There are a few ready-made sample projects, each with its own plan, feed, decisions, files and
 // preview. Rooms the user creates start blank and are kept in localStorage.
-import type { AppEvent, Membership, MessageTo, PlanItem, Room, User } from '@/types';
+import type { PlanName, UserPlan, AppEvent, Membership, MessageTo, PlanItem, Room, User } from '@/types';
 
 const DEMO_FLAG_KEY = 'mux_demo';
 const CREATED_ROOMS_KEY = 'mux_demo_rooms';
@@ -17,6 +17,23 @@ export function isDemoMode(): boolean {
   } catch {
     return false;
   }
+}
+
+// True when demo mode was switched on in this browser (an "Open the demo" button), as opposed to a
+// whole deployment built with NEXT_PUBLIC_DEMO_MODE. Only the browser flag can be exited.
+export function isBrowserDemo(): boolean {
+  if (process.env.NEXT_PUBLIC_DEMO_MODE === 'true' || typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(DEMO_FLAG_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+// Leave the demo and go back to your own rooms (or the sign-in page if you aren't signed in)
+export function exitDemo() {
+  setDemoMode(false);
+  window.location.href = '/dashboard';
 }
 
 export function setDemoMode(on: boolean) {
@@ -505,4 +522,33 @@ export function demoMessageEvent(roomId: string, text: string, to: MessageTo = '
   } as AppEvent;
   rememberSent(event);
   return event;
+}
+
+// Plans in demo mode: the same limits as the server's mux/plans.py, remembered in this browser
+const DEMO_PLAN_KEY = 'mux_demo_plan';
+const PLAN_LIMITS: Record<PlanName, Omit<UserPlan, 'rooms_owned'>> = {
+  free: { plan: 'free', label: 'Free Developer', room_limit: 3, token_cap: 1_000_000, run_cap: 100 },
+  pro: { plan: 'pro', label: 'Team Pro', room_limit: null, token_cap: 5_000_000, run_cap: 500 },
+  enterprise: { plan: 'enterprise', label: 'Enterprise', room_limit: null, token_cap: 20_000_000, run_cap: 2_000 },
+};
+
+export function demoPlan(): UserPlan {
+  let name: PlanName = 'free';
+  try {
+    const saved = window.localStorage.getItem(DEMO_PLAN_KEY);
+    if (saved === 'pro' || saved === 'enterprise') name = saved;
+  } catch {
+    // storage unavailable: Free
+  }
+  const owned = listDemoRooms().filter(r => r.owner_id === DEMO_USER.id).length;
+  return { ...PLAN_LIMITS[name], rooms_owned: owned };
+}
+
+export function setDemoPlan(name: PlanName): UserPlan {
+  try {
+    window.localStorage.setItem(DEMO_PLAN_KEY, name);
+  } catch {
+    // storage unavailable: the choice lasts until reload
+  }
+  return demoPlan();
 }

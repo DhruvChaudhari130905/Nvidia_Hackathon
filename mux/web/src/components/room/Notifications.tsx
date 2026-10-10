@@ -63,7 +63,7 @@ export function NotificationBell() {
       </button>
 
       {open && (
-        <div className="item-in absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--panel)] font-sans shadow-2xl">
+        <div className="item-in absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-2xl glass-modal font-sans">
           <div className="flex items-center justify-between border-b border-[var(--line)] px-3 py-2">
             <span className="text-[12.5px] font-semibold text-[var(--ink)]">{showSettings ? 'Notification settings' : 'Notifications'}</span>
             <div className="flex items-center gap-0.5">
@@ -167,7 +167,7 @@ export function NotificationToasts() {
       {toasts.map(n => {
         const Icon = ICONS[n.category];
         return (
-          <div key={n.id} className="item-in pointer-events-auto flex gap-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-3 font-sans shadow-2xl">
+          <div key={n.id} className="item-in pointer-events-auto flex gap-2.5 rounded-2xl glass-modal p-3 font-sans">
             <Icon className={`mt-0.5 h-4 w-4 flex-none ${TONE[n.tone]}`} />
             <button type="button" className="min-w-0 flex-1 text-left" onClick={() => { markRead(n.id); dismissToast(n.id); n.onClick?.(); }}>
               <span className="block text-[12.5px] font-medium text-[var(--ink)]">{n.title}</span>

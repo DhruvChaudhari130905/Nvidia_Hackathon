@@ -14,7 +14,7 @@ const EVENTS: { dot: string; who: string; text: string }[] = [
 ];
 
 export function ActivityTicker() {
-  const row = EVENTS.map((e, i) => (
+  const pill = (e: (typeof EVENTS)[number], i: number) => (
     <span
       key={i}
       className="mx-space-sm flex flex-none items-center gap-space-sm rounded-full border border-outline-variant/30 bg-surface-container/80 px-space-md py-1.5 font-code text-code-sm"
@@ -23,13 +23,20 @@ export function ActivityTicker() {
       <span className="text-on-surface">{e.who}</span>
       <span className="text-on-surface-variant">{e.text}</span>
     </span>
-  ));
+  );
+  const row = EVENTS.map(pill);
+  // Second lane runs the other way, offset so the two lanes never line up
+  const rowB = [...EVENTS.slice(4), ...EVENTS.slice(0, 4)].map(pill);
 
   return (
-    <div className="marquee-mask overflow-hidden py-space-md" aria-label="Recent activity across rooms">
+    <div className="marquee-mask space-y-space-sm overflow-hidden py-space-md" aria-label="Recent activity across rooms">
       <div className="marquee">
         {row}
         <span aria-hidden="true" className="contents">{row}</span>
+      </div>
+      <div className="marquee reverse" aria-hidden="true">
+        {rowB}
+        {rowB}
       </div>
     </div>
   );

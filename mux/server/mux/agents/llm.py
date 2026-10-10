@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Protocol
@@ -101,8 +102,11 @@ class OpenAILLM:
             choice = resp.choices[0]
             calls = [_tool_call(tc.id, tc.function.name, tc.function.arguments)
                      for tc in choice.message.tool_calls or []]
+            content = choice.message.content or ""
+            if not calls:
+                calls, content = text_tool_calls(content)
             return LLMReply(
-                text = choice.message.content or "",
+                text = content,
                 model = model,
                 usage = _usage(resp.usage),
                 tool_calls = calls,
@@ -139,7 +143,10 @@ class OpenAILLM:
             if choice.finish_reason:
                 finish = choice.finish_reason
         calls = [_tool_call(s["id"], s["name"], s["args"]) for _, s in sorted(slots.items())]
-        return LLMReply(text="".join(text), model=model, usage=usage, tool_calls=calls, finish_reason=finish)
+        content = "".join(text)
+        if not calls:
+            calls, content = text_tool_calls(content)
+        return LLMReply(text=content, model=model, usage=usage, tool_calls=calls, finish_reason=finish)
 
 
 def TokenFactoryLLM() -> OpenAILLM:
@@ -154,6 +161,53 @@ def TokenFactoryLLM() -> OpenAILLM:
 
 def _usage(u) -> Usage:
     return Usage(u.prompt_tokens, u.completion_tokens) if u else Usage()
+
+_TEXT_CALL_TAG = re.compile(r"<tool_call>\s*", re.IGNORECASE)
+_TEXT_CALL_NAME = re.compile(r"(?:functions\.)?([A-Za-z_]\w*)\s*\(", re.IGNORECASE)
+_TEXT_CALL_END = re.compile(r"\s*\)?\s*(?:</tool_call>)?")
+
+
+def text_tool_calls(text: str) -> tuple[list[ToolCall], str]:
+    """Tool calls a model wrote into its message instead of the tools API, and the text without them.
+
+    Nemotron sometimes answers with `<tool_call> FUNCTIONS.write_file({...})` or
+    `<tool_call>{"name": ..., "arguments": {...}}</tool_call>` as plain text, which wasted the turn
+    (room_db8a580bd5b9). A call whose JSON is cut off (the reply hit max_tokens) is left as text.
+    """
+    if "<tool_call>" not in text.lower():
+        return [], text
+    decoder = json.JSONDecoder()
+    calls: list[ToolCall] = []
+    kept: list[str] = []
+    pos = 0
+    for tag in _TEXT_CALL_TAG.finditer(text):
+        if tag.start() < pos:
+            continue
+        start = tag.end()
+        name, args = "", None
+        named = _TEXT_CALL_NAME.match(text, start)
+        try:
+            if named:
+                name = named.group(1)
+                args, end = decoder.raw_decode(text, named.end())
+            else:
+                obj, end = decoder.raw_decode(text, start)
+                if isinstance(obj, dict):
+                    name = str(obj.get("name") or "")
+                    args = obj.get("arguments", obj.get("parameters", {}))
+                    if isinstance(args, str):
+                        args = json.loads(args)
+        except ValueError:
+            continue
+        if not name or not isinstance(args, dict):
+            continue
+        tail = _TEXT_CALL_END.match(text, end)
+        kept.append(text[pos:tag.start()])
+        pos = tail.end() if tail else end
+        calls.append(ToolCall(id=f"text_call_{len(calls)}", name=name, arguments=args, raw_arguments=json.dumps(args)))
+    kept.append(text[pos:])
+    return calls, "".join(kept).strip() if calls else text
+
 
 def _tool_call(id:str, name: str, raw: str | None) -> ToolCall:
     raw = raw or ""

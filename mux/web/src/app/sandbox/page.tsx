@@ -9,6 +9,50 @@ import { useRouter } from 'next/navigation';
 import { setDemoMode } from '@/lib/demo';
 import { useRequireAuth } from '@/lib/useRequireAuth';
 
+const IDEAS = ['A habit tracker with streaks', 'A landing page for my bakery', 'A REST API for a todo list', 'A markdown notes app'];
+
+// Closing card: describe a project in a sentence and go straight to the create-room dialog with it filled in
+function DescribeIt() {
+  const router = useRouter();
+  const [text, setText] = useState('');
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const desc = text.trim();
+    router.push(desc ? `/dashboard?new=1&desc=${encodeURIComponent(desc)}` : '/dashboard?new=1');
+  };
+  return (
+    <CtaCard title="Have something else in mind?" text="Describe it in a sentence and the agent will pick the stack for you.">
+      <form onSubmit={submit} className="w-full max-w-2xl">
+        <div className="group relative">
+          <div className="pointer-events-none absolute -inset-px rounded-2xl bg-gradient-to-r from-primary/60 via-secondary/60 to-[#a371f7]/60 opacity-0 blur transition-opacity duration-300 group-focus-within:opacity-100" />
+          <div className="relative flex items-center gap-space-sm rounded-2xl border border-white/10 bg-surface-container-lowest p-1.5 pl-space-md">
+            <label htmlFor="describe-it" className="sr-only">What do you want to build?</label>
+            <input
+              id="describe-it"
+              value={text}
+              onChange={e => setText(e.target.value)}
+              maxLength={500}
+              placeholder="What do you want to build?"
+              className="min-w-0 flex-1 bg-transparent py-2 text-body-lg text-on-surface outline-none placeholder:text-outline"
+            />
+            <button type="submit" className={`${BTN_PRIMARY} flex-none`}>
+              <PlusCircle className="h-4 w-4" /> Create a room
+            </button>
+          </div>
+        </div>
+        <div className="mt-space-md flex flex-wrap justify-center gap-1.5">
+          {IDEAS.map(idea => (
+            <FilterChip key={idea} on={text === idea} onClick={() => setText(idea)}>{idea}</FilterChip>
+          ))}
+        </div>
+        <Link href="/docs#code" className="mt-space-md inline-flex items-center gap-1.5 text-body-md text-on-surface-variant transition-colors hover:text-on-surface">
+          <Terminal className="h-4 w-4" /> Learn the Code tab
+        </Link>
+      </form>
+    </CtaCard>
+  );
+}
+
 // Sandbox screen: starter templates and the runtimes rooms build on.
 // No stitch screen exists for it; it follows the Active Rooms layout.
 
@@ -136,7 +180,7 @@ export default function SandboxPage() {
   const hero = (
     <PageHero
       badge={<><Terminal className="h-4 w-4" /> Sandbox · {STARTER_TEMPLATES.length} starter templates</>}
-      title={<>Instant <span className="text-shimmer">sandboxes</span></>}
+      title="Instant sandboxes"
       lead="Pick a starter and MUX spins up a room with a running sandbox, a live preview and an agent ready to build."
       aside={buildLog}
     >
@@ -250,14 +294,7 @@ export default function SandboxPage() {
       </div>
 
       <Reveal>
-        <CtaCard title="Have something else in mind?" text="Describe it in a sentence and the agent will pick the stack for you.">
-          <Link href="/dashboard?new=1" className={BTN_PRIMARY}>
-            <PlusCircle className="h-4 w-4" /> Create a room
-          </Link>
-          <Link href="/docs#code" className={BTN_GHOST}>
-            <Terminal className="h-4 w-4" /> Learn the Code tab
-          </Link>
-        </CtaCard>
+        <DescribeIt />
       </Reveal>
     </AppShell>
   );

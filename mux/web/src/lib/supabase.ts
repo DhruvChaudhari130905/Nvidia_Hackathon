@@ -34,6 +34,7 @@ export function loginHref(): string {
 }
 
 export async function signInWithProvider(provider: 'google' | 'github', next = '/dashboard') {
+  setDemoMode(false);
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider,
     options: {
@@ -47,6 +48,7 @@ export async function signInWithProvider(provider: 'google' | 'github', next = '
 }
 
 export async function signInWithEmail(email: string, password: string) {
+  setDemoMode(false);
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) throw error;
   return data;
@@ -54,6 +56,7 @@ export async function signInWithEmail(email: string, password: string) {
 
 // Returns needsConfirmation when the project asks new users to confirm their email first
 export async function signUpWithEmail(email: string, password: string, name: string, next = '/dashboard') {
+  setDemoMode(false);
   const { data, error } = await supabase.auth.signUp({
     email,
     password,

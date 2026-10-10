@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Callable, Optional, cast
 from mux.events.log import EventLog
 from mux.rooms.actor import RoomActor, ActorConfig, create_room_actor
 from mux.events.models import BaseEvent, EventType, RoomCreatedEvent
+from mux.plans import apply_plan_caps
 
 if TYPE_CHECKING:
     from mux.rooms.runtime import RoomRuntime
@@ -161,6 +162,7 @@ class RoomRegistry:
             )
             await self._start_runtime(actor)
             await actor.init_room(name or room_id, description, domain_role)
+            await apply_plan_caps(actor)  # the owner's plan sets this room's budget
             self._actors[room_id] = actor
 
             logger.info(f"Created room {room_id} with owner {owner_id}")
@@ -220,6 +222,8 @@ class RoomRegistry:
         )
 
         await actor.replay(events)
+        # Raised caps live in memory only, so a rebuilt room gets its owner's plan budget again
+        await apply_plan_caps(actor)
         await actor.start()
         self._actors[room_id] = actor
         await self._start_runtime(actor)

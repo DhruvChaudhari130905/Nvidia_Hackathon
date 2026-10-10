@@ -2,7 +2,10 @@
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { Zap, Code2, Users, ShieldCheck, CheckCircle2, Minus, Check, ChevronDown, Calculator, PlayCircle, Mail } from 'lucide-react';
+import { Zap, Code2, Users, ShieldCheck, CheckCircle2, Minus, Check, ChevronDown, Calculator, PlayCircle, Mail, ArrowRight } from 'lucide-react';
+import { api } from '@/lib/api';
+import { getUser } from '@/lib/supabase';
+import type { PlanName, UserPlan } from '@/types';
 import { BTN_GHOST, BTN_PRIMARY, CARD, CtaCard, IconTile, PageHero, Reveal, ShaderBackground, SiteHeader, SiteFooter, Spotlight } from '@/components/shell';
 
 // Pricing screen (stitch: mux_pricing_live_wallpaper_pro)
@@ -11,7 +14,8 @@ type Billing = 'monthly' | 'annual';
 
 const COMPARISON: { feature: string; free: React.ReactNode; pro: React.ReactNode; enterprise: React.ReactNode }[] = [
   { feature: 'Active Rooms', free: '3 rooms', pro: 'Unlimited', enterprise: 'Unlimited + VPC' },
-  { feature: 'Monthly AI Tokens', free: '100k', pro: '2M / user', enterprise: 'Custom / Unlimited' },
+  { feature: 'AI tokens per room', free: '1M', pro: '5M', enterprise: '20M' },
+  { feature: 'Builds per room', free: '100', pro: '500', enterprise: '2,000' },
   { feature: 'Build Workers', free: 'Standard', pro: 'Priority Nebius', enterprise: 'Dedicated Runners' },
   { feature: 'GitHub Integration', free: false, pro: true, enterprise: true },
   { feature: 'Real-Time Voice & Cursors', free: false, pro: true, enterprise: true },
@@ -30,6 +34,10 @@ const FAQS = [
   {
     q: 'How do build workers function?',
     a: 'MUX spins up lightning-fast isolated build containers (powered by Nebius) to test your React, Vite, and Node applications instantly whenever code changes or tasks merge.',
+  },
+  {
+    q: 'What happens when a room runs out of tokens or builds?',
+    a: "The room pauses instead of overspending: the agent stops picking up new work, and nothing built so far is lost. Every room shows its token and build usage in its top bar, so you can see the limit coming.",
   },
   {
     q: 'Can I cancel or change my plan anytime?',
@@ -117,8 +125,8 @@ function Estimator({ annual }: { annual: boolean }) {
           <div key={`${monthly}-${annual}`} className="item-in font-headline text-2xl font-bold tabular-nums text-primary">${monthly.toLocaleString()}</div>
         </div>
         <div className="rounded-xl border border-white/10 bg-surface/60 p-space-md">
-          <div className="font-code text-[11px] uppercase tracking-[0.15em] text-outline">AI tokens</div>
-          <div className="font-headline text-2xl font-bold tabular-nums text-secondary">{seats * 2}M</div>
+          <div className="font-code text-[11px] uppercase tracking-[0.15em] text-outline">Every room gets</div>
+          <div className="font-headline text-2xl font-bold tabular-nums text-secondary">5M tokens</div>
         </div>
         <div className="col-span-2 rounded-xl border border-white/10 bg-surface/60 p-space-md text-body-sm text-on-surface-variant">
           {annual ? (
@@ -132,9 +140,72 @@ function Estimator({ annual }: { annual: boolean }) {
   );
 }
 
+interface PlanButtonProps {
+  target: PlanName;
+  current: PlanName | null;
+  signedIn: boolean;
+  busy: PlanName | null;
+  onPick: (plan: PlanName) => void;
+  label: string;
+  className: string;
+}
+
+// The button at the bottom of each plan card. No payment step yet: picking a plan applies it at once.
+function PlanButton({ target, current, signedIn, busy, onPick, label, className }: PlanButtonProps) {
+  if (!signedIn) {
+    return <Link href="/login?next=/pricing" className={className}>{label}</Link>;
+  }
+  if (current === target) {
+    return (
+      <span className="flex w-full items-center justify-center gap-space-xs rounded-full border border-[#3fb950]/40 bg-[#3fb950]/10 py-space-md text-label-md font-bold text-[#56d364]">
+        <Check className="h-4 w-4" /> Your current plan
+      </span>
+    );
+  }
+  return (
+    <button type="button" onClick={() => onPick(target)} disabled={busy !== null} className={`${className} disabled:cursor-wait disabled:opacity-60`}>
+      {busy === target ? 'Switching…' : label}
+    </button>
+  );
+}
+
+function formatCap(n: number): string {
+  return n >= 1_000_000 ? `${n / 1_000_000}M` : n.toLocaleString();
+}
+
 export default function PricingPage() {
   const [billing, setBilling] = useState<Billing>('monthly');
   const annual = billing === 'annual';
+
+  // The signed-in user's plan, so each card can show "current" or switch to it
+  const [signedIn, setSignedIn] = useState(false);
+  const [plan, setPlan] = useState<UserPlan | null>(null);
+  const [busy, setBusy] = useState<PlanName | null>(null);
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    getUser()
+      .then(u => {
+        if (!u) return;
+        setSignedIn(true);
+        api.getPlan().then(setPlan).catch(() => { /* backend down: the cards still work as links */ });
+      })
+      .catch(() => {});
+  }, []);
+  const pickPlan = async (target: PlanName) => {
+    setBusy(target);
+    setNotice(null);
+    try {
+      const next = await api.setPlan(target);
+      setPlan(next);
+      const rooms = next.room_limit === null ? 'unlimited rooms' : `up to ${next.room_limit} rooms`;
+      setNotice({ ok: true, text: `You're on ${next.label} now: ${rooms}, ${formatCap(next.token_cap)} AI tokens and ${formatCap(next.run_cap)} builds per room.` });
+    } catch (error) {
+      setNotice({ ok: false, text: error instanceof Error ? `Couldn't switch plans: ${error.message}` : "Couldn't switch plans." });
+    } finally {
+      setBusy(null);
+    }
+  };
+  const current = plan?.plan ?? null;
 
   // Sliding highlight behind the selected billing option
   const monthlyRef = useRef<HTMLButtonElement>(null);
@@ -167,7 +238,7 @@ export default function PricingPage() {
         <PageHero
           centered
           badge={<><Zap className="h-4 w-4" /> Simple, predictable pricing</>}
-          title={<>Scale your rooms <span className="text-shimmer">without limits</span></>}
+          title="Scale your rooms without limits"
           lead="Start free, upgrade when your team does. Every plan gets instant sandboxes, AI coding agents and real-time collaboration."
         >
           <div className="relative flex items-center gap-space-md rounded-full border border-white/10 bg-surface-container/80 p-1.5 backdrop-blur" role="group" aria-label="Billing period">
@@ -188,6 +259,22 @@ export default function PricingPage() {
 
         {/* Plans */}
         <section className="mx-auto box-content max-w-6xl px-gutter pb-20 md:px-space-xl">
+          {notice && (
+            <div
+              role="status"
+              className={`item-in mb-space-lg flex flex-wrap items-center justify-between gap-space-md rounded-2xl glass-modal px-space-lg py-space-md text-body-md ${notice.ok ? 'text-on-surface' : 'text-error'}`}
+            >
+              <span className="flex items-center gap-space-sm">
+                {notice.ok && <CheckCircle2 className="h-5 w-5 flex-none text-[#56d364]" />}
+                {notice.text}
+              </span>
+              {notice.ok && (
+                <Link href="/dashboard" className="flex items-center gap-1.5 font-semibold text-primary-fixed hover:underline">
+                  Go to your rooms <ArrowRight className="h-4 w-4" />
+                </Link>
+              )}
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-space-lg md:grid-cols-3">
             <Reveal className="h-full">
             <Spotlight className="group flex h-full flex-col justify-between rounded-2xl border border-white/10 bg-surface-container/70 p-space-xl backdrop-blur transition-all duration-300 hover:-translate-y-1 hover:border-primary/40 hover:bg-surface-container">
@@ -200,27 +287,27 @@ export default function PricingPage() {
                   Perfect for trying out real-time coding rooms and small personal projects.
                 </p>
                 <div className="mb-space-lg flex items-baseline gap-space-xs">
-                  <span className="font-headline text-[40px] font-bold tracking-tight text-on-surface">$0</span>
+                  <span className="font-headline text-5xl font-bold tracking-[-0.04em] text-on-surface">$0</span>
                   <span className="text-body-sm text-on-surface-variant">/ month</span>
                 </div>
                 <div className="mb-space-xl space-y-space-md">
                   <Feature>Up to 3 active collaboration rooms</Feature>
-                  <Feature>100k AI tokens / month</Feature>
+                  <Feature>1M AI tokens &amp; 100 builds per room</Feature>
                   <Feature>Standard build workers</Feature>
                   <Feature muted>GitHub automatic PR sync</Feature>
                 </div>
               </div>
-              <Link
-                href="/login"
+              <PlanButton
+                target="free" current={current} signedIn={signedIn} busy={busy} onPick={pickPlan}
+                label={signedIn ? 'Switch to Free' : 'Get Started Free'}
                 className="w-full rounded-full border border-white/15 py-space-md text-center text-label-md font-bold text-on-surface transition-colors hover:border-primary/50 hover:bg-white/[0.04]"
-              >
-                Get Started Free
-              </Link>
+              />
             </Spotlight>
             </Reveal>
 
             <Reveal delay={100} className="relative z-10 h-full">
             <Spotlight className="group flex h-full flex-col justify-between rounded-2xl border border-primary/50 bg-gradient-to-br from-primary/15 via-surface-container/90 to-secondary/10 p-space-xl shadow-[0_20px_60px_-15px_rgba(59,130,246,0.5)] backdrop-blur transition-all duration-300 hover:-translate-y-1 md:scale-[1.02]">
+              <span className="live-border" aria-hidden="true" />
               <div className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-gradient-to-r from-primary to-secondary px-space-md py-0.5 font-code text-code-sm font-bold uppercase tracking-wider text-on-primary shadow-[0_0_20px_rgba(59,130,246,0.6)]">
                 Most Popular
               </div>
@@ -233,23 +320,22 @@ export default function PricingPage() {
                   For professional teams building fast with real-time AI and continuous sync.
                 </p>
                 <div className="mb-space-lg flex items-baseline gap-space-xs">
-                  <span key={billing} className="item-in inline-block font-headline text-[40px] font-bold tracking-tight text-on-surface">{annual ? `$${PRO_ANNUAL}` : `$${PRO_MONTHLY}`}</span>
+                  <span key={billing} className="stat-roll inline-block font-headline text-5xl font-bold tracking-[-0.04em] text-on-surface">{annual ? `$${PRO_ANNUAL}` : `$${PRO_MONTHLY}`}</span>
                   <span key={`${billing}-period`} className="item-in text-body-sm text-on-surface-variant">{annual ? '/ user / month, billed annually' : '/ user / month'}</span>
                 </div>
                 <div className="mb-space-xl space-y-space-md">
                   <Feature>Unlimited concurrent rooms</Feature>
-                  <Feature>2M AI tokens / user / month</Feature>
+                  <Feature>5M AI tokens &amp; 500 builds per room</Feature>
                   <Feature>Priority Nebius build workers</Feature>
                   <Feature>Full GitHub PR &amp; repo export</Feature>
                   <Feature>Live voice &amp; cursor presence</Feature>
                 </div>
               </div>
-              <Link
-                href="/login"
+              <PlanButton
+                target="pro" current={current} signedIn={signedIn} busy={busy} onPick={pickPlan}
+                label="Upgrade to Team Pro"
                 className="btn-shine w-full rounded-full bg-primary py-space-md text-center text-label-md font-bold text-on-primary shadow-md transition-all hover:bg-primary/90 hover:shadow-[0_0_25px_rgba(59,130,246,0.6)]"
-              >
-                Start 14-Day Pro Trial
-              </Link>
+              />
             </Spotlight>
             </Reveal>
 
@@ -264,22 +350,21 @@ export default function PricingPage() {
                   Advanced security, custom AI model routing, and dedicated infrastructure.
                 </p>
                 <div className="mb-space-lg flex items-baseline gap-space-xs">
-                  <span className="font-headline text-[40px] font-bold tracking-tight text-on-surface">Custom</span>
+                  <span className="font-headline text-5xl font-bold tracking-[-0.04em] text-on-surface">Custom</span>
                   <span className="text-body-sm text-on-surface-variant">/ tailored</span>
                 </div>
                 <div className="mb-space-xl space-y-space-md">
                   <Feature iconClass="text-secondary">Everything in Team Pro</Feature>
-                  <Feature iconClass="text-secondary">Unlimited AI tokens (BYO keys option)</Feature>
+                  <Feature iconClass="text-secondary">20M AI tokens &amp; 2,000 builds per room</Feature>
                   <Feature iconClass="text-secondary">SSO / SAML &amp; Audit logs</Feature>
                   <Feature iconClass="text-secondary">Dedicated VPC &amp; custom runners</Feature>
                 </div>
               </div>
-              <a
-                href="mailto:sales@mux.dev?subject=MUX%20Enterprise"
+              <PlanButton
+                target="enterprise" current={current} signedIn={signedIn} busy={busy} onPick={pickPlan}
+                label="Upgrade to Enterprise"
                 className="w-full rounded-full border border-white/15 py-space-md text-center text-label-md font-bold text-on-surface transition-colors hover:border-primary/50 hover:bg-white/[0.04]"
-              >
-                Contact Sales
-              </a>
+              />
             </Spotlight>
             </Reveal>
           </div>

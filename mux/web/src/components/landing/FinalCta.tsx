@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { PlusCircle, ArrowRight } from 'lucide-react';
-import { prefersReducedMotion, Reveal, ShaderBackground, useTicker } from '@/components/shell';
+import { Magnetic, prefersReducedMotion, Reveal, ShaderBackground, useTicker } from '@/components/shell';
 
 // Closing call-to-action: full-bleed live wallpaper, a headline that types out what you could
 // build, a live "building right now" counter, and buttons that lean toward the cursor.
@@ -44,23 +44,6 @@ function useTypedIdea() {
   return text;
 }
 
-// Button that drifts slightly toward the cursor while hovered
-function Magnetic({ children }: { children: React.ReactElement }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onMove = (e: React.MouseEvent) => {
-    const el = ref.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    el.style.transform = `translate(${(e.clientX - r.left - r.width / 2) * 0.18}px, ${(e.clientY - r.top - r.height / 2) * 0.25}px)`;
-  };
-  const onLeave = () => { if (ref.current) ref.current.style.transform = ''; };
-  return (
-    <div ref={ref} onMouseMove={onMove} onMouseLeave={onLeave} className="transition-transform duration-200 ease-out">
-      {children}
-    </div>
-  );
-}
-
 export function FinalCta() {
   const idea = useTypedIdea();
   const tick = useTicker(2200);
@@ -97,7 +80,7 @@ export function FinalCta() {
           </span>
         </div>
 
-        <h2 className="mb-space-md font-headline text-4xl font-bold leading-tight tracking-tight md:text-6xl">
+        <h2 className="mb-space-md font-display text-5xl font-bold leading-[0.98] tracking-[-0.04em] md:text-7xl">
           Ready to build
           <br />
           <span className="text-shimmer">{idea}</span>

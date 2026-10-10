@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { MessageSquareText, Users, Rocket } from 'lucide-react';
-import { Reveal } from '@/components/shell';
+import { SplitHeading } from '@/components/shell';
 
 // Three steps joined by a line that draws itself as you scroll; each step lights up when the
 // line reaches it.
@@ -56,10 +56,9 @@ export function HowItWorks() {
 
   return (
     <section className="relative px-gutter py-24 md:px-16 lg:px-24">
-      <Reveal className="mx-auto mb-16 max-w-2xl text-center">
-        <span className="mb-space-sm block font-code text-label-md uppercase tracking-widest text-secondary">How it works</span>
-        <h2 className="font-headline text-3xl font-bold tracking-tight md:text-4xl">From idea to repo in three moves</h2>
-      </Reveal>
+      <div className="mx-auto mb-20 max-w-3xl text-center">
+        <SplitHeading text="From idea to repo in three moves" className="font-display text-4xl font-bold leading-[1.02] tracking-[-0.035em] md:text-6xl" />
+      </div>
 
       <div ref={ref} className="relative mx-auto max-w-3xl">
         <div className="absolute bottom-0 left-6 top-0 w-px bg-white/10 md:left-1/2">
@@ -89,7 +88,7 @@ export function HowItWorks() {
                   }`}
                 >
                   <span className="font-code text-code-sm text-secondary">Step 0{i + 1}</span>
-                  <h3 className="mb-space-sm mt-1 font-headline text-headline-lg text-on-surface">{step.title}</h3>
+                  <h3 className="mb-space-sm mt-1 font-display text-2xl font-bold tracking-[-0.02em] text-on-surface">{step.title}</h3>
                   <p className="mb-space-md text-body-md text-on-surface-variant">{step.body}</p>
                   <span className="inline-block rounded-full bg-white/[0.04] px-space-md py-1.5 font-code text-code-sm text-on-surface-variant ring-1 ring-white/10">
                     {step.sample}

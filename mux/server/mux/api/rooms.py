@@ -17,6 +17,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, model_validator
 
+from mux.api.account import owned_room_actors
+from mux.plans import get_plan
 from mux.api.deps import get_room_actor_dep, get_current_user, require_editor, require_owner, require_viewer, User
 from mux.events.file_log import stored_room_ids
 from mux.events.wire import membership_view
@@ -270,7 +272,14 @@ async def create_room(
     request: RoomCreateRequest,
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Create a room with the current user as owner."""
+    """Create a room with the current user as owner, within their plan's room limit."""
+    plan = get_plan(current_user.id)
+    if plan.room_limit is not None and len(await owned_room_actors(current_user.id)) >= plan.room_limit:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Your {plan.label} plan includes {plan.room_limit} rooms you own. "
+                   "Upgrade on the Pricing page to create more, or close a room you no longer need.",
+        )
     registry = get_registry()
     room_id = f"room_{uuid.uuid4().hex[:12]}"
 

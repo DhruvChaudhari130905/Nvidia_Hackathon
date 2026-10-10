@@ -4,6 +4,14 @@
 import type { WebContainer as WebContainerInstance } from '@webcontainer/api';
 import { starterProjectFiles } from './starterProject';
 
+// Must match the page's Cross-Origin-Embedder-Policy from next.config.ts: `credentialless` lets the
+// preview load public images from other sites; Safari only supports `require-corp`
+function coepMode(): 'credentialless' | 'require-corp' {
+  const ua = navigator.userAgent;
+  const safari = /Safari/.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|EdgiOS|Edg|Firefox|Android/.test(ua);
+  return safari ? 'require-corp' : 'credentialless';
+}
+
 // Only one WebContainer can be booted per page, so every caller shares the same boot
 let bootPromise: Promise<WebContainerInstance> | null = null;
 
@@ -12,7 +20,7 @@ export async function initWebContainer(): Promise<any> {
   if (!bootPromise) {
     // Dynamic import to avoid SSR issues
     bootPromise = import('@webcontainer/api')
-      .then(({ WebContainer }) => WebContainer.boot({ workdirName: 'project' }))
+      .then(({ WebContainer }) => WebContainer.boot({ workdirName: 'project', coep: coepMode() }))
       .catch(err => {
         bootPromise = null; // allow a retry
         throw err;
