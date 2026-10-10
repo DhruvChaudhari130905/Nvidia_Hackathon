@@ -542,3 +542,23 @@ def reset_singletons():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+@pytest.mark.asyncio
+async def test_broadcasts_go_out_in_sequence_order_even_when_earlier_ones_are_slower():
+    """Concurrent broadcasts let event 2 reach a socket before event 1; the bus then skipped event 1 for it."""
+    from types import SimpleNamespace
+
+    delivered: list[int] = []
+
+    async def on_event(event):
+        await asyncio.sleep(0.03 if event.sequence == 1 else 0)  # the first send is the slow one
+        if event.sequence == 2:
+            raise RuntimeError("socket gone")  # a failed broadcast must not hold up later ones
+        delivered.append(event.sequence)
+
+    actor = RoomActor(room_id="r", owner_id="o", event_log=MagicMock(), on_event=on_event)
+    for seq in (1, 2, 3):
+        await actor._after_append(SimpleNamespace(sequence=seq, id=f"e{seq}"))  # type: ignore[arg-type]
+    assert actor._broadcast_tail is not None
+    await asyncio.wait([actor._broadcast_tail])
+    assert delivered == [1, 3]

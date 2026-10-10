@@ -120,12 +120,14 @@ export function Feed({
   const rows = React.useMemo(() => agentRows(agentMessages, activity), [agentMessages, activity]);
   const current = [...activity].reverse().find(a => a.pending);
 
-  // Unread counts for the window you're not looking at
-  const [seen, setSeen] = React.useState({ agent: agentMessages.length, team: teamMessages.length });
+  // Unread: messages that arrived after you last looked at that window. Counting by time, not by list
+  // length, keeps the history replayed when the room opens from showing up as unread.
+  const [lastSeen, setLastSeen] = React.useState(() => ({ agent: Date.now(), team: Date.now() }));
   React.useEffect(() => {
-    setSeen(s => (win === 'agent' ? { ...s, agent: agentMessages.length } : { ...s, team: teamMessages.length }));
+    setLastSeen(s => ({ ...s, [win]: Date.now() }));
   }, [win, agentMessages.length, teamMessages.length]);
-  const unread = { agent: Math.max(0, agentMessages.length - seen.agent), team: Math.max(0, teamMessages.length - seen.team) };
+  const newer = (list: Message[], since: number) => list.filter(m => time(m.created_at) > since && m.user_id !== currentUser.id).length;
+  const unread = { agent: newer(agentMessages, lastSeen.agent), team: newer(teamMessages, lastSeen.team) };
 
   React.useEffect(() => {
     feedEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -192,11 +194,17 @@ export function Feed({
         </div>
       )}
 
-      {win === 'team' && !canPostTeam ? (
-        <div className="composer"><p className="hint">Viewers can read team notes but not post them.</p></div>
-      ) : (
-        <Composer key={win} onSend={onSendMessage} canPostTeam={canPostTeam} target={win} />
-      )}
+      {/* One message box per window, both kept mounted so a half-written message survives switching */}
+      <div hidden={win !== 'agent'}>
+        <Composer onSend={onSendMessage} canPostTeam={canPostTeam} target="agent" />
+      </div>
+      <div hidden={win !== 'team'}>
+        {canPostTeam ? (
+          <Composer onSend={onSendMessage} canPostTeam={canPostTeam} target="team" />
+        ) : (
+          <div className="composer"><p className="hint">Viewers can read team notes but not post them.</p></div>
+        )}
+      </div>
     </section>
   );
 }

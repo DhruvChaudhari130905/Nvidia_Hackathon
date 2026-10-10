@@ -200,6 +200,8 @@ class RoomActor:
         self._shutdown_event = asyncio.Event()
         self._turn_event = asyncio.Event()
         self._last_event_id: Optional[str] = None
+        # The newest broadcast; each one waits for the one before (see _after_append)
+        self._broadcast_tail: Optional[asyncio.Task[None]] = None
         # All appends go through this wrapper so every event is sequenced and broadcast
         self._log = _BroadcastingLog(event_log, self._after_append)
 
@@ -306,7 +308,16 @@ class RoomActor:
         self._last_event_id = str(event.id)
 
         if self._on_event:
-            asyncio.create_task(self._safe_callback(self._on_event, event))
+            # One task per event, chained so broadcasts go out strictly in sequence order. Run side by side,
+            # a later event could reach a socket first, and the bus (which skips seq <= the socket's last)
+            # would then drop the earlier one for that socket. The chain also keeps every task referenced.
+            self._broadcast_tail = asyncio.create_task(self._broadcast_after(self._broadcast_tail, self._on_event, event))
+
+    async def _broadcast_after(self, previous: Optional["asyncio.Task[None]"], cb: Callable[[BaseEvent], Any],
+                               event: BaseEvent) -> None:
+        if previous is not None and not previous.done():
+            await asyncio.wait([previous])  # never raises, even if the earlier broadcast failed or was cancelled
+        await self._safe_callback(cb, event)
 
     async def _safe_callback(self, cb: Callable[[BaseEvent], Any], event: BaseEvent) -> None:
         try:

@@ -230,6 +230,12 @@ class UrlResponse(BaseModel):
 get_room_actor = get_room_actor_dep
 
 
+async def _holder_name(actor: RoomActor, path: str) -> str:
+    """Who holds a file's lock, by name (the raw user id meant nothing to the person reading the error)."""
+    holder = await actor.locked_by(path)
+    return actor.member_names.get(holder, "a teammate") if holder else "a teammate"
+
+
 def accepted(actor: RoomActor) -> Accepted:
     return Accepted(seq=actor.sequence)
 
@@ -689,7 +695,7 @@ async def lock_file(
 ) -> Accepted:
     path = request.path.lstrip("/")
     if not await actor.lock_file(path, current_user.id):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{path} is being edited by {await actor.locked_by(path)}")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{path} is being edited by {await _holder_name(actor, path)}")
     return accepted(actor)
 
 
@@ -726,7 +732,7 @@ async def save_file(
     except PathConflictError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     if outcome == "locked":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{path} is being edited by {await actor.locked_by(path)}")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{path} is being edited by {await _holder_name(actor, path)}")
     if outcome == "stale":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

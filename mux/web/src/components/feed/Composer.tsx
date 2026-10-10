@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, FormEvent } from 'react';
+import React, { useId, useState, FormEvent } from 'react';
 import type { MessageTo } from '@/types';
 
 interface ComposerProps {
@@ -16,6 +16,7 @@ interface ComposerProps {
 const MENTION_START = /^@\w/;
 
 export function Composer({ onSend, disabled, canPostTeam = true, target: fixedTarget }: ComposerProps) {
+  const inputId = useId(); // the Agent and Team windows each have a box, so the id must be unique
   const [text, setText] = useState('');
   const [to, setTo] = useState<MessageTo>('agent');
   // Set once the person picks a side themselves, so the @mention switch doesn't fight them
@@ -57,11 +58,11 @@ export function Composer({ onSend, disabled, canPostTeam = true, target: fixedTa
         </div>
       )}
       <form onSubmit={handleSubmit}>
-        <label htmlFor="msgInput" className="mono" hidden>
+        <label htmlFor={inputId} className="mono" hidden>
           Message
         </label>
         <input
-          id="msgInput"
+          id={inputId}
           autoComplete="off"
           placeholder={target === 'team' ? 'Note to the team…' : 'Message the agent…'}
           value={text}
